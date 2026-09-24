@@ -9,6 +9,7 @@
 #include "bambu_bus_ams.h"
 #include "ADC_DMA.h"
 #include "Debug_log.h"
+#include "nvm_save_sched.h"
 #include <string.h>
 
 WS2812_class SYS_RGB;
@@ -48,9 +49,10 @@ void RGB_update()
     RGBOUT[3].updata();
 }
 
-static uint8_t g_fil_dirty = 0;
+static nvm_job g_fil_job[4];
 static uint8_t g_loaded_ch = 0xFF;
-static uint8_t g_state_dirty = 0;
+static nvm_job g_state_job;
+static nvm_wait g_nvm_wait;
 
 static inline void ram_to_flashinfo(uint8_t fil, Flash_FilamentInfo* o)
 {
@@ -102,13 +104,15 @@ bool ams_datas_read()
 
 void ams_datas_set_need_to_save()
 {
-    g_fil_dirty = 0x0Fu;
+    const uint32_t now = time_ticks32();
+    for (uint8_t i = 0; i < 4u; i++)
+        nvm_job_changed(&g_fil_job[i], now);
 }
 
 void ams_datas_set_need_to_save_filament(uint8_t filament_idx)
 {
     if (filament_idx >= 4u) return;
-    g_fil_dirty |= (uint8_t)(1u << filament_idx);
+    nvm_job_changed(&g_fil_job[filament_idx], time_ticks32());
 }
 
 void ams_state_set_loaded(uint8_t filament_ch)
@@ -116,7 +120,7 @@ void ams_state_set_loaded(uint8_t filament_ch)
     if (filament_ch >= 4u) return;
     if (g_loaded_ch != 0xFFu) return;
     g_loaded_ch = filament_ch;
-    g_state_dirty = 1u;
+    nvm_job_changed(&g_state_job, time_ticks32());
 }
 
 void ams_state_set_unloaded(uint8_t filament_ch)
@@ -124,7 +128,7 @@ void ams_state_set_unloaded(uint8_t filament_ch)
     if (g_loaded_ch == 0xFFu) return;
     if (filament_ch < 4u && g_loaded_ch != filament_ch) return;
     g_loaded_ch = 0xFFu;
-    g_state_dirty = 1u;
+    nvm_job_changed(&g_state_job, time_ticks32());
 }
 
 uint8_t ams_state_get_loaded(void)
@@ -132,35 +136,34 @@ uint8_t ams_state_get_loaded(void)
     return g_loaded_ch;
 }
 
-static void ams_state_save_run()
+static void ams_state_save_run(uint32_t now)
 {
-    if (!g_state_dirty) return;
-
-    if (Flash_AMS_state_write(g_loaded_ch))
-        g_state_dirty = 0u;
+    nvm_job_result(&g_state_job, Flash_AMS_state_write(g_loaded_ch), now);
 }
 
-void ams_datas_save_run()
+static void ams_datas_save_run(uint8_t fil, uint32_t now)
 {
-    if (!g_fil_dirty) return;
+    Flash_FilamentInfo info;
+    ram_to_flashinfo(fil, &info);
 
-    uint8_t fil = 0xFFu;
-    for (uint8_t i = 0; i < 4u; i++)
-    {
-        if (g_fil_dirty & (uint8_t)(1u << i))
-        {
-            fil = i;
-            break;
-        }
-    }
+    nvm_job_result(&g_fil_job[fil], Flash_AMS_filament_write(fil, &info), now);
+}
 
-    if (fil == 0xFFu) return;
+// Called on every main-loop pass: runs at most one NVM job, and only in a quiet bus window
+// (nvm_save_sched.h), never in the pass that has just started a reply.
+static void ams_nvm_save_run()
+{
+    const bool rx_idle = bus_port_to_host.rx_idle(time_ticks32());
+    const bool tx_idle = bus_port_to_host.tx_idle();
+    const uint32_t now = time_ticks32(); // after the idle checks, before the stamps
+    const nvm_bus b = nvm_bus_from_samples(rx_idle, tx_idle, now, bus_port_to_host.last_rx_tick(),
+                                           bus_port_to_host.last_tx_end_tick());
 
-    Flash_FilamentInfo now;
-    ram_to_flashinfo(fil, &now);
-
-    if (Flash_AMS_filament_write(fil, &now))
-        g_fil_dirty &= (uint8_t)~(1u << fil);
+    const int job = nvm_pick_job(&g_state_job, g_fil_job, &g_nvm_wait, &b, now);
+    if (job == NVM_JOB_STATE)
+        ams_state_save_run(now);
+    else if (job != NVM_JOB_NONE)
+        ams_datas_save_run((uint8_t)job, now);
 }
 
 int main(void)
@@ -251,8 +254,8 @@ int main(void)
             if (bambubus_stu == bambubus_package_type::heartbeat)
                 SYS_RGB.set_RGB(0x38, 0x35, 0x32, 0);
 
-            ams_datas_save_run();
-            ams_state_save_run();
+            // Only while the host link is up, as before: pending writes wait out an offline spell.
+            ams_nvm_save_run();
         }
         else
         {

@@ -38,6 +38,7 @@ private:
     uint8_t *bus_irq_data_ptr = recv_data_buf[0];
     int drop_bytes = 0;
     volatile uint32_t rx_last_tick = 0;
+    volatile uint32_t tx_end_tick = 0;
     void (*port_send_datas)(uint8_t *data, uint16_t len);
 
     void rx_resync()
@@ -71,6 +72,7 @@ public:
         bus_irq_data_ptr = recv_data_buf[0];
         drop_bytes = 0;
         rx_last_tick = 0;
+        tx_end_tick = 0;
         bus_recv_data_ptr = recv_data_buf[1];
         idle = true;
         send_data_len = 0;
@@ -109,6 +111,41 @@ public:
     inline __attribute__((always_inline)) uint32_t last_rx_tick() const
     {
         return rx_last_tick;
+    }
+
+    // TC ISR: the last byte of our reply has left the shifter and DE is released. now: STK_CNTL.
+    inline __attribute__((always_inline)) void tx_done(uint32_t now)
+    {
+        tx_end_tick = now;
+        idle = true;
+    }
+
+    // STK_CNTL at the end of our last TX. Tracked apart from RX because our own bytes are not
+    // necessarily echoed to RX.
+    inline __attribute__((always_inline)) uint32_t last_tx_end_tick() const
+    {
+        return tx_end_tick;
+    }
+
+    // No reply in flight and none built but not yet started.
+    inline __attribute__((always_inline)) bool tx_idle() const
+    {
+        return idle && send_data_len == 0;
+    }
+
+    // No received frame waiting for the main loop, and the parser is not inside a frame that is
+    // still arriving. A frame cut short leaves _index/drop_bytes set until the next byte resyncs
+    // the parser; once the line has been quiet past the resync gap that frame is dead, so it
+    // counts as idle. _index and drop_bytes are ISR-owned, hence the volatile reads.
+    inline __attribute__((always_inline)) bool rx_idle(uint32_t now) const
+    {
+        if (recv_data_len != 0) return false;
+        if (*(const volatile int *)&_index == 0 && *(const volatile int *)&drop_bytes == 0)
+            return true;
+        // A byte the ISR stamped just after `now` was read is arriving right now, not 2^32 old.
+        const uint32_t last = rx_last_tick;
+        if ((uint32_t)(last - now) <= BUS_RX_RESYNC_GAP_TICKS) return false;
+        return (uint32_t)(now - last) > BUS_RX_RESYNC_GAP_TICKS;
     }
 
     void irq(uint8_t data)
