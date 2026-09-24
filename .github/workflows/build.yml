@@ -10,7 +10,10 @@ permissions:
 
 env:
   PLATFORMIO_VERSION: "6.1.19"
-  # V10.5 release commit: its sources must still rebuild to the published firmwares/ binaries.
+  # platform.py installs the Linux RISC-V toolchain from this branch (not pinned in platformio.ini).
+  TOOLCHAIN_REPO: https://github.com/Community-PIO-CH32V/toolchain-riscv-linux.git
+  TOOLCHAIN_BRANCH: gcc12
+  # V10.5 release commit: its sources and platformio.ini must still rebuild to its published binaries.
   UPSTREAM_V10_5: fbff4e3
   # Fail the A1 build if the image grows past 56 KiB (upload limit is 60 KiB, NVM lives above it).
   IMAGE_BUDGET_BYTES: "57344"
@@ -26,10 +29,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      # PlatformIO never re-fetches an installed git package, so the toolchain head must be part
+      # of the cache key or a cached copy would hide upstream toolchain changes.
+      - name: Resolve toolchain head
+        id: toolchain
+        run: echo "sha=$(git ls-remote "$TOOLCHAIN_REPO" "refs/heads/$TOOLCHAIN_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/cache@v6
         with:
           path: ~/.platformio
-          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}-${{ steps.toolchain.outputs.sha }}
 
       - run: pip install "platformio==${PLATFORMIO_VERSION}"
 
@@ -41,10 +50,12 @@ jobs:
           bin=.pio/build/a1_solo_autoload_rgboff/firmware.bin
           size=$(stat -c %s "$bin")
           sha=$(sha256sum "$bin" | cut -d' ' -f1)
+          echo "sha256 ${sha}  size ${size}"
           {
             echo "### a1_solo_autoload_rgboff"
             echo "- size: ${size} bytes (budget ${IMAGE_BUDGET_BYTES})"
             echo "- sha256: \`${sha}\`"
+            echo "- toolchain-riscv-linux: \`$(git -C ~/.platformio/packages/toolchain-riscv rev-parse HEAD)\`"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$size" -gt "$IMAGE_BUDGET_BYTES" ]; then
             echo "::error::firmware.bin is ${size} bytes, over the ${IMAGE_BUDGET_BYTES}-byte budget"
@@ -53,7 +64,8 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: oh-my-bmcu-a1_solo_autoload_rgboff-${{ github.sha }}
+          # On pull_request github.sha is the synthetic merge commit; name artifacts after the real head.
+          name: oh-my-bmcu-a1_solo_autoload_rgboff-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.event_name }}
           path: |
             .pio/build/a1_solo_autoload_rgboff/firmware.bin
             .pio/build/a1_solo_autoload_rgboff/firmware.elf
@@ -71,20 +83,32 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Resolve toolchain head
+        id: toolchain
+        run: echo "sha=$(git ls-remote "$TOOLCHAIN_REPO" "refs/heads/$TOOLCHAIN_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/cache@v6
         with:
           path: ~/.platformio
-          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}-${{ steps.toolchain.outputs.sha }}
 
       - run: pip install "platformio==${PLATFORMIO_VERSION}"
 
-      - name: Build the 12 SOLO images from the V10.5 sources with this branch's toolchain pins
+      - name: Prepare the V10.5 tree with this branch's platform pins
         run: |
           git worktree add --detach /tmp/v10.5 HEAD
-          # Replace src/ entirely so files added after V10.5 cannot leak into this build.
+          # Replace src/ entirely so files added after V10.5 cannot leak into this build, and use
+          # V10.5's own platformio.ini so fork build-flag changes cannot look like toolchain drift.
           rm -rf /tmp/v10.5/src
           git -C /tmp/v10.5 checkout "$UPSTREAM_V10_5" -- src
-          BUILD_ONLY_SOLO=1 bash /tmp/v10.5/build_all_firmwares.sh
+          git show "$UPSTREAM_V10_5:platformio.ini" > /tmp/v10.5/platformio.ini
+          python3 scripts/apply_platform_pins.py platformio.ini /tmp/v10.5/platformio.ini
+          git show "$UPSTREAM_V10_5:firmwares/manifest.txt" > /tmp/v10.5-reference-manifest.txt
 
-      - name: Compare with the published manifest
-        run: python3 scripts/compare_manifest.py /tmp/v10.5/firmwares/manifest.txt firmwares/manifest.txt
+      - name: Build the 12 SOLO images
+        run: BUILD_ONLY_SOLO=1 bash /tmp/v10.5/build_all_firmwares.sh
+
+      - name: Compare with the manifest published in V10.5
+        run: |
+          python3 scripts/compare_manifest.py /tmp/v10.5/build/firmwares/manifest.txt /tmp/v10.5-reference-manifest.txt --expect-count 12
+          echo "- V10.5 SOLO images reproduced with toolchain-riscv-linux \`$(git -C ~/.platformio/packages/toolchain-riscv rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
