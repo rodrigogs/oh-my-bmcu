@@ -8,6 +8,8 @@
 // release must latch again. While latched, the BMCU must not push the filament of the printer's
 // active channel in any printer state: its on_use control and hold_load in before_on_use are
 // braked (jam_latch_brakes).
+// The 20 s full-force push limit (jam_push_limit_pass) must count full-force push time at any
+// buffer level, restart below full force, brake the channel at exactly 20 s and saturate there.
 
 #include <stdint.h>
 #include <string.h>
@@ -516,6 +518,108 @@ static void test_before_on_use_pushes_again_from_the_pass_it_releases(void)
     TEST_ASSERT_TRUE(pushing);
 }
 
+// ---- 20 s full-force push limit ----
+
+#define DIR_RETRACT_POS 1.0f // MOTOR_CONTROL[ch].dir: a retract is +, so a push is -
+
+// ms_per_pass passes at full force (900 PWM push) until the limit brakes, at most max_passes.
+// Returns the number of passes it took, or -1.
+static int32_t push_until_braked(uint32_t *hi, float time_s, int32_t max_passes)
+{
+    for (int32_t i = 1; i <= max_passes; i++)
+        if (jam_push_limit_pass(hi, -900, DIR_RETRACT_POS, time_s)) return i;
+    return -1;
+}
+
+static void test_push_limit_full_force_is_a_push_above_800(void)
+{
+    TEST_ASSERT_TRUE(jam_push_is_full(-801, 1.0f));
+    TEST_ASSERT_TRUE(jam_push_is_full(-1000, 1.0f));
+    TEST_ASSERT_FALSE(jam_push_is_full(-800, 1.0f));
+    TEST_ASSERT_FALSE(jam_push_is_full(900, 1.0f)); // a retract
+    TEST_ASSERT_FALSE(jam_push_is_full(0, 1.0f));
+    TEST_ASSERT_TRUE(jam_push_is_full(801, -1.0f));
+    TEST_ASSERT_FALSE(jam_push_is_full(-900, -1.0f));
+    TEST_ASSERT_FALSE(jam_push_is_full(-900, 0.0f)); // direction not known yet
+    TEST_ASSERT_FALSE(jam_push_is_full(900, 0.0f));
+}
+
+static void test_push_limit_brakes_at_20s(void)
+{
+    uint32_t hi = 0u;
+    TEST_ASSERT_EQUAL_INT32(20000, push_until_braked(&hi, 0.001f, 30000));
+    TEST_ASSERT_EQUAL_UINT32(JAM_PUSH_HI_MAX_US, hi);
+    TEST_ASSERT_EQUAL_UINT32(20000000u, JAM_PUSH_HI_MAX_US);
+
+    // At motor_motion_run's 200 ms step cap and at 4.8 ms passes. Each step is rounded to whole
+    // microseconds: a pass of 18010 SysTick ticks at 18 MHz (time_E as motor_motion_run computes
+    // it) is 1000.56 us, counted as 1001 us, so the limit comes after 19981 passes.
+    hi = 0u;
+    TEST_ASSERT_EQUAL_INT32(100, push_until_braked(&hi, 0.2f, 1000));
+    hi = 0u;
+    TEST_ASSERT_EQUAL_INT32(4167, push_until_braked(&hi, 0.0048f, 10000));
+    hi = 0u;
+    TEST_ASSERT_EQUAL_INT32(19981, push_until_braked(&hi, (float)18010u / (18.0f * 1000000.0f), 30000));
+}
+
+static void test_push_limit_restarts_below_full_force(void)
+{
+    uint32_t hi = 0u;
+    TEST_ASSERT_EQUAL_INT32(-1, push_until_braked(&hi, 0.001f, 19999));
+    TEST_ASSERT_EQUAL_UINT32(19999000u, hi);
+    // One pass at 800 PWM, a retract, or no push: the count starts over.
+    const int below[] = {-800, 850, 0};
+    for (unsigned k = 0; k < sizeof(below) / sizeof(below[0]); k++)
+    {
+        TEST_ASSERT_FALSE(jam_push_limit_pass(&hi, below[k], DIR_RETRACT_POS, 0.001f));
+        TEST_ASSERT_EQUAL_UINT32(0u, hi);
+        TEST_ASSERT_EQUAL_INT32(-1, push_until_braked(&hi, 0.001f, 19999));
+    }
+    TEST_ASSERT_EQUAL_INT32(1, push_until_braked(&hi, 0.001f, 10));
+}
+
+static void test_push_limit_saturates_at_20s(void)
+{
+    uint32_t hi = 19900000u;
+    TEST_ASSERT_TRUE(jam_push_limit_pass(&hi, -900, DIR_RETRACT_POS, 0.2f)); // 20.1 s
+    TEST_ASSERT_EQUAL_UINT32(JAM_PUSH_HI_MAX_US, hi);
+    for (int i = 0; i < 100000; i++)
+        TEST_ASSERT_TRUE(jam_push_limit_pass(&hi, -900, DIR_RETRACT_POS, 0.2f));
+    TEST_ASSERT_EQUAL_UINT32(JAM_PUSH_HI_MAX_US, hi);
+    // No time step (the first pass after boot): nothing added.
+    hi = 5000u;
+    TEST_ASSERT_FALSE(jam_push_limit_pass(&hi, -900, DIR_RETRACT_POS, 0.0f));
+    TEST_ASSERT_EQUAL_UINT32(5000u, hi);
+}
+
+static void test_push_limit_counts_at_any_buffer_level(void)
+{
+    // A snag keeps the buffer around 40%: 450 ms below it, one reading above it, over and over, while
+    // the on_use control pushes at full force (900 PWM below 50%). The timed jam trip never fires
+    // (every dip is shorter than JAM_TRIP_MS); the 20 s limit brakes the channel silently at 20 s,
+    // the time below 40% included. Once braked and still draining, the jam trip reports it.
+    uint32_t hi = 0u;
+    int32_t braked_at = -1;
+    int32_t last_high = -1; // last pass with the buffer at or above 40%
+    int32_t t = 0;
+    for (; t < 30000 && braked_at < 0; t++)
+    {
+        const float pct = ((t % 451) == 450) ? 41.0f : 30.0f;
+        if (pct >= JAM_TRIP_PCT) last_high = t;
+        TEST_ASSERT_EQUAL_INT(JAM_EVENT_NONE, pass(ON_USE, pct));
+        if (!brake && jam_push_limit_pass(&hi, -900, DIR_RETRACT_POS, 0.001f))
+        {
+            brake = 1u; // Motion_control.cpp: g_on_use_low_latch set, g_on_use_jam_latch clear
+            braked_at = t + 1;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT32(20000, braked_at);
+    TEST_ASSERT_EQUAL_UINT8(0u, jam);
+    // The trip timer started on the pass after the last reading at 41%.
+    TEST_ASSERT_EQUAL_INT32(last_high + 1 + (int32_t)JAM_TRIP_MS - t, hold(ON_USE, 30.0f, 1000u));
+    TEST_ASSERT_EQUAL_UINT8(1u, jam);
+}
+
 // ---- Whole scenarios ----
 
 static void test_printer_unload_and_reload_do_not_release_an_uncleared_tangle(void)
@@ -590,6 +694,11 @@ int main(void)
     RUN_TEST(test_brake_decision_per_control);
     RUN_TEST(test_resume_with_before_on_use_does_not_push_into_a_held_spool);
     RUN_TEST(test_before_on_use_pushes_again_from_the_pass_it_releases);
+    RUN_TEST(test_push_limit_full_force_is_a_push_above_800);
+    RUN_TEST(test_push_limit_brakes_at_20s);
+    RUN_TEST(test_push_limit_restarts_below_full_force);
+    RUN_TEST(test_push_limit_saturates_at_20s);
+    RUN_TEST(test_push_limit_counts_at_any_buffer_level);
     RUN_TEST(test_printer_unload_and_reload_do_not_release_an_uncleared_tangle);
     RUN_TEST(test_fixed_tangle_resumes_normally_without_a_printer_command);
     RUN_TEST(test_fixed_tangle_resumes_normally_after_a_pause);
