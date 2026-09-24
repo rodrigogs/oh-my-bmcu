@@ -9,6 +9,7 @@
 #include "hal/time_hw.h"
 #include "motion_limits.h"
 #include "jam_latch.h"
+#include "dm_rearm.h"
 
 static inline float absf(float x) { return (x < 0.0f) ? -x : x; }
 static inline float clampf(float x, float a, float b)
@@ -252,7 +253,9 @@ static uint64_t dm_auto_t0_ms[4]        = {0ull,0ull,0ull,0ull};
 static float    dm_auto_remain_m[4]     = {0,0,0,0};
 static uint32_t dm_auto_last_cnt[4]     = {0,0,0,0};   // as5600_count at the last Stage-2 update
 
+// A loaded channel's key away from 'both' (dm_rearm.h): first pass (0 = none), gear position then.
 static uint64_t dm_loaded_drop_t0_ms[4] = {0ull,0ull,0ull,0ull};
+static uint32_t dm_loaded_drop_cnt[4]   = {0u,0u,0u,0u};
 
 // Time and stall limits of S2_PUSH / S2_RETRACT / S2_FAIL_RETRACT (motion_limits.h).
 static motion_guard dm_s2_guard[4];
@@ -2416,6 +2419,8 @@ static inline void stu_apply_baseline(int error, uint64_t now_ms)
 static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
 {
 #if BMCU_DM_TWO_MICROSWITCH
+    const auto &A = ams[motion_control_ams_num];
+
     for (uint8_t ch = 0; ch < kChCount; ch++)
     {
         if (!filament_channel_inserted[ch])
@@ -2434,41 +2439,36 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
 
         const uint8_t ks = MC_ONLINE_key_stu[ch];
 
+        // dm_loaded (dm_rearm.h): a loaded channel is unloaded, which arms Stage-2 again, only once
+        // the filament left both switches or the gear retracted it out of 'both'; a finished printer
+        // load marks it loaded.
+        const filament_now_position_enum pos = filament_now_position[ch];
+        const dm_host_t host = dm_host_from_motion(A.now_filament_num == ch, A.filament[ch].motion,
+                                                   (pos == filament_pulling_back) || (pos == filament_redetect));
+        const dm_rearm_event ev = dm_rearm_pass(&dm_loaded[ch], &dm_loaded_drop_t0_ms[ch], &dm_loaded_drop_cnt[ch],
+                                                ks, host, time_now, as5600_count[ch]);
+
         if (ks == 0u)
         {
             if (filament_now_position[ch] == filament_idle)
                 dm_autoload_gate[ch] = 0u;
 
-            dm_loaded[ch]            = 0u;
             dm_fail_latch[ch]        = 0u;
             dm_auto_state[ch]        = DM_AUTO_IDLE;
             dm_auto_try[ch]          = 0u;
             dm_auto_t0_ms[ch]        = 0ull;
             dm_auto_remain_m[ch]     = 0.0f;
             dm_auto_last_cnt[ch]     = 0u;
-            dm_loaded_drop_t0_ms[ch] = 0ull;
             continue;
         }
 
-        if (dm_loaded[ch] && (ks != 1u))
+        if (ev != DM_REARM_NONE) // loaded changed: the autoload starts over from IDLE
         {
-            uint64_t t0 = dm_loaded_drop_t0_ms[ch];
-            if (t0 == 0ull) dm_loaded_drop_t0_ms[ch] = time_now;
-            else if ((time_now - t0) >= 100ull)
-            {
-                dm_loaded[ch]            = 0u;
-                dm_loaded_drop_t0_ms[ch] = 0ull;
-
-                dm_auto_state[ch]    = DM_AUTO_IDLE;
-                dm_auto_try[ch]      = 0u;
-                dm_auto_t0_ms[ch]    = 0ull;
-                dm_auto_remain_m[ch] = 0.0f;
-                dm_auto_last_cnt[ch] = 0u;
-            }
-        }
-        else
-        {
-            dm_loaded_drop_t0_ms[ch] = 0ull;
+            dm_auto_state[ch]    = DM_AUTO_IDLE;
+            dm_auto_try[ch]      = 0u;
+            dm_auto_t0_ms[ch]    = 0ull;
+            dm_auto_remain_m[ch] = 0.0f;
+            dm_auto_last_cnt[ch] = 0u;
         }
     }
 #endif
