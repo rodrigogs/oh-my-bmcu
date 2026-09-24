@@ -230,31 +230,34 @@ int main(void)
         const bambubus_package_type bambubus_stu = bambubus_run();
         bus_port_to_host.send_package();
 
-        static int error = 0;
+        if (bambubus_stu == bambubus_package_type::heartbeat)
+            bus_host_device_type = host_device_type_ams;
 
-        if ((ahub_stu != ahubus_package_type::none) || (bambubus_stu != bambubus_package_type::none))
+        if (ahub_stu == ahubus_package_type::heartbeat)
+            bus_host_device_type = host_device_type_ahub;
+
+        // Only the protocol the host speaks decides: the other one never gets a heartbeat and must
+        // not mask a lost link. Before the first heartbeat the BMCU stays offline, motors stopped.
+        bool offline = true;
+        if (bus_host_device_type == host_device_type_ams)
+            offline = (bambubus_stu == bambubus_package_type::error);
+        else if (bus_host_device_type == host_device_type_ahub)
+            offline = (ahub_stu == ahubus_package_type::error);
+
+        int error = 0;
+
+        if (!offline)
         {
-            if ((ahub_stu != ahubus_package_type::error) || (bambubus_stu != bambubus_package_type::error))
-            {
-                error = 0;
+            if (bambubus_stu == bambubus_package_type::heartbeat)
+                SYS_RGB.set_RGB(0x38, 0x35, 0x32, 0);
 
-                if (bambubus_stu == bambubus_package_type::heartbeat)
-                {
-                    SYS_RGB.set_RGB(0x38, 0x35, 0x32, 0);
-                    bus_host_device_type = host_device_type_ams;
-                }
-
-                if (ahub_stu == ahubus_package_type::heartbeat)
-                    bus_host_device_type = host_device_type_ahub;
-
-                ams_datas_save_run();
-                ams_state_save_run();
-            }
-            else
-            {
-                error = -1;
-                SYS_RGB.set_RGB(0x10, 0x00, 0x00, 0);
-            }
+            ams_datas_save_run();
+            ams_state_save_run();
+        }
+        else
+        {
+            error = -1;
+            SYS_RGB.set_RGB(0x10, 0x00, 0x00, 0);
         }
 
         Motion_control_run(error);

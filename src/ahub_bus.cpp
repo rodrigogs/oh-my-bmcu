@@ -10,6 +10,7 @@
 #include "_bus_hardware.h"
 #include "ams.h"
 #include "crc_bus.h"
+#include "bus_link.h"
 
 typedef uint32_t u32_alias __attribute__((may_alias));
 
@@ -355,7 +356,7 @@ ahubus_package_type ahubus_run()
 {
     ahubus_package_type package_type = ahubus_package_type::none;
 
-    static uint32_t deadline = 0;
+    static bus_link_t ahub_link = {0u, false, false};
     const uint32_t now = time_ticks32();
 
     int rx_len = 0;
@@ -380,7 +381,7 @@ ahubus_package_type ahubus_run()
             {
             case ahubus_package_type::heartbeat:
                 ahubus_slave_get_package_heartbeat(buf);
-                deadline = now + ms_to_ticks32(1000u);
+                bus_link_heartbeat(&ahub_link, now);
                 break;
 
             case ahubus_package_type::query:
@@ -404,7 +405,8 @@ ahubus_package_type ahubus_run()
         }
     }
 
-    if ((int32_t)(now - deadline) > 0)
+    // Only a link that was up can be lost: BambuBus printers never send an AHUB heartbeat.
+    if (bus_link_poll(&ahub_link, now, ms_to_ticks32(1000u)) == BUS_LINK_LOST)
         package_type = ahubus_package_type::error;
 
     return package_type;

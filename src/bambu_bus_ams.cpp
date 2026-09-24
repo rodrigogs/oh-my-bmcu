@@ -6,14 +6,19 @@
 #include "app_api.h"
 #include "_bus_hardware.h"
 #include "crc_bus.h"
+#include "bus_link.h"
 
 uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
 static void bambubus_build_static_serial(void);
-static uint32_t bambubus_heartbeat_deadline = 0u;
+static bus_link_t bambubus_link;
+static volatile uint32_t bambubus_heartbeat_ticks = 0u;
+static volatile bool bambubus_heartbeat_pending = false;
 
+// Called from the USART1 RX IRQ; bambubus_run() feeds the stamp to bambubus_link.
 void bambubus_heartbeat_seen_fast(void)
 {
-    bambubus_heartbeat_deadline = time_ticks32() + ms_to_ticks32(1000u);
+    bambubus_heartbeat_ticks = time_ticks32();
+    bambubus_heartbeat_pending = true;
 }
 
 bool package_check_crc16(uint8_t *data, int data_length)
@@ -30,7 +35,8 @@ bool package_check_crc16(uint8_t *data, int data_length)
 void bambubus_init()
 {
     bambubus_build_static_serial();
-    bambubus_heartbeat_deadline = 0u;
+    bambubus_heartbeat_pending = false;
+    bus_link_init(&bambubus_link);
 }
 
 void package_add_crc(uint8_t *data, int send_data_length) // 为数据包添加crc校验
@@ -1183,7 +1189,7 @@ bambubus_package_type bambubus_run()
 {
     bambubus_package_type stu = bambubus_package_type::none;
 
-    static uint32_t last_hb_deadline = 0u;
+    static bool hb_unreported = false;
     const uint32_t now = time_ticks32();
 
     int rx_len = 0;
@@ -1270,22 +1276,32 @@ bambubus_package_type bambubus_run()
         }
     }
 
-    uint32_t hb_deadline = 0u;
+    bool hb_new = false;
+    uint32_t hb_ticks = 0u;
     {
         const uint32_t s = irq_save_wch();
-        hb_deadline = bambubus_heartbeat_deadline;
+        hb_new = bambubus_heartbeat_pending;
+        hb_ticks = bambubus_heartbeat_ticks;
+        bambubus_heartbeat_pending = false;
         irq_restore_wch(s);
     }
 
-    if (stu == bambubus_package_type::none && hb_deadline != last_hb_deadline)
+    if (hb_new)
     {
-        last_hb_deadline = hb_deadline;
-        if (time_diff32(hb_deadline, now) > 0)
-            stu = bambubus_package_type::heartbeat;
+        bus_link_heartbeat(&bambubus_link, hb_ticks);
+        hb_unreported = true;
     }
 
-    if (time_diff32(now, hb_deadline) > 0)
+    // Error from boot until the first heartbeat, and latched once heartbeats lapse (no 32-bit wrap
+    // flip). As before, a heartbeat is reported on the first pass without a packet; main() uses it
+    // to learn that the host speaks BambuBus.
+    if (bus_link_poll(&bambubus_link, now, ms_to_ticks32(1000u)) != BUS_LINK_ALIVE)
         stu = bambubus_package_type::error;
+    else if (stu == bambubus_package_type::none && hb_unreported)
+    {
+        hb_unreported = false;
+        stu = bambubus_package_type::heartbeat;
+    }
 
     return stu;
 }
