@@ -8,6 +8,7 @@
 #include "app_api.h"
 #include "hal/time_hw.h"
 #include "motion_limits.h"
+#include "jam_latch.h"
 
 static inline float absf(float x) { return (x < 0.0f) ? -x : x; }
 static inline float clampf(float x, float a, float b)
@@ -192,6 +193,7 @@ static uint8_t  MC_ONLINE_key_stu[4]    = {0, 0, 0, 0};
 static uint8_t  g_on_use_low_latch[4]   = {0, 0, 0, 0};   // 1=stop motor latch
 static uint8_t  g_on_use_jam_latch[4]   = {0, 0, 0, 0};   // 1=real jam -> 0xF06F
 static uint32_t g_on_use_hi_pwm_us[4]   = {0u, 0u, 0u, 0u};
+static jam_latch_t g_on_use_jam[4]      = {};     // jam latch trip/release timers (jam_latch.h)
 
 static inline __attribute__((always_inline)) void MC_STU_RGB_set_latch(uint8_t ch, uint8_t r, uint8_t g, uint8_t b, uint64_t now_ms, uint8_t blink)
 {
@@ -1947,12 +1949,14 @@ public:
             {
                 const float pct = MC_PULL_pct_f[CHx];
 
-                if (pct < 40.0f)
-                {
-                    g_on_use_low_latch[CHx] = 1u;
-                    g_on_use_jam_latch[CHx] = 1u;
-                }
-                else
+                // Below JAM_TRIP_PCT the 20 s high-PWM time is held: neither added to nor restarted.
+                // New with the timed trip: such a pass used to latch at once and never got here.
+                // Restarting it would let a buffer that keeps dipping below 40% for less than
+                // JAM_TRIP_MS push at full force with no 20 s limit. Not adding it keeps that limit
+                // what it was, time pushing hard at or above 40%; time below 40% is for the jam trip
+                // (jam_latch_pass) to judge, which also reports a channel this latch has braked if
+                // its buffer then stays below 40%.
+                if (pct >= JAM_TRIP_PCT)
                 {
                     const int pwm_cmd = pwm_out0;
                     const int ax = (pwm_cmd < 0) ? -pwm_cmd : pwm_cmd;
@@ -2815,6 +2819,28 @@ void Motion_control_run(int error)
 
             g_on_use_hi_pwm_us[ch] = 0u;
         }
+    }
+
+    // Jam latch (jam_latch.h): trip and release, once per pass for every channel. Here rather than in
+    // run(), so neither the anti-stall rest nor the brake of the 20 s high-PWM latch skips the check;
+    // and before the 0xF06F below, so a channel reports 0xF06F from the pass it latches and its
+    // normal pressure from the pass it is released.
+    for (uint8_t ch = 0; ch < kChCount; ch++)
+    {
+        jam_in_t in;
+        in.on_use_ctrl = (MOTOR_CONTROL[ch].motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use);
+        in.filament    = (MC_ONLINE_key_stu[ch] != 0u);
+        in.active      = (A.now_filament_num == ch);
+        in.motion      = A.filament[ch].motion;
+        in.pct         = MC_PULL_pct_f[ch];
+        in.now_ms      = (uint32_t)now_ms;
+
+        const jam_event_t ev = jam_latch_pass(&g_on_use_jam[ch], &g_on_use_low_latch[ch], &g_on_use_jam_latch[ch],
+                                              &in, MC_ON_USE_TARGET_PCT - MC_ON_USE_BAND_LO_DELTA);
+        if (ev == JAM_EVENT_TRIP)
+            MC_STU_RGB_set(ch, 0xFF, 0x00, 0x00);
+        else if (ev == JAM_EVENT_RELEASE)
+            g_on_use_hi_pwm_us[ch] = 0u;
     }
 
     if (!error)
