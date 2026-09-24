@@ -1,6 +1,7 @@
 // Host tests for the BambuBus RX frame parser in src/_bus_hardware.h (_bus_port_deal::rx_byte):
 // a frame that lost bytes must not swallow the next frame once the line went quiet or the USART
-// flagged an overrun, and back-to-back frames must still parse.
+// flagged an overrun, and back-to-back frames must still parse. Also the parser resets around our own
+// TX (send_package / tx_done): a frame cut by our reply must not combine with the bytes after it.
 
 #include <stdint.h>
 #include <string.h>
@@ -16,16 +17,25 @@ static const uint32_t FRAME_GAP_TICKS = 400u * 18u; // 400 us of silence between
 static _bus_port_deal port;
 static uint32_t tick;
 static int heartbeats;
+static int sends;
+static uint16_t sent_len;
 
 void bambubus_heartbeat_seen_fast(void) { heartbeats++; }
 
-static void no_send(uint8_t *, uint16_t) {}
+// Stand-in for bus_uart1_dma_send: records the TX; the test ends it with tx_done().
+static void fake_send(uint8_t *, uint16_t len)
+{
+    sends++;
+    sent_len = len;
+}
 
 void setUp(void)
 {
-    port.init(no_send);
+    port.init(fake_send);
     tick = 0x10000000u;
     heartbeats = 0;
+    sends = 0;
+    sent_len = 0;
     // One quiet period after init, as on the real bus.
     port.rx_byte(0xFF, tick, false);
     tick += FRAME_GAP_TICKS;
@@ -296,6 +306,144 @@ static void test_lost_byte_then_gap_across_the_systick_wrap(void)
     expect_frame(b, lb);
 }
 
+// Our reply of n bytes, started now by the main loop.
+static void start_reply(int n)
+{
+    port.send_data_len = n;
+    port.send_package();
+    TEST_ASSERT_FALSE(port.idle);
+}
+
+// TC ISR after n byte times of TX; `rx` (may be null) is what RX saw meanwhile (echo or collision).
+static void end_reply(int n, const uint8_t *rx)
+{
+    for (int i = 0; i < n; i++)
+    {
+        tick += BYTE_TICKS;
+        if (rx)
+            port.rx_byte(rx[i], tick, false);
+    }
+    port.tx_done(tick);
+    TEST_ASSERT_TRUE(port.idle);
+}
+
+// A late reply collides with the printer's next frame A. The 8-byte set_filament ACK takes 70 us,
+// under the resync gap, and RX hears nothing while DE is on: A's head must not combine with its
+// tail after our TX and then take the head of frame B. The reply itself still goes out.
+static void test_frame_cut_by_a_short_reply_does_not_swallow_the_next_frame(void)
+{
+    uint8_t a[32], b[32];
+    const int la = make_frame(a, 23, 20), lb = make_frame(b, 24, 8);
+
+    feed(a, 10, BYTE_TICKS);
+    tick += BYTE_TICKS;
+    start_reply(8);
+    TEST_ASSERT_EQUAL_INT(1, sends);
+    TEST_ASSERT_EQUAL_UINT16(8, sent_len);
+    const bool parser_idle_during_tx = port.rx_idle(tick);
+    end_reply(8, nullptr); // a[10..17] lost in the collision
+    feed(a + 18, la - 18, BYTE_TICKS);
+    expect_no_frame();
+
+    feed(b, lb, BYTE_TICKS);
+    expect_frame(b, lb);
+    TEST_ASSERT_TRUE(parser_idle_during_tx); // A's head was dropped when our TX started
+}
+
+// Same with a longer reply that RX echoes: our bytes are timestamped, so the line never looks quiet.
+// The rest of A is lost under our TX; the printer's next frame follows 100 us after it.
+static void test_frame_cut_by_an_echoed_reply_does_not_swallow_the_next_frame(void)
+{
+    uint8_t a[32], b[32], echo[32];
+    make_frame(a, 25, 20);
+    const int lb = make_frame(b, 26, 8);
+    const int le = make_frame(echo, 27, 23); // 29 bytes, like the online_detect reply
+
+    feed(a, 10, BYTE_TICKS);
+    tick += BYTE_TICKS;
+    start_reply(le);
+    end_reply(le, echo);
+    expect_no_frame();
+
+    tick += 100u * 18u;
+    feed(b, lb, BYTE_TICKS);
+    expect_frame(b, lb);
+}
+
+// A heartbeat whose header passed CRC8 is reported when our TX cuts it, once, and its tail after our
+// TX does not eat the head of the next frame.
+static void test_heartbeat_cut_by_our_tx_is_reported_once(void)
+{
+    uint8_t hb[32], b[32];
+    uint8_t hb_payload[12];
+    memset(hb_payload, 0x55, sizeof(hb_payload));
+    hb_payload[0] = 0x20;
+    const int lh = make_short(hb, 0xC5, hb_payload, (int)sizeof(hb_payload));
+    const int lb = make_frame(b, 28, 8);
+    for (int i = 16; i < lh; i++)
+        TEST_ASSERT_TRUE(hb[i] != 0x3D && hb[i] != 0x33); // the tail holds no header byte
+
+    feed(hb, 8, BYTE_TICKS);
+    TEST_ASSERT_EQUAL_INT(0, heartbeats);
+    tick += BYTE_TICKS;
+    start_reply(8);
+    TEST_ASSERT_EQUAL_INT(1, heartbeats);
+    end_reply(8, nullptr); // hb[8..15] lost in the collision
+    feed(hb + 16, lh - 16, BYTE_TICKS);
+    feed(b, lb, BYTE_TICKS);
+    TEST_ASSERT_EQUAL_INT(1, heartbeats);
+    expect_frame(b, lb);
+}
+
+// The TC ISR resets too: parser state from before a TX never meets the bytes after it, even if
+// that TX did not start through send_package().
+static void test_tx_done_resets_the_parser(void)
+{
+    uint8_t a[32], b[32];
+    const int la = make_frame(a, 29, 20), lb = make_frame(b, 30, 8);
+
+    feed(a, 10, BYTE_TICKS);
+    port.idle = false;
+    end_reply(8, nullptr);
+    feed(a + 18, la - 18, BYTE_TICKS);
+    expect_no_frame();
+
+    feed(b, lb, BYTE_TICKS);
+    expect_frame(b, lb);
+}
+
+// The normal exchange is unchanged: a request that completed before our reply stays queued for the
+// main loop, and the printer's next frame after our reply parses.
+static void test_normal_exchange_keeps_the_request_and_parses_the_next_frame(void)
+{
+    uint8_t a[32], b[32], c[32];
+    const int la = make_frame(a, 31, 20), lb = make_frame(b, 32, 4), lc = make_frame(c, 33, 20);
+
+    feed(a, la, BYTE_TICKS);
+    tick += 50u * 18u; // delay_us(50) before the reply
+    start_reply(29);
+    TEST_ASSERT_EQUAL_INT(1, sends);
+    TEST_ASSERT_EQUAL_UINT16(29, sent_len);
+    TEST_ASSERT_EQUAL_INT(0, port.send_data_len);
+    end_reply(29, nullptr);
+    expect_frame(a, la);
+
+    tick += 100u * 18u;
+    feed(b, lb, BYTE_TICKS);
+    expect_frame(b, lb);
+
+    // The raw send_package(data, len) resets the same way.
+    feed(c, 10, BYTE_TICKS);
+    tick += BYTE_TICKS;
+    port.send_package(a, 8);
+    TEST_ASSERT_EQUAL_INT(2, sends);
+    end_reply(8, nullptr);
+    feed(c + 18, lc - 18, BYTE_TICKS);
+    expect_no_frame();
+    feed(b, lb, BYTE_TICKS);
+    expect_frame(b, lb);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -311,5 +459,10 @@ int main(void)
     RUN_TEST(test_bytes_during_own_tx_are_ignored_but_timestamped);
     RUN_TEST(test_frame_across_the_systick_wrap_parses);
     RUN_TEST(test_lost_byte_then_gap_across_the_systick_wrap);
+    RUN_TEST(test_frame_cut_by_a_short_reply_does_not_swallow_the_next_frame);
+    RUN_TEST(test_frame_cut_by_an_echoed_reply_does_not_swallow_the_next_frame);
+    RUN_TEST(test_heartbeat_cut_by_our_tx_is_reported_once);
+    RUN_TEST(test_tx_done_resets_the_parser);
+    RUN_TEST(test_normal_exchange_keeps_the_request_and_parses_the_next_frame);
     return UNITY_END();
 }
