@@ -12,6 +12,10 @@ import sys
 
 errors = []
 
+# Nothing is compiled for `-t clean` or IDE metadata dumps, so do not demand the variant there.
+if env.IsCleanTarget() or env.IsIntegrationDump():  # noqa: F821
+    Return()  # noqa: F821
+
 for name in ("BMCU_DM_TWO_MICROSWITCH", "BMCU_ONLINE_LED_FILAMENT_RGB", "DBMCU_P1S", "BMCU_SOFT_LOAD"):
     value = os.environ.get(name)
     if value not in ("0", "1"):
