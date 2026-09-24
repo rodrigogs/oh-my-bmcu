@@ -11,6 +11,7 @@
 #include "Debug_log.h"
 #include "nvm_save_sched.h"
 #include "boot_restore.h"
+#include "watchdog.h"
 #include <string.h>
 
 WS2812_class SYS_RGB;
@@ -185,11 +186,31 @@ static void ams_nvm_save_run()
         ams_datas_save_run((uint8_t)job, now);
 }
 
+// After a watchdog reset (a hang, or a trap: watchdog.cpp) the SYS LED flashes magenta before the
+// boot goes on as usual (WDG_BOOT_FLASHES x WDG_BOOT_FLASH_MS on and off, 420 ms).
+static void show_watchdog_reset()
+{
+    for (uint32_t k = 0u; k < WDG_BOOT_FLASHES; k++)
+    {
+        SYS_RGB.set_RGB(0x10, 0x00, 0x10, 0);
+        RGB_update();
+        delay(WDG_BOOT_FLASH_MS);
+        SYS_RGB.set_RGB(0x00, 0x00, 0x00, 0);
+        RGB_update();
+        delay(WDG_BOOT_FLASH_MS);
+    }
+
+    SYS_RGB.set_RGB(0x10, 0x00, 0x00, 0);
+    RGB_update();
+}
+
 int main(void)
 {
     SystemInit();
     SystemCoreClockUpdate();
     time_hw_init();
+
+    const wdg_reset_cause reset_cause = watchdog_reset_cause_take();
 
     __enable_irq();
 
@@ -208,6 +229,8 @@ int main(void)
     RGB_update();
     delay(50);
 
+    if (reset_cause == WDG_RESET_IWDG) show_watchdog_reset();
+
     DEBUG_init();
     ams_init();
     Flash_saves_init();
@@ -216,6 +239,11 @@ int main(void)
     ADC_DMA_wait_full();
 
     MC_PULL_calibration_boot();
+
+    // Not earlier: the first-boot calibration waits up to 30 s per step (watchdog_cfg.h lists what
+    // feeds it from here on).
+    watchdog_start();
+
     ams_datas_read();
 
     {
@@ -237,6 +265,8 @@ int main(void)
 
     while (1)
     {
+        watchdog_feed();
+
         const ahubus_package_type   ahub_stu     = ahubus_run();
         const bambubus_package_type bambubus_stu = bambubus_run();
         bus_port_to_host.send_package();

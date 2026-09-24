@@ -3,6 +3,7 @@
 #include "ch32v20x_adc.h"
 #include "ch32v20x_dma.h"
 #include "ch32v20x_rcc.h"
+#include "watchdog.h"
 #include <stdint.h>
 
 static constexpr uint32_t kCh      = 8;
@@ -211,6 +212,7 @@ void ADC_DMA_wait_full()
 
     while (g_blocks_filled < kNBlocks)
     {
+        watchdog_feed(); // up to 2 s; also runs after watchdog_start() (Motion_control_init)
         ADC_DMA_poll();
         if ((uint32_t)(time_ticks32() - t0) > tout) break;
         delay(1);

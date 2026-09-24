@@ -10,6 +10,7 @@
 #include "motion_limits.h"
 #include "jam_latch.h"
 #include "dm_rearm.h"
+#include "watchdog.h"
 
 static inline float absf(float x) { return (x < 0.0f) ? -x : x; }
 static inline float clampf(float x, float a, float b)
@@ -361,6 +362,8 @@ static void blink_all_blue_3s()
 
     while ((uint32_t)(time_ticks32() - t0) < dt)
     {
+        watchdog_feed(); // every 20 ms, for the 3 s before Flash_NVM_full_clear
+
         const uint32_t now_t = time_ticks32();
         const uint32_t elapsed_ms = (uint32_t)((now_t - t0) / tpm);
 
@@ -2993,6 +2996,7 @@ static void MOTOR_get_dir()
     // (src/as5600_sample.h). Max 2 s (200 * 10 ms), as before.
     for (int t = 0; t <= 200; t++)
     {
+        watchdog_feed(); // runs after watchdog_start(): up to 2 s
         if (t) delay(10);
         MC_AS5600.updata_angle();
 
