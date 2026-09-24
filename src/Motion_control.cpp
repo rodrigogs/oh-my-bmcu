@@ -4,6 +4,7 @@
 #include "Flash_saves.h"
 #include "_bus_hardware.h"
 #include "many_soft_AS5600.h"
+#include "as5600_sample.h"
 #include "app_api.h"
 #include "hal/time_hw.h"
 
@@ -152,6 +153,9 @@ static uint8_t g_as5600_fail[4]     = {0,0,0,0};
 static uint8_t g_as5600_okstreak[4] = {0,0,0,0};
 static constexpr uint8_t kAS5600_FAIL_TRIP   = 3;
 static constexpr uint8_t kAS5600_OK_RECOVER  = 2;
+// src/as5600_sample.h gives up after the same number of failed or implausible reads in a row.
+static_assert(AS5600_DIR_FAIL_TRIP == kAS5600_FAIL_TRIP, "direction test abort != health gate trip");
+static_assert(AS5600_JUMP_REBASE == kAS5600_FAIL_TRIP, "tracker jump rebase != health gate trip");
 static inline bool AS5600_is_good(uint8_t ch) { return g_as5600_good[ch] != 0; }
 
 // ---- liniowe zwalnianie końcówki + minimalny PWM ----
@@ -2002,14 +2006,12 @@ void Motion_control_set_PWM(uint8_t CHx, int PWM)
 }
 
 // ===== AS5600 distance/speed =====
-int32_t as5600_distance_save[4] = {0,0,0,0};
+// Per channel: angle and time of the last accepted read (src/as5600_sample.h).
+static as5600_track_t g_as5600_track[4];
 
 void AS5600_distance_updata(uint32_t now_ticks)
 {
-    static uint32_t last_ticks = 0u;
     static uint32_t last_poll_ticks = 0u;
-    static uint8_t  have_last_ticks = 0u;
-    static uint8_t  was_ok[4] = {0,0,0,0};
     static uint32_t last_stu_ticks = 0u;
 
     uint32_t tpm = time_hw_tpms;
@@ -2030,25 +2032,14 @@ void AS5600_distance_updata(uint32_t now_ticks)
         MC_AS5600.updata_stu();
     }
 
-    if (!have_last_ticks)
-    {
-        last_ticks = now_ticks;
-        have_last_ticks = 1u;
-        return;
-    }
-
-    const uint32_t dt_ticks = (uint32_t)(now_ticks - last_ticks);
-    if (dt_ticks == 0u) return;
-    last_ticks = now_ticks;
-
-    const float inv_dt = (1000000.0f * (float)tpus) / (float)dt_ticks;
-
     MC_AS5600.updata_angle();
     auto &A = ams[motion_control_ams_num];
 
     for (uint8_t i = 0; i < kChCount; i++)
     {
-        const bool ok_now = MC_AS5600.online[i] && (MC_AS5600.magnet_stu[i] != AS5600_soft_IIC_many::offline);
+        // An answered read above 12 bits is corrupted: it fails like a NACK (src/as5600_sample.h).
+        const bool ok_now = MC_AS5600.online[i] && (MC_AS5600.magnet_stu[i] != AS5600_soft_IIC_many::offline) &&
+                            as5600_raw_ok(MC_AS5600.raw_angle[i]);
 
         if (ok_now)
         {
@@ -2063,33 +2054,30 @@ void AS5600_distance_updata(uint32_t now_ticks)
             if (g_as5600_fail[i] >= kAS5600_FAIL_TRIP) g_as5600_good[i] = 0u;
         }
 
-        if (!AS5600_is_good(i))
+        // A failed read (raw_angle = 0) or an impossible jump is skipped, not counted as a move: the
+        // next good read is diffed against the last accepted one, over the time since that read.
+        int32_t  diff = 0;
+        uint32_t dt   = 0u;
+        switch (as5600_track_sample(&g_as5600_track[i], AS5600_is_good(i), ok_now,
+                                    MC_AS5600.raw_angle[i], now_ticks, tpus, &diff, &dt))
         {
-            was_ok[i] = 0u;
-            speed_as5600[i] = 0.0f;
-            continue;
-        }
-
-        if (!was_ok[i])
+        case AS5600_TRACK_MOVE:
         {
-            as5600_distance_save[i] = MC_AS5600.raw_angle[i];
-            speed_as5600[i] = 0.0f;
-            was_ok[i] = 1u;
-            continue;
+            const float dist_mm = (float)diff * kAS5600_MM_PER_CNT;
+            speed_as5600[i] = dist_mm * ((1000000.0f * (float)tpus) / (float)dt);
+            A.filament[i].meters += dist_mm * 0.001f;
+            break;
         }
-
-        const int32_t last = as5600_distance_save[i];
-        const int32_t now  = MC_AS5600.raw_angle[i];
-
-        int32_t diff = now - last;
-        if (diff > 2048) diff -= 4096;
-        if (diff < -2048) diff += 4096;
-
-        as5600_distance_save[i] = now;
-
-        const float dist_mm = (float)diff * kAS5600_MM_PER_CNT;
-        speed_as5600[i] = dist_mm * inv_dt;
-        A.filament[i].meters += dist_mm * 0.001f;
+        case AS5600_TRACK_SKIP:
+        case AS5600_TRACK_JUMP:
+            // keep the last speed until the next accepted read: at most 8 polls in a row (2 skips,
+            // a jump, 2 skips, a jump, 2 skips; a 3rd failed read in a row trips the gate, a 3rd
+            // jump rebases)
+            break;
+        default:   // off / new baseline
+            speed_as5600[i] = 0.0f;
+            break;
+        }
     }
 }
 
@@ -2921,15 +2909,6 @@ void MC_PWM_init()
     TIM_Cmd(TIM4, ENABLE);
 }
 
-// różnica kątów
-static inline int M5600_angle_dis(int16_t angle1, int16_t angle2)
-{
-    int d = (int)angle1 - (int)angle2;
-    if (d >  2048) d -= 4096;
-    if (d < -2048) d += 4096;
-    return d;
-}
-
 // test kierunku silników
 static void MOTOR_get_dir()
 {
@@ -2946,12 +2925,10 @@ static void MOTOR_get_dir()
             Motion_control_data_save.Motion_control_dir[i] = 0;
     }
 
-    MC_AS5600.updata_angle();
-
-    int16_t last_angle[4];
+    as5600_dir_probe_t probe[4];
     for (uint8_t i = 0; i < kChCount; i++)
     {
-        last_angle[i] = MC_AS5600.raw_angle[i];
+        as5600_dir_probe_init(&probe[i]);
         dir[i] = Motion_control_data_save.Motion_control_dir[i];
     }
 
@@ -2962,20 +2939,20 @@ static void MOTOR_get_dir()
     for (uint8_t i = 0; i < kChCount; i++)
     {
         if (AS5600_is_good(i) && filament_channel_inserted[i] && (dir[i] == 0))
-        {
-            Motion_control_set_PWM(i, 1000);
             test[i] = true;
-        }
     }
 
     // jeśli nie ma nic do testowania -> nie rób NIC, nie zapisuj, nie psuj
     if (!(test[0] || test[1] || test[2] || test[3]))
         return;
 
-    // czekaj max 2s na ruch (200 * 10ms)
-    for (int t = 0; t < 200; t++)
+    // The baseline is taken with the motors stopped, from two agreeing, answered 12-bit reads
+    // (passes 0 and 1 if none fails; a failed read is retried, never used as angle 0). Then the motor
+    // runs until AS5600_DIR_AGREE reads agree on the move, and is held stopped after a failed read
+    // (src/as5600_sample.h). Max 2 s (200 * 10 ms), as before.
+    for (int t = 0; t <= 200; t++)
     {
-        delay(10);
+        if (t) delay(10);
         MC_AS5600.updata_angle();
 
         bool done = true;
@@ -2984,25 +2961,21 @@ static void MOTOR_get_dir()
         {
             if (!test[i]) continue;
 
-            // jeśli czujnik zniknął po drodze -> abort kanału (nie zapisuj)
-            if (!MC_AS5600.online[i])
+            const uint8_t ph = as5600_dir_probe_step(&probe[i], MC_AS5600.online[i], MC_AS5600.raw_angle[i]);
+            Motion_control_set_PWM(i, as5600_dir_probe_motor_on(&probe[i]) ? 1000 : 0);
+
+            if (ph == AS5600_DIR_DONE)
             {
-                Motion_control_set_PWM(i, 0);
-                test[i] = false;
-                continue;
-            }
-
-            const int angle_dis = M5600_angle_dis((int16_t)MC_AS5600.raw_angle[i], last_angle[i]);
-
-            if ((angle_dis > 163) || (angle_dis < -163))
-            {
-                Motion_control_set_PWM(i, 0);
-
                 // AS5600 odwrotnie względem magnesu
-                dir[i] = (angle_dis > 0) ? 1 : -1;
+                dir[i] = probe[i].dir;
 
                 test[i] = false;
                 any_detect = true;
+            }
+            else if (ph == AS5600_DIR_ABORT)
+            {
+                // czujnik nie odpowiada / zniknął po drodze -> abort kanału (nie zapisuj)
+                test[i] = false;
             }
             else
             {
@@ -3011,7 +2984,7 @@ static void MOTOR_get_dir()
         }
 
         if (done) break;
-        if (t == 199) timed_out = true;
+        if (t == 200) timed_out = true;
     }
 
     // stop dla niedokończonych
@@ -3116,7 +3089,7 @@ void Motion_control_init()
 
     for (uint8_t i = 0; i < kChCount; i++)
     {
-        as5600_distance_save[i] = MC_AS5600.raw_angle[i];
+        as5600_track_reset(&g_as5600_track[i]); // baseline from the first good read
         filament_now_position[i] = filament_idle;
     }
 
