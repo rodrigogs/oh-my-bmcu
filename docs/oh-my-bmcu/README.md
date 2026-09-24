@@ -15,7 +15,7 @@ A fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-
 ## Differences from upstream
 
 - **Filament info is saved again** (upstream PR [#134](https://github.com/jarczakpawel/BMCU-C-PJARCZAK/pull/134) by Murilo Bastos). LED updates ran every 1 ms with interrupts disabled and corrupted BambuBus packets, so slot type/colour changes were lost and every slot stayed at the default "PETG, white". The throttle is now 10 ms. Verified on the A1 on 2026-09-23. The root cause is still open: see finding 1 in the audit.
-- **Tooling**: pinned platform and SDK revisions, an explicit env for our variant, validation of the `env:fw` environment variables, a fixed `build_all_firmwares.sh`, and CI.
+- **Tooling**: pinned platform and SDK revisions, an explicit env for our variant, validation of the `env:fw` environment variables, a fixed `build_all_firmwares.sh`, host unit tests, and CI.
 - **Audit backlog**: [audit-2026-09.md](audit-2026-09.md) lists the defects found in the V10.5 sources, prioritised for this setup.
 
 ## Build
@@ -24,6 +24,12 @@ A fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-
 pip install platformio==6.1.19
 pio run                      # builds env:a1_solo_autoload_rgboff
 ls .pio/build/a1_solo_autoload_rgboff/firmware.bin
+```
+
+Host unit tests for the hardware-free modules (Unity, `test/`):
+
+```sh
+pio test -e native           # CI runs the same tests with GCC on Linux
 ```
 
 Other variants:
