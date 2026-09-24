@@ -2016,37 +2016,13 @@ public:
             }
             else
             {
-                // Full-force push time counts at any buffer level (it used to be counted only at or
-                // above JAM_TRIP_PCT, because a pass below it latched at once). With the timed jam
-                // trip, a buffer hovering around 40% with dips shorter than JAM_TRIP_MS would
-                // otherwise let the motor push at full force with no 20 s limit. pct is still judged
-                // by the jam trip (jam_latch_pass), which also reports a channel this latch has
+                // 20 s full-force push limit (jam_latch.h): the time counts at any buffer level; pct is
+                // judged by the jam trip (jam_latch_pass), which also reports a channel this latch has
                 // braked if its buffer then stays below 40%.
-                const int pwm_cmd = pwm_out0;
-                const int ax = (pwm_cmd < 0) ? -pwm_cmd : pwm_cmd;
-
-                const bool push_hi =
-                    (dir != 0.0f) &&
-                    (((float)pwm_cmd) * dir < 0.0f) &&
-                    (ax > 800);
-
-                if (push_hi)
+                if (jam_push_limit_pass(&g_on_use_hi_pwm_us[CHx], pwm_out0, dir, time_E))
                 {
-                    const uint32_t add_us = (uint32_t)(time_E * 1000000.0f + 0.5f);
-
-                    uint32_t t1 = g_on_use_hi_pwm_us[CHx] + add_us;
-                    if (t1 > 20000000u) t1 = 20000000u;
-                    g_on_use_hi_pwm_us[CHx] = t1;
-
-                    if (t1 >= 20000000u)
-                    {
-                        g_on_use_low_latch[CHx] = 1u;
-                        g_on_use_jam_latch[CHx] = 0u;
-                    }
-                }
-                else
-                {
-                    g_on_use_hi_pwm_us[CHx] = 0u;
+                    g_on_use_low_latch[CHx] = 1u;
+                    g_on_use_jam_latch[CHx] = 0u;
                 }
 
                 if (g_on_use_low_latch[CHx])

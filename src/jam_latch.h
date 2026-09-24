@@ -233,6 +233,50 @@ static inline jam_event_t jam_latch_pass(jam_latch_t *s, uint8_t *brake, uint8_t
     return JAM_EVENT_TRIP;
 }
 
+// ---- 20 s full-force push limit ----
+// The on_use control of a channel that is not braked counts how long it has pushed at full force
+// without a break: more than JAM_PUSH_HI_PWM of 1000 PWM in the push direction (on A1 its push
+// reaches that below about 50.3% and is capped at 900; the anti-stall kick is 850). At
+// JAM_PUSH_HI_MAX_US the channel is braked silently: g_on_use_low_latch set, g_on_use_jam_latch
+// clear, no 0xF06F. jam_latch_pass() still reports it if its buffer then stays below JAM_TRIP_PCT
+// for JAM_TRIP_MS. The time counts at any buffer level (90b44bc): it used to be counted only at or
+// above JAM_TRIP_PCT, because a pass below it latched at once, and with the timed trip a buffer
+// hovering around 40% with dips shorter than JAM_TRIP_MS would have let the motor push at full
+// force with no limit. A pass below full force restarts it, and so does a pass with no filament at
+// the switch (Motion_control.cpp clears it then, without calling jam_push_limit_pass()).
+#define JAM_PUSH_HI_PWM    800
+#define JAM_PUSH_HI_MAX_US 20000000u
+
+// Full force: pwm_cmd (the PWM the pass sets) pushes, i.e. its sign is opposite to dir (the
+// channel's retract direction, MOTOR_CONTROL[ch].dir; 0 while unknown), with more than
+// JAM_PUSH_HI_PWM.
+static inline bool jam_push_is_full(int pwm_cmd, float dir)
+{
+    const int ax = (pwm_cmd < 0) ? -pwm_cmd : pwm_cmd;
+    return (dir != 0.0f) && (((float)pwm_cmd) * dir < 0.0f) && (ax > JAM_PUSH_HI_PWM);
+}
+
+// One pass of the on_use control of a channel that is not braked (g_on_use_low_latch clear) with
+// filament at the switch. hi_us: g_on_use_hi_pwm_us[ch], saturating at JAM_PUSH_HI_MAX_US. time_s:
+// the pass's time step (time_E, at most motor_motion_run's 0.2 s cap), rounded to whole
+// microseconds. Returns true when the channel must be braked.
+static inline bool jam_push_limit_pass(uint32_t *hi_us, int pwm_cmd, float dir, float time_s)
+{
+    if (!jam_push_is_full(pwm_cmd, dir))
+    {
+        *hi_us = 0u;
+        return false;
+    }
+
+    const uint32_t add_us = (uint32_t)(time_s * 1000000.0f + 0.5f);
+
+    uint32_t t1 = *hi_us + add_us;
+    if (t1 > JAM_PUSH_HI_MAX_US) t1 = JAM_PUSH_HI_MAX_US;
+    *hi_us = t1;
+
+    return t1 >= JAM_PUSH_HI_MAX_US;
+}
+
 // ---- Motor ----
 // What run() in Motion_control.cpp runs for the channel (MOTOR_CONTROL[ch].motion).
 typedef enum
