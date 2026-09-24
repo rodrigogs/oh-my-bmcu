@@ -2462,6 +2462,11 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             continue;
         }
 
+        // A printer load that finished proved the path, so the Stage-2 failure latch has no reason to
+        // keep the LED red (the channel runs the normal idle control once loaded).
+        if (ev == DM_REARM_LOADED)
+            dm_fail_latch[ch] = 0u;
+
         if (ev != DM_REARM_NONE) // loaded changed: the autoload starts over from IDLE
         {
             dm_auto_state[ch]    = DM_AUTO_IDLE;
