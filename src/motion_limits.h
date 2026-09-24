@@ -92,6 +92,20 @@ static inline uint32_t ml_cnt_dist(uint32_t a, uint32_t b)
     return (d > 0x80000000u) ? (0u - d) : d;
 }
 
+// Distance cnt (whole AS5600 counts) in m. The count is exact, so the result has only float's
+// relative error (about 1e-7), however large the odometer is.
+static inline float ml_cnt_to_m(uint32_t cnt)
+{
+    return (float)cnt * (ML_MM_PER_CNT * 0.001f);
+}
+
+// Gear travel |pos_cnt - start_cnt| in m. Every distance a motor state decides on (pull back
+// target, send length cap, DM Stage-2 countdown) comes from here, never from filament[].meters.
+static inline float ml_travel_m(uint32_t pos_cnt, uint32_t start_cnt)
+{
+    return ml_cnt_to_m(ml_cnt_dist(pos_cnt, start_cnt));
+}
+
 static inline float ml_absf(float x) { return (x < 0.0f) ? -x : x; }
 
 static inline void motion_guard_start(motion_guard *g, uint64_t now_ms, uint32_t pos_cnt, uint32_t max_ms, uint32_t max_cnt)
