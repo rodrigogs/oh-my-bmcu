@@ -14,7 +14,11 @@ static uint8_t ref_crc8(const uint8_t *data, uint32_t len)
     {
         r ^= data[i];
         for (int b = 0; b < 8; b++)
-            r = (uint8_t)((r & 0x80u) ? ((r << 1) ^ 0x39u) : (r << 1));
+        {
+            const unsigned msb = r & 0x80u;
+            r = (uint8_t)(r << 1);
+            if (msb) r ^= 0x39u;
+        }
     }
     return r;
 }
@@ -27,7 +31,11 @@ static uint16_t ref_crc16(const uint8_t *data, uint32_t len)
     {
         r ^= (uint16_t)(data[i] << 8);
         for (int b = 0; b < 8; b++)
-            r = (uint16_t)((r & 0x8000u) ? ((r << 1) ^ 0x1021u) : (r << 1));
+        {
+            const unsigned msb = r & 0x8000u;
+            r = (uint16_t)(r << 1);
+            if (msb) r ^= 0x1021u;
+        }
     }
     return r;
 }
