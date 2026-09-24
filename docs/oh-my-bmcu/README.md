@@ -1,6 +1,6 @@
 # oh-my-bmcu
 
-A fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-PJARCZAK) maintained for one concrete setup: a single BMCU 370C on a Bambu Lab A1. Changes are tested on that hardware before they land here. Everything should stay easy to send back upstream.
+A fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-PJARCZAK) maintained for one concrete setup: a single BMCU 370C on a Bambu Lab A1. Every change lands with host unit tests, an adversarial code review and a green CI, and stays easy to send back upstream. Validation on the A1 itself is tracked in the [hardware test plan](hardware-test-plan.md): until an image has passed it, treat it as untested on hardware.
 
 ## Target setup
 
@@ -14,9 +14,26 @@ A fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-
 
 ## Differences from upstream
 
-- **Filament info is saved again** (upstream PR [#134](https://github.com/jarczakpawel/BMCU-C-PJARCZAK/pull/134) by Murilo Bastos). LED updates ran every 1 ms with interrupts disabled and corrupted BambuBus packets, so slot type/colour changes were lost and every slot stayed at the default "PETG, white". The throttle is now 10 ms. Verified on the A1 on 2026-09-23. The root cause is still open: see finding 1 in the audit.
-- **Tooling**: pinned platform and SDK revisions, an explicit env for our variant, validation of the `env:fw` environment variables, a fixed `build_all_firmwares.sh`, host unit tests, and CI.
-- **Audit backlog**: [audit-2026-09.md](audit-2026-09.md) lists the defects found in the V10.5 sources, prioritised for this setup.
+Findings and their status are in the [audit backlog](audit-2026-09.md). In short:
+
+**Bus with the printer**
+- Filament info is saved again. Upstream PR [#134](https://github.com/jarczakpawel/BMCU-C-PJARCZAK/pull/134) (Murilo Bastos) throttled LED updates to 10 ms, verified on the A1 on 2026-09-23. The root cause is also fixed: the active channel's LED strip is redrawn only when its colour actually changes, instead of 100 times a second with interrupts off.
+- The RX parser resynchronises after a lost byte (a 200 us gap on the line or a UART overrun) instead of losing the next frame too, and is reset around our own replies.
+- Flash writes wait for a quiet bus window instead of running while a reply is still on the wire. Filament changes are written 500 ms after the last change to a slot, so wait a second before switching the printer off after editing a slot.
+- A lost printer link is detected reliably (it used to depend on a 119 s timer phase), so the motors stop within about 1 s of the printer going silent.
+- The set-filament handlers check frame lengths, and AMS discovery is answered again after a link loss.
+
+**Motor and sensors**
+- Tangle detection: the buffer must stay below 40% for 500 ms while the BMCU pushes at full force before the print pauses (it used to trip on a few milliseconds). To resume after a tangle, free the spool, feed filament until the buffer is above 40%, then resume on the printer; while paused, holding the buffer at or above about 52% for 1 s also clears the red LED. Continuous full-force pushing is still capped at 20 s.
+- Unload pull back, redetect and the DM autoload Stage-2 have time, distance and stall limits. A pull that stalls (for example filament still held by the extruder) stops after about 1.6 s, and that channel's LED blinks red (1 s on, 1 s off) until the filament is pulled out or the slot is used again.
+- Failed or impossible AS5600 readings are skipped instead of being used as angle 0, and the motor-direction test at first boot re-reads and confirms before saving.
+
+**Calibration and flash**
+- A calibration step that times out, or a buffer moved less than the minimum span, gets a safe default range instead of an oversensitive one. Those channels flash red quickly at the end of calibration and for about 0.7 s at every boot until they are recalibrated.
+- A flash journal page that holds a torn record or data from an older firmware layout is erased before writing, instead of making every save of that slot fail.
+
+**Tooling**
+- Pinned platform and SDK revisions, an explicit env for our variant, validation of the `env:fw` environment variables, a fixed `build_all_firmwares.sh`, host unit tests (`test/`), and CI.
 
 ## Build
 
@@ -51,7 +68,7 @@ Use the CLI of [BMCU-Flasher](https://github.com/jarczakpawel/BMCU-Flasher) (v1.
    ```
 
    The port is picked by VID/PID. Every block is read back after programming. Without `--verify-last` the CLI skips the last block; the GUI always checks it.
-3. Flashing erases all 64 KB, including the NVM sector: calibration, motor direction, filament info and the loaded channel. The flasher then resets the MCU, and it boots straight into the first-boot calibration, even on USB power. The calibration samples the idle buffers and then waits up to 30 s per extreme for each buffer to be moved (see upstream's [calibration video](https://www.youtube.com/watch?v=Hn_DNzSmhuc)). A calibration that is cut off is not saved and runs again on the next boot. A step that times out is currently saved as if it had succeeded, which leaves that buffer oversensitive (audit finding 8). So either do the calibration properly, or disconnect right away and do it at the first boot in the printer.
+3. Flashing erases all 64 KB, including the NVM sector: calibration, motor direction, filament info and the loaded channel. The flasher then resets the MCU, and it boots straight into the first-boot calibration, even on USB power. The calibration samples the idle buffers and then waits up to 30 s per extreme for each buffer to be moved (see upstream's [calibration video](https://www.youtube.com/watch?v=Hn_DNzSmhuc)). A calibration that is cut off is not saved and runs again on the next boot. A step that times out gets a safe default range, and that channel flashes red at the end and at every boot until it is recalibrated. So either do the calibration properly, or disconnect right away and do it at the first boot in the printer.
 4. Reconnect the BMCU to the printer only while the printer is unplugged.
 
 To recalibrate later, remove all filament and hold one buffer for about 5 s. This wipes the whole NVM, including every slot's filament type and colour.
