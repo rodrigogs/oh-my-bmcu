@@ -1,5 +1,6 @@
 #include "MC_PULL_calibration.h"
 #include "mc_pull_cal_range.h"
+#include "mc_pull_cal_mean.h"
 #include "Motion_control.h"
 #include "ADC_DMA.h"
 #include "Flash_saves.h"
@@ -346,9 +347,10 @@ void MC_PULL_calibration_boot()
 
     const bool ok_wipe = Flash_NVM_full_clear();
 
-    double sum_raw[4] = {0, 0, 0, 0};
-    double sum_key[4] = {0, 0, 0, 0};
-    const int N = 90;
+    // float, not double: see mc_pull_cal_mean.h.
+    float sum_raw[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float sum_key[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    const int N = MC_PULL_CAL_IDLE_SAMPLES;
     const uint32_t tpm = time_hw_ticks_per_ms();
     const uint32_t t0  = time_ticks32();
 
@@ -376,7 +378,7 @@ void MC_PULL_calibration_boot()
     for (int ch = 0; ch < 4; ch++)
     {
         if (!filament_channel_inserted[ch]) continue;
-        center_raw[ch] = (float)(sum_raw[ch] / (double)N);
+        center_raw[ch] = mc_pull_cal_mean(sum_raw[ch], N);
     }
 
     for (int ch = 0; ch < 4; ch++)
@@ -392,7 +394,7 @@ void MC_PULL_calibration_boot()
         MC_PULL_V_OFFSET[ch] = 1.65f - center_raw[ch];
         MC_PULL_POLARITY[ch] = 1;
         MC_DM_KEY_NONE_THRESH[ch] =
-            dm_key_none_threshold_from_idle((float)(sum_key[ch] / (double)N));
+            dm_key_none_threshold_from_idle(mc_pull_cal_mean(sum_key[ch], N));
     }
 
     float center_v_ref[4] = {1.65f, 1.65f, 1.65f, 1.65f};
