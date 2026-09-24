@@ -9,6 +9,15 @@ command -v python3 >/dev/null 2>&1 || { echo "ERROR: nie ma 'python3' w PATH"; e
 OUT_DIR="firmwares"
 PIO_ENV="fw"
 
+# Build into a staging dir and only replace ${OUT_DIR} once every variant has been built,
+# so a failed build no longer leaves the committed firmware tree deleted.
+STAGE_DIR="${OUT_DIR}.new"
+MANIFEST_TMP="${STAGE_DIR}.manifest.txt"
+trap 'rm -rf "${STAGE_DIR}" "${MANIFEST_TMP}"' EXIT
+
+# BUILD_ONLY_SOLO=1 builds just the SOLO image of every mode/AUTOLOAD/RGB combination (12 builds).
+BUILD_ONLY_SOLO="${BUILD_ONLY_SOLO:-0}"
+
 TXT_MODE="which_to_choose_mode.txt"
 TXT_AUTOLOAD="which_to_choose_autoload.txt"
 TXT_RGB="which_to_choose_filament_rgb.txt"
@@ -20,8 +29,12 @@ OUT_GUIDE="which_to_choose.txt"
 [[ -f "${TXT_RGB}" ]]      || { echo "ERROR: brak ${TXT_RGB}"; exit 1; }
 [[ -f "${TXT_SLOTS}" ]]    || { echo "ERROR: brak ${TXT_SLOTS}"; exit 1; }
 
-MODE_A1_DIR="standard(A1)"
-MODE_P1S_DIR="high_force_load(P1S)"
+# mode dir : DBMCU_P1S : BMCU_SOFT_LOAD
+MODES=(
+  "standard(A1):0:0"
+  "soft_load(A1):0:1"
+  "high_force_load(P1S):1:0"
+)
 
 SOLO_RETRACT="0.095f"
 RETRACTS=(
@@ -38,14 +51,16 @@ build_and_copy() {
   local dm="$4"
   local rgb="$5"
   local p1s="$6"
+  local soft="$7"
 
-  echo "=== BUILD: P1S=${p1s} DM=${dm} RGB=${rgb} AMS_NUM=${ams_num} RETRACT=${retract_len} -> ${out_path}"
+  echo "=== BUILD: P1S=${p1s} SOFT=${soft} DM=${dm} RGB=${rgb} AMS_NUM=${ams_num} RETRACT=${retract_len} -> ${out_path}"
 
   BAMBU_BUS_AMS_NUM="${ams_num}" \
   AMS_RETRACT_LEN="${retract_len}" \
   BMCU_DM_TWO_MICROSWITCH="${dm}" \
   BMCU_ONLINE_LED_FILAMENT_RGB="${rgb}" \
   DBMCU_P1S="${p1s}" \
+  BMCU_SOFT_LOAD="${soft}" \
   pio run -e "${PIO_ENV}"
 
   local src=".pio/build/${PIO_ENV}/firmware.bin"
@@ -55,19 +70,17 @@ build_and_copy() {
   cp -f "${src}" "${out_path}"
 }
 
-rm -rf "${OUT_DIR}"
-mkdir -p "${OUT_DIR}"
+rm -rf "${STAGE_DIR}"
+mkdir -p "${STAGE_DIR}"
 
-cp -f "${TXT_MODE}" "${OUT_DIR}/${OUT_GUIDE}"
+cp -f "${TXT_MODE}" "${STAGE_DIR}/${OUT_GUIDE}"
 
-for p1s in 0 1; do
-  if [[ "${p1s}" == "1" ]]; then
-    mode_dir="${MODE_P1S_DIR}"
-  else
-    mode_dir="${MODE_A1_DIR}"
-  fi
+for mode in "${MODES[@]}"; do
+  mode_dir="${mode%%:*}"
+  p1s="$(echo "${mode}" | cut -d: -f2)"
+  soft="$(echo "${mode}" | cut -d: -f3)"
 
-  mode_base="${OUT_DIR}/${mode_dir}"
+  mode_base="${STAGE_DIR}/${mode_dir}"
   mkdir -p "${mode_base}"
   cp -f "${TXT_AUTOLOAD}" "${mode_base}/${OUT_GUIDE}"
 
@@ -93,7 +106,9 @@ for p1s in 0 1; do
       mkdir -p "${base}"/{SOLO,AMS_A,AMS_B,AMS_C,AMS_D}
       cp -f "${TXT_SLOTS}" "${base}/${OUT_GUIDE}"
 
-      build_and_copy "${base}/SOLO/solo_${SOLO_RETRACT}.bin" 0 "${SOLO_RETRACT}" "${dm}" "${rgb}" "${p1s}"
+      build_and_copy "${base}/SOLO/solo_${SOLO_RETRACT}.bin" 0 "${SOLO_RETRACT}" "${dm}" "${rgb}" "${p1s}" "${soft}"
+
+      [[ "${BUILD_ONLY_SOLO}" == "1" ]] && continue
 
       for slot in A B C D; do
         case "${slot}" in
@@ -103,21 +118,27 @@ for p1s in 0 1; do
           D) ams_num=3 ;;
         esac
 
+        # tr instead of ${slot,,}: macOS ships bash 3.2
+        slot_lc="$(echo "${slot}" | tr 'A-Z' 'a-z')"
+
         for r in "${RETRACTS[@]}"; do
           build_and_copy \
-            "${base}/AMS_${slot}/ams_${slot,,}_${r}f.bin" \
+            "${base}/AMS_${slot}/ams_${slot_lc}_${r}f.bin" \
             "${ams_num}" \
             "${r}f" \
             "${dm}" \
             "${rgb}" \
-            "${p1s}"
+            "${p1s}" \
+            "${soft}"
         done
       done
     done
   done
 done
 
-python3 - "${OUT_DIR}" > "${OUT_DIR}/manifest.txt" <<'PY'
+# Written outside the tree first: redirecting straight into ${OUT_DIR}/manifest.txt truncated it
+# before the walk, so the manifest listed itself as an empty file.
+python3 - "${STAGE_DIR}" > "${MANIFEST_TMP}" <<'PY'
 import sys, os, zlib, hashlib
 
 root = sys.argv[1]
@@ -150,6 +171,11 @@ out.write("# format: SHA256_HEX CRC32_HEX SIZE_BYTES REL_PATH\n")
 for rel, sha256_hex, crc32_hex, size in entries:
     out.write(f"{sha256_hex} {crc32_hex} {size} {rel}\n")
 PY
+
+mv "${MANIFEST_TMP}" "${STAGE_DIR}/manifest.txt"
+
+rm -rf "${OUT_DIR}"
+mv "${STAGE_DIR}" "${OUT_DIR}"
 
 echo
 echo "DONE. Wyniki w: ${OUT_DIR}/"
