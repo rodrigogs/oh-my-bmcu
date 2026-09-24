@@ -27,8 +27,15 @@ Findings and their status are in the [audit backlog](audit-2026-09.md). In short
 - Tangle detection: the buffer must stay below 40% for 500 ms while the BMCU pushes at full force before the print pauses (it used to trip on a few milliseconds). To resume after a tangle, free the spool, feed filament until the buffer is above 40%, then resume on the printer; while paused, holding the buffer at or above about 52% for 1 s also clears the red LED. Continuous full-force pushing is still capped at 20 s.
 - Unload pull back, redetect and the DM autoload Stage-2 have time, distance and stall limits. A pull that stalls (for example filament still held by the extruder) stops after about 1.6 s, and that channel's LED blinks red (1 s on, 1 s off) until the filament is pulled out or the slot is used again.
 - Failed or impossible AS5600 readings are skipped instead of being used as angle 0, and the motor-direction test at first boot re-reads and confirms before saving.
+- Every motion distance (unload length, autoload Stage-2) comes from an integer AS5600 count, so unloads stay 95 mm however much filament has gone through since boot (the float odometer used to lose precision after about 128 m).
+- DM autoload only re-arms its 120 mm Stage-2 push after the filament really left both switches or was retracted, not after a switch flickers.
+
+**Upstream #148 (A1 no longer finds the AMS after a power cycle with a channel loaded)**
+- The cause is unproven. A channel the BMCU restored as in use at boot is now reset to idle as soon as its switches read empty.
+- `env:a1_solo_autoload_rgboff_no_boot_restore` (`-DBMCU_BOOT_RESTORE_LOADED=0`) is an A/B image that boots every channel idle and applies the restored state only when the printer first references the channel. See the A/B procedure in the [hardware test plan](hardware-test-plan.md#6-upstream-148-ab-test).
 
 **Calibration and flash**
+- Calibration averages in float instead of double, which drops about 3 KB of soft-float library code.
 - A calibration step that times out, or a buffer moved less than the minimum span, gets a safe default range instead of an oversensitive one. Those channels flash red quickly at the end of calibration and for about 0.7 s at every boot until they are recalibrated.
 - A flash journal page that holds a torn record or data from an older firmware layout is erased before writing, instead of making every save of that slot fail.
 

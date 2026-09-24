@@ -72,6 +72,25 @@ Setup: Bambu Lab A1 on printer firmware 01.08.01.00, AMS type "AMS", one BMCU 37
       blinking stops when the filament is pulled out or the slot is used again.
 - [ ] DM autoload: a normal insertion still feeds 120 mm.
 
+## 6. Upstream #148 A/B test
+
+Only if the A1 ever stops finding the AMS after a power cycle with a slot loaded.
+
+- [ ] With the default image (`env:a1_solo_autoload_rgboff`): load a slot into the extruder, then
+      power-cycle the printer 5 times. Note each time whether the printer finds AMS A.
+- [ ] Flash `env:a1_solo_autoload_rgboff_no_boot_restore` and repeat the same 5 power cycles. Until
+      the printer uses the loaded slot, its LED shows the idle colour. A print cut by a power loss
+      must still resume, and an unload right after boot must still retract.
+- [ ] Repeat both with several slots holding filament and none loaded in the extruder.
+- [ ] If only the default image loses the AMS, the boot restore is the cause: report it with both
+      counts.
+
+## 7. DM autoload re-arm
+
+- [ ] Insert filament: Stage-2 feeds about 120 mm past the inner switch, once.
+- [ ] Nudge the filament so a switch flickers without removing it: no second 120 mm push.
+- [ ] Pull the filament out past both switches and insert it again: Stage-2 runs again.
+
 ## Optional: logic analyser
 
 PA10 = RX, PA12 = DE, channel LED data pins PA11/PA8/PB1/PB0.
