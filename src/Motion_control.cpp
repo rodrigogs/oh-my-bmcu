@@ -1947,43 +1947,37 @@ public:
             }
             else
             {
-                const float pct = MC_PULL_pct_f[CHx];
+                // Full-force push time counts at any buffer level (it used to be counted only at or
+                // above JAM_TRIP_PCT, because a pass below it latched at once). With the timed jam
+                // trip, a buffer hovering around 40% with dips shorter than JAM_TRIP_MS would
+                // otherwise let the motor push at full force with no 20 s limit. pct is still judged
+                // by the jam trip (jam_latch_pass), which also reports a channel this latch has
+                // braked if its buffer then stays below 40%.
+                const int pwm_cmd = pwm_out0;
+                const int ax = (pwm_cmd < 0) ? -pwm_cmd : pwm_cmd;
 
-                // Below JAM_TRIP_PCT the 20 s high-PWM time is held: neither added to nor restarted.
-                // New with the timed trip: such a pass used to latch at once and never got here.
-                // Restarting it would let a buffer that keeps dipping below 40% for less than
-                // JAM_TRIP_MS push at full force with no 20 s limit. Not adding it keeps that limit
-                // what it was, time pushing hard at or above 40%; time below 40% is for the jam trip
-                // (jam_latch_pass) to judge, which also reports a channel this latch has braked if
-                // its buffer then stays below 40%.
-                if (pct >= JAM_TRIP_PCT)
+                const bool push_hi =
+                    (dir != 0.0f) &&
+                    (((float)pwm_cmd) * dir < 0.0f) &&
+                    (ax > 800);
+
+                if (push_hi)
                 {
-                    const int pwm_cmd = pwm_out0;
-                    const int ax = (pwm_cmd < 0) ? -pwm_cmd : pwm_cmd;
+                    const uint32_t add_us = (uint32_t)(time_E * 1000000.0f + 0.5f);
 
-                    const bool push_hi =
-                        (dir != 0.0f) &&
-                        (((float)pwm_cmd) * dir < 0.0f) &&
-                        (ax > 800);
+                    uint32_t t1 = g_on_use_hi_pwm_us[CHx] + add_us;
+                    if (t1 > 20000000u) t1 = 20000000u;
+                    g_on_use_hi_pwm_us[CHx] = t1;
 
-                    if (push_hi)
+                    if (t1 >= 20000000u)
                     {
-                        const uint32_t add_us = (uint32_t)(time_E * 1000000.0f + 0.5f);
-
-                        uint32_t t1 = g_on_use_hi_pwm_us[CHx] + add_us;
-                        if (t1 > 20000000u) t1 = 20000000u;
-                        g_on_use_hi_pwm_us[CHx] = t1;
-
-                        if (t1 >= 20000000u)
-                        {
-                            g_on_use_low_latch[CHx] = 1u;
-                            g_on_use_jam_latch[CHx] = 0u;
-                        }
+                        g_on_use_low_latch[CHx] = 1u;
+                        g_on_use_jam_latch[CHx] = 0u;
                     }
-                    else
-                    {
-                        g_on_use_hi_pwm_us[CHx] = 0u;
-                    }
+                }
+                else
+                {
+                    g_on_use_hi_pwm_us[CHx] = 0u;
                 }
 
                 if (g_on_use_low_latch[CHx])
