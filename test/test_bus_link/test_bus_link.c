@@ -1,6 +1,7 @@
 // Host tests for src/bus_link.h: a lost host link must stay lost however long the bus is silent
 // (the old 32-bit deadlines flipped back to "online" 2^31 ticks = 119 s after the loss), a
-// protocol that never sent a heartbeat must never read as lost, and ticks wrap at 2^32.
+// protocol that never sent a heartbeat must never read as lost, and ticks wrap at 2^32. The
+// went-lost edge that re-arms the BambuBus online-detect registration must fire once per outage.
 
 #include <stdint.h>
 #include <unity.h>
@@ -136,6 +137,97 @@ static void test_polled_loop_through_wraps_goes_lost_once_and_stays_lost(void)
     TEST_ASSERT_EQUAL_UINT(1u, lost_transitions);
 }
 
+static void test_went_lost_fires_once_per_outage(void)
+{
+    bus_link_t l;
+    bus_link_init(&l);
+    bus_link_state_t prev = BUS_LINK_NOT_SEEN;
+
+    // Boot silence is not an outage.
+    TEST_ASSERT_FALSE(bus_link_went_lost(&prev, bus_link_poll(&l, 0u, TIMEOUT)));
+    TEST_ASSERT_FALSE(bus_link_went_lost(&prev, bus_link_poll(&l, 10u * TIMEOUT, TIMEOUT)));
+
+    const uint32_t hb = 10u * TIMEOUT;
+    bus_link_heartbeat(&l, hb);
+    TEST_ASSERT_FALSE(bus_link_went_lost(&prev, bus_link_poll(&l, hb, TIMEOUT)));
+    TEST_ASSERT_FALSE(bus_link_went_lost(&prev, bus_link_poll(&l, hb + TIMEOUT, TIMEOUT)));
+    TEST_ASSERT_TRUE(bus_link_went_lost(&prev, bus_link_poll(&l, hb + TIMEOUT + 1u, TIMEOUT)));
+    TEST_ASSERT_FALSE(bus_link_went_lost(&prev, bus_link_poll(&l, hb + TIMEOUT + 2u, TIMEOUT)));
+    TEST_ASSERT_FALSE(bus_link_went_lost(&prev, bus_link_poll(&l, hb + 0x80000000u, TIMEOUT)));
+    TEST_ASSERT_FALSE(bus_link_went_lost(&prev, bus_link_poll(&l, hb, TIMEOUT))); // a full wrap later
+
+    // Next heartbeat, next outage: fires again.
+    const uint32_t hb2 = hb + 5u;
+    bus_link_heartbeat(&l, hb2);
+    TEST_ASSERT_FALSE(bus_link_went_lost(&prev, bus_link_poll(&l, hb2, TIMEOUT)));
+    TEST_ASSERT_TRUE(bus_link_went_lost(&prev, bus_link_poll(&l, hb2 + TIMEOUT + 1u, TIMEOUT)));
+    TEST_ASSERT_FALSE(bus_link_went_lost(&prev, bus_link_poll(&l, hb2 + 2u * TIMEOUT, TIMEOUT)));
+}
+
+// Main-loop model of the BambuBus online-detect latch (bambu_bus_ams.cpp): registered stands for
+// have_registered and is cleared where bambubus_run() calls online_detect_reset(). Registered at
+// boot, heartbeats every 300 ms for two minutes across a tick wrap: the latch must hold. The printer
+// goes silent: the latch is re-armed once, 1 s in. The printer re-registers during the silence (a
+// discovery before its heartbeats resume): that registration must hold through three more wraps.
+// Heartbeats resume, then stop again: re-armed once more.
+static void test_registration_latch_model(void)
+{
+    const uint32_t step = 10u * TPMS;
+    const uint32_t hb_period = 300u * TPMS;
+    uint64_t now = WRAP - 60000ull * TPMS;
+
+    bus_link_t l;
+    bus_link_init(&l);
+    bus_link_state_t prev = BUS_LINK_NOT_SEEN;
+    bool registered = true;
+    unsigned rearms = 0;
+    uint64_t last_hb = now;
+
+    for (int phase = 0; phase < 2; phase++)
+    {
+        const uint64_t hb_stop = now + 120000ull * TPMS;
+        uint64_t next_hb = now;
+        for (; now < hb_stop; now += step)
+        {
+            if (now >= next_hb)
+            {
+                bus_link_heartbeat(&l, (uint32_t)now);
+                last_hb = now;
+                next_hb += hb_period;
+            }
+            if (bus_link_went_lost(&prev, bus_link_poll(&l, (uint32_t)now, TIMEOUT)))
+            {
+                registered = false;
+                rearms++;
+            }
+            TEST_ASSERT_TRUE(registered);
+        }
+
+        const uint64_t silence_end = now + 3u * WRAP;
+        bool reregistered = false;
+        for (; now < silence_end; now += step)
+        {
+            if (bus_link_went_lost(&prev, bus_link_poll(&l, (uint32_t)now, TIMEOUT)))
+            {
+                TEST_ASSERT_TRUE(now - last_hb > TIMEOUT);
+                TEST_ASSERT_TRUE(now - last_hb <= TIMEOUT + step);
+                registered = false;
+                rearms++;
+            }
+            if (now - last_hb > 5000ull * TPMS && !reregistered)
+            {
+                TEST_ASSERT_FALSE(registered);
+                registered = true; // the printer's 0x05/0x01 confirm
+                reregistered = true;
+            }
+            if (reregistered)
+                TEST_ASSERT_TRUE(registered);
+        }
+        TEST_ASSERT_TRUE(reregistered);
+        TEST_ASSERT_EQUAL_UINT((unsigned)phase + 1u, rearms);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -147,5 +239,7 @@ int main(void)
     RUN_TEST(test_new_heartbeat_recovers_a_lost_link);
     RUN_TEST(test_init_forgets_the_link);
     RUN_TEST(test_polled_loop_through_wraps_goes_lost_once_and_stays_lost);
+    RUN_TEST(test_went_lost_fires_once_per_outage);
+    RUN_TEST(test_registration_latch_model);
     return UNITY_END();
 }
