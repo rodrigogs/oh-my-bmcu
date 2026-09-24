@@ -196,6 +196,9 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
 
     _ams *ams_ptr = &ams[bambubus_ams_map[fixed_ams_num]];
 
+    // Hands the loaded channel restored at boot to the printer on its first reference (main.cpp).
+    ams_state_printer_command(read_num, statu_flags, fliment_motion_flag);
+
     if (read_num < 4)
     {
         const uint8_t ch = (uint8_t)read_num;
@@ -416,6 +419,12 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                     return true;
                 }
             }
+
+            // With BMCU_BOOT_RESTORE_LOADED=0 the restored channel is not in use in RAM yet, so the
+            // check above cannot keep this reset from dropping it; keep it until the printer
+            // references it, as the default image does through that check.
+            if (ams_state_boot_restore_deferred())
+                return true;
 
             for (uint8_t i = 0; i < 4; i++)
             {

@@ -10,6 +10,7 @@
 #include "ADC_DMA.h"
 #include "Debug_log.h"
 #include "nvm_save_sched.h"
+#include "boot_restore.h"
 #include <string.h>
 
 WS2812_class SYS_RGB;
@@ -52,6 +53,8 @@ static nvm_job g_fil_job[4];
 static uint8_t g_loaded_ch = 0xFF;
 static nvm_job g_state_job;
 static nvm_wait g_nvm_wait;
+static boot_restore_t g_boot_restore = {0xFFu}; // loaded channel restored at boot
+static constexpr bool kRestoreAtBoot = (BMCU_BOOT_RESTORE_LOADED != 0);
 
 static inline void ram_to_flashinfo(uint8_t fil, Flash_FilamentInfo* o)
 {
@@ -128,11 +131,28 @@ void ams_state_set_unloaded(uint8_t filament_ch)
     if (filament_ch < 4u && g_loaded_ch != filament_ch) return;
     g_loaded_ch = 0xFFu;
     nvm_job_changed(&g_state_job, time_ticks32());
+
+    // On any path: a restored in-use state the printer has not referenced yet goes with it.
+    boot_restore_on_unloaded(&g_boot_restore, &ams[BAMBU_BUS_AMS_NUM], kRestoreAtBoot);
 }
 
 uint8_t ams_state_get_loaded(void)
 {
     return g_loaded_ch;
+}
+
+// Option 0 only: the loaded channel from the STA record is still waiting for the printer's first
+// reference, so RAM does not show it in use yet (boot_restore.h).
+bool ams_state_boot_restore_deferred(void)
+{
+    return !kRestoreAtBoot && boot_restore_pending(&g_boot_restore);
+}
+
+// set_motion, before it acts on a printer motion command (boot_restore.h).
+void ams_state_printer_command(uint8_t read_num, uint8_t statu_flags, uint8_t motion_flag)
+{
+    boot_restore_on_command(&g_boot_restore, &ams[BAMBU_BUS_AMS_NUM], kRestoreAtBoot, read_num, statu_flags,
+                            motion_flag);
 }
 
 static void ams_state_save_run(uint32_t now)
@@ -204,19 +224,8 @@ int main(void)
         {
             g_loaded_ch = ch;
 
-            if (ch < 4u)
-            {
-                _ams* a = &ams[BAMBU_BUS_AMS_NUM];
-
-                a->now_filament_num  = ch;
-                a->filament_use_flag = 0x04;
-                a->pressure          = 0x2B00;
-
-                for (uint8_t i = 0; i < 4u; i++)
-                    a->filament[i].motion = _filament_motion::idle;
-
-                a->filament[ch].motion = _filament_motion::on_use;
-            }
+            // In use from boot (BMCU_BOOT_RESTORE_LOADED=1), or once the printer references it (0).
+            boot_restore_init(&g_boot_restore, &ams[BAMBU_BUS_AMS_NUM], ch, kRestoreAtBoot);
         }
     }
 
@@ -236,7 +245,10 @@ int main(void)
             bus_host_device_type = host_device_type_ams;
 
         if (ahub_stu == ahubus_package_type::heartbeat)
+        {
             bus_host_device_type = host_device_type_ahub;
+            boot_restore_drop(&g_boot_restore); // the AHUB host sets the channel states itself
+        }
 
         // Only the protocol the host speaks decides: the other one never gets a heartbeat and must
         // not mask a lost link. Before the first heartbeat the BMCU stays offline, motors stopped.
