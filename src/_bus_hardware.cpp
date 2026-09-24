@@ -8,6 +8,7 @@
 #include "ch32v20x_misc.h"
 #include "core_riscv.h"
 #include "crc_bus.h"
+#include "hal/time_hw.h"
 
 uint16_t bus_host_device_type=0x0000;
 
@@ -18,7 +19,7 @@ void bus_uart1_dma_send(uint8_t *data, uint16_t length);
 
 _bus_port_deal bus_port_to_host;
 
-#define uart1_port_irq(data) bus_port_to_host.irq(data)
+#define uart1_port_irq(data, now, overrun) bus_port_to_host.rx_byte(data, now, overrun)
 #define uart1_port_idle bus_port_to_host.idle
 #define bus_port_to_host_send_func bus_uart1_dma_send
 
@@ -112,10 +113,20 @@ void bus_uart1_dma_send(unsigned char *data, uint16_t length)
 extern "C" void USART1_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
 void USART1_IRQHandler(void)
 {
-    if (USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)
+    // One STATR read, then DATAR: that sequence clears RXNE and this byte's error flags.
+    const uint16_t sr = USART1->STATR;
+    if (sr & USART_FLAG_RXNE)
     {
-        const uint8_t d = (uint8_t)USART_ReceiveData(USART1);
-        if (bus_port_to_host.idle) uart1_port_irq(d);
+        const uint32_t now = time_ticks32();
+        const uint8_t d = (uint8_t)USART1->DATAR;
+        uart1_port_irq(d, now, (sr & USART_FLAG_ORE) != 0u);
+    }
+    else if (sr & USART_FLAG_ORE)
+    {
+        // ORE set after the previous STATR read: no byte is pending, but the flag keeps raising this
+        // interrupt until DATAR is read.
+        (void)USART1->DATAR;
+        bus_port_to_host.rx_overrun();
     }
     if (USART_GetITStatus(USART1, USART_IT_TC) != RESET)
     {

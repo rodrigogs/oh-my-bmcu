@@ -11,6 +11,16 @@ enum class _bus_data_type : uint8_t
 
 void bambubus_heartbeat_seen_fast(void);
 
+// RX parser resync gap in SysTick ticks (HCLK/8 = 18 MHz). One 9E1 byte at 1.25 Mbaud is 11 bits =
+// 8.8 us = 158.4 ticks. Inside a frame the BMCU sees RX interrupts at most 2 byte times apart (a
+// longer ISR delay overruns the single-byte DATAR and is flagged by ORE). Between frames the bus
+// stays quiet much longer: a device must receive and check the whole request before replying (this
+// BMCU then waits another 50 us), and a broken request gets no reply, so the next frame waits for the
+// printer's timeout. The printer's own inter-byte timing has not been measured, so the threshold is
+// 200 us (about 23 byte times): generous for pauses on the sending side, still well below the reply
+// timeout that follows a lost frame.
+#define BUS_RX_RESYNC_GAP_TICKS 3600u
+
 class _bus_port_deal // 中断数据处理
 {
 public:
@@ -27,7 +37,17 @@ private:
     _bus_data_type irq_package_type = _bus_data_type::none;
     uint8_t *bus_irq_data_ptr = recv_data_buf[0];
     int drop_bytes = 0;
+    volatile uint32_t rx_last_tick = 0;
     void (*port_send_datas)(uint8_t *data, uint16_t len);
+
+    void rx_resync()
+    {
+        // A heartbeat whose header passed CRC8 counts even if its tail was cut, as it did before.
+        if (drop_bytes > 0)
+            bambubus_heartbeat_seen_fast();
+        _index = 0;
+        drop_bytes = 0;
+    }
 
 public:
     uint8_t * volatile bus_recv_data_ptr = recv_data_buf[0];
@@ -50,12 +70,45 @@ public:
         irq_package_type = _bus_data_type::none;
         bus_irq_data_ptr = recv_data_buf[0];
         drop_bytes = 0;
+        rx_last_tick = 0;
         bus_recv_data_ptr = recv_data_buf[1];
         idle = true;
         send_data_len = 0;
         recv_data_len = 0;
         tx_build_sel  = 0;
         port_send_datas = _port_send_datas;
+    }
+
+    // RX ISR entry, once per byte read from DATAR. now: STK_CNTL at ISR entry. overrun: ORE was set,
+    // so this byte is good but at least one byte after it was lost. PE/FE/NE are not acted on: the
+    // configured framing was never checked against the printers, and CRC16 rejects bad frames anyway.
+    void rx_byte(uint8_t data, uint32_t now, bool overrun)
+    {
+        const uint32_t gap = now - rx_last_tick;
+        rx_last_tick = now;
+        if (!idle) return; // our own TX, never host data
+
+        // Drop the frame (or heartbeat skip) in progress once the line went quiet; otherwise a frame
+        // that lost bytes swallows the head of the next one.
+        if (gap > BUS_RX_RESYNC_GAP_TICKS)
+            rx_resync();
+
+        irq(data);
+        if (overrun)
+            rx_resync();
+    }
+
+    // ORE without a pending byte: a byte was lost after the last one read.
+    void rx_overrun()
+    {
+        rx_resync();
+    }
+
+    // STK_CNTL of the last byte received, also during our own TX. A single aligned 32-bit load, so
+    // main code can read it without masking IRQs.
+    inline __attribute__((always_inline)) uint32_t last_rx_tick() const
+    {
+        return rx_last_tick;
     }
 
     void irq(uint8_t data)
