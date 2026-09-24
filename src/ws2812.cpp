@@ -60,8 +60,6 @@ static const uint8_t kGamma8[256] =
 
 void WS2812_class::init(uint8_t _num, GPIO_TypeDef* _port, uint16_t _pin)
 {
-    dirty = false;
-
     if (!g_ws2812_rst_ticks) {
         // 50us według datasheet, damy 100us
         g_ws2812_rst_ticks = 100u * time_hw_ticks_per_us();
@@ -70,7 +68,7 @@ void WS2812_class::init(uint8_t _num, GPIO_TypeDef* _port, uint16_t _pin)
 
     if (_num > MAX_NUM) _num = MAX_NUM;
 
-    num  = _num;
+    ws2812_frame_init(&frame, _num);
     port = _port;
     pin  = _pin;
 
@@ -88,10 +86,10 @@ void WS2812_class::init(uint8_t _num, GPIO_TypeDef* _port, uint16_t _pin)
 
 void WS2812_class::clear(void)
 {
-    for (uint32_t i = 0; i < (uint32_t)num; i++) last_grb[i] = 0u;
-    for (uint32_t i = 0; i < (uint32_t)num; i++) last_online_raw_rgb[i] = 0u;
-    for (uint32_t i = 0; i < (uint32_t)num; i++) last_online_is_filament[i] = 0u;
-    dirty = true;
+    // also forgets what the LEDs show, so the next updata() always sends
+    ws2812_frame_clear(&frame);
+    for (uint32_t i = 0; i < (uint32_t)frame.num; i++) last_online_raw_rgb[i] = 0u;
+    for (uint32_t i = 0; i < (uint32_t)frame.num; i++) last_online_is_filament[i] = 0u;
 }
 
 void WS2812_class::RST(void)
@@ -102,7 +100,7 @@ void WS2812_class::RST(void)
 
 void WS2812_class::updata(void)
 {
-    if (!dirty) return;
+    if (!ws2812_frame_dirty(&frame)) return;
 
     GPIO_TypeDef* const p = port;
     const uint32_t      m = (uint32_t)pin;
@@ -114,10 +112,10 @@ void WS2812_class::updata(void)
     while (STK_CNTL == base) { }
     base = STK_CNTL;
 
-    for (uint32_t led = 0; led < (uint32_t)num; led++)
+    for (uint32_t led = 0; led < (uint32_t)frame.num; led++)
     {
         // GRB, MSB-first
-        uint32_t v = last_grb[led];
+        uint32_t v = frame.want[led];
 
         for (uint32_t k = 0; k < 24u; k++)
         {
@@ -134,25 +132,21 @@ void WS2812_class::updata(void)
         }
     }
 
-    dirty = false;
     irq_restore_wch(irq);
+    // outside the IRQ-off window: no ISR touches the frame
+    ws2812_frame_mark_shown(&frame);
     RST();
 }
 
 void WS2812_class::set_RGB(uint8_t R, uint8_t G, uint8_t B, uint8_t index)
 {
-    if (index >= num) return;
-
     const uint32_t packed = ((uint32_t)G << 16) | ((uint32_t)R << 8) | (uint32_t)B;
-    if (last_grb[index] == packed) return;
-
-    last_grb[index] = packed;
-    dirty = true;
+    ws2812_frame_set(&frame, index, packed);
 }
 
 void WS2812_class::set_RGB_online(uint8_t R, uint8_t G, uint8_t B, uint8_t index, bool filament)
 {
-    if (index >= num) return;
+    if (index >= frame.num) return;
 
     if (!filament)
     {
