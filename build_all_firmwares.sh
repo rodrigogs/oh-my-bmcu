@@ -9,11 +9,14 @@ command -v python3 >/dev/null 2>&1 || { echo "ERROR: nie ma 'python3' w PATH"; e
 # oh-my-bmcu: firmwares/ is the upstream mirror (and CI's reference), so builds from this fork's
 # sources go to an untracked dir by default. Set OUT_DIR=firmwares to regenerate the mirror.
 OUT_DIR="${OUT_DIR:-build/firmwares}"
+# Absolute and without a trailing slash, so "firmwares/", "./firmwares" or an absolute path cannot
+# slip past the check below, and the staging dir never ends up inside OUT_DIR.
+OUT_DIR="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "${OUT_DIR}")"
 PIO_ENV="fw"
 
 # BUILD_ONLY_SOLO=1 builds just the SOLO image of every mode/AUTOLOAD/RGB combination (12 builds).
 BUILD_ONLY_SOLO="${BUILD_ONLY_SOLO:-0}"
-if [[ "${BUILD_ONLY_SOLO}" == "1" && "${OUT_DIR}" == "firmwares" ]]; then
+if [[ "${BUILD_ONLY_SOLO}" == "1" && "${OUT_DIR}" == "${PWD}/firmwares" ]]; then
   echo "ERROR: BUILD_ONLY_SOLO=1 would replace firmwares/ with a 12-image subset; use another OUT_DIR"
   exit 1
 fi
