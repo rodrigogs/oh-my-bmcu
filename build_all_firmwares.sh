@@ -6,17 +6,23 @@ cd "$(dirname "$0")"
 command -v pio >/dev/null 2>&1 || { echo "ERROR: nie ma 'pio' w PATH"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: nie ma 'python3' w PATH"; exit 1; }
 
-OUT_DIR="firmwares"
+# oh-my-bmcu: firmwares/ is the upstream mirror (and CI's reference), so builds from this fork's
+# sources go to an untracked dir by default. Set OUT_DIR=firmwares to regenerate the mirror.
+OUT_DIR="${OUT_DIR:-build/firmwares}"
 PIO_ENV="fw"
-
-# Build into a staging dir and only replace ${OUT_DIR} once every variant has been built,
-# so a failed build no longer leaves the committed firmware tree deleted.
-STAGE_DIR="${OUT_DIR}.new"
-MANIFEST_TMP="${STAGE_DIR}.manifest.txt"
-trap 'rm -rf "${STAGE_DIR}" "${MANIFEST_TMP}"' EXIT
 
 # BUILD_ONLY_SOLO=1 builds just the SOLO image of every mode/AUTOLOAD/RGB combination (12 builds).
 BUILD_ONLY_SOLO="${BUILD_ONLY_SOLO:-0}"
+if [[ "${BUILD_ONLY_SOLO}" == "1" && "${OUT_DIR}" == "firmwares" ]]; then
+  echo "ERROR: BUILD_ONLY_SOLO=1 would replace firmwares/ with a 12-image subset; use another OUT_DIR"
+  exit 1
+fi
+
+# Build into a staging dir and only replace ${OUT_DIR} once every variant has been built,
+# so a failed build no longer leaves the previous output deleted.
+STAGE_DIR="${OUT_DIR}.new"
+MANIFEST_TMP="${STAGE_DIR}.manifest.txt"
+trap 'rm -rf "${STAGE_DIR}" "${MANIFEST_TMP}"' EXIT
 
 TXT_MODE="which_to_choose_mode.txt"
 TXT_AUTOLOAD="which_to_choose_autoload.txt"
@@ -71,7 +77,7 @@ build_and_copy() {
 }
 
 rm -rf "${STAGE_DIR}"
-mkdir -p "${STAGE_DIR}"
+mkdir -p "$(dirname "${OUT_DIR}")" "${STAGE_DIR}"
 
 cp -f "${TXT_MODE}" "${STAGE_DIR}/${OUT_GUIDE}"
 
@@ -174,8 +180,13 @@ PY
 
 mv "${MANIFEST_TMP}" "${STAGE_DIR}/manifest.txt"
 
-rm -rf "${OUT_DIR}"
+# Move the previous output aside instead of deleting it first, so a failure here cannot lose
+# both the old tree and the fresh build. The finished build is no longer the trap's to delete.
+rm -rf "${OUT_DIR}.old"
+[[ -e "${OUT_DIR}" ]] && mv "${OUT_DIR}" "${OUT_DIR}.old"
 mv "${STAGE_DIR}" "${OUT_DIR}"
+trap - EXIT
+rm -rf "${OUT_DIR}.old"
 
 echo
 echo "DONE. Wyniki w: ${OUT_DIR}/"

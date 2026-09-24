@@ -11,3 +11,4 @@
 # build_all_firmwares.sh staging output
 firmwares.new/
 firmwares.new.manifest.txt
+build/
