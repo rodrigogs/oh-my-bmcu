@@ -55,8 +55,11 @@ bool Flash_AMS_state_read(uint8_t* loaded_channel);
 bool Flash_AMS_state_write(uint8_t loaded_channel);
 
 // CAL: 1x 256B
-bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4]);
-bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4]);
+// fallback_mask: channels whose range is a calibration fallback, kept in the header's rsv bits 4..7
+// next to the polarity bits 0..3 (mc_pull_cal_range.h).
+bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4], uint8_t* fallback_mask);
+bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4],
+                                 uint8_t fallback_mask);
 bool Flash_MC_PULL_cal_clear(void);
 bool Flash_NVM_full_clear(void);
 

@@ -1,4 +1,5 @@
 #include "MC_PULL_calibration.h"
+#include "mc_pull_cal_range.h"
 #include "Motion_control.h"
 #include "ADC_DMA.h"
 #include "Flash_saves.h"
@@ -66,7 +67,7 @@ static inline float cal_apply_polarity(float v, int8_t pol)
     return (pol < 0) ? (3.30f - v) : v;
 }
 
-static const float    CAL_PRESS_DELTA_V = 0.1f;
+static const float    CAL_PRESS_DELTA_V = MC_PULL_CAL_PRESS_DELTA_V;
 static const float    CAL_CENTER_EPS_V  = 0.02f;
 static const uint32_t CAL_STABLE_MS     = 200;
 static const uint32_t CAL_TIMEOUT_MS    = 30000;
@@ -263,25 +264,56 @@ static bool capture_second_extreme_wait_release(int ch, float center_v, int8_t p
     return false;
 }
 
-static void capture_minmax_one_ch_event(int ch, float center_v, float &out_min, float &out_max, int8_t &out_pol)
+// Both steps on channel ch. The range to store comes from mc_pull_cal_run_channel(), which also
+// marks ch in run (and as a fallback if a side is one; see mc_pull_cal_range.h). A first step whose
+// end is too shallow to keep gets no yellow ack, like one that timed out.
+static void capture_minmax_one_ch_event(int ch, float center_v, mc_pull_cal_run_t &run,
+                                        float &out_min, float &out_max, int8_t &out_pol)
 {
     float vmin = center_v;
     float vmax = center_v;
     int8_t pol = 1;
 
     bool ok_min = capture_first_extreme_wait_release(ch, center_v, vmin, pol);
-    if (ok_min) blink_one(ch, 0x10, 0x10, 0x00, 2, 60, 60);
+    if (mc_pull_cal_low_ok(center_v, ok_min, vmin)) blink_one(ch, 0x10, 0x10, 0x00, 2, 60, 60);
 
     bool ok_max = capture_second_extreme_wait_release(ch, center_v, pol, vmax);
     if (ok_max) blink_one(ch, 0x10, 0x10, 0x00, 2, 60, 60);
 
-    if (vmin > (center_v - 0.050f)) vmin = (center_v - 0.050f);
-    if (vmax < (center_v + 0.050f)) vmax = (center_v + 0.050f);
-    if (vmax <= vmin + 0.10f) { vmin = center_v - 0.10f; vmax = center_v + 0.10f; }
+    const mc_pull_cal_range_t r =
+        mc_pull_cal_run_channel(&run, (uint8_t)ch, center_v, ok_min, vmin, pol, ok_max, vmax);
 
-    out_min = vmin;
-    out_max = vmax;
-    out_pol = pol;
+    out_min = r.vmin;
+    out_max = r.vmax;
+    out_pol = r.pol;
+}
+
+// Fast red flash on the buffers whose saved range is a fallback: at the end of the run that stored
+// it (calibrated buffers stay green) and briefly at every boot that loads it, before the bus
+// starts (see mc_pull_cal_range.h). Returns at once if there is nothing to show.
+static void blink_cal_fallback(const mc_pull_cal_run_t &run, bool at_boot)
+{
+    const uint32_t phases = 2u * mc_pull_cal_flashes(&run, at_boot);
+    if (phases == 0u) return;
+
+    for (uint32_t k = 0u; k < phases; k++)
+    {
+        const bool on = ((k & 1u) == 0u);
+        for (int ch = 0; ch < 4; ch++)
+        {
+            switch (mc_pull_cal_flash_led(&run, (uint8_t)ch, on, at_boot))
+            {
+            case MC_PULL_CAL_LED_RED:   MC_PULL_ONLINE_RGB_set(ch, 0x10, 0x00, 0x00); break;
+            case MC_PULL_CAL_LED_GREEN: MC_PULL_ONLINE_RGB_set(ch, 0x00, 0x10, 0x00); break;
+            default:                    MC_PULL_ONLINE_RGB_set(ch, 0x00, 0x00, 0x00); break;
+            }
+        }
+        RGB_update();
+        delay(MC_PULL_CAL_FLASH_MS);
+    }
+
+    for (int ch = 0; ch < 4; ch++) MC_PULL_ONLINE_RGB_set(ch, 0, 0, 0);
+    RGB_update();
 }
 
 void MC_PULL_calibration_clear()
@@ -297,7 +329,8 @@ void MC_PULL_calibration_boot()
 
     float offs[4], vmin[4], vmax[4];
     int8_t pol[4];
-    if (Flash_MC_PULL_cal_read(offs, vmin, vmax, pol))
+    uint8_t fallback_mask = 0u;
+    if (Flash_MC_PULL_cal_read(offs, vmin, vmax, pol, &fallback_mask))
     {
         for (int ch = 0; ch < 4; ch++)
         {
@@ -306,6 +339,8 @@ void MC_PULL_calibration_boot()
             MC_PULL_V_MAX[ch]    = vmax[ch];
             MC_PULL_POLARITY[ch] = (pol[ch] < 0) ? -1 : 1;
         }
+
+        blink_cal_fallback(mc_pull_cal_run_loaded(filament_channel_inserted, fallback_mask), true);
         return;
     }
 
@@ -369,6 +404,8 @@ void MC_PULL_calibration_boot()
 
     blink_all(0x10, 0x10, 0x00, 3, 60, 60);
 
+    mc_pull_cal_run_t run = {0u, 0u};
+
     for (int ch = 0; ch < 4; ch++)
     {
         if (!filament_channel_inserted[ch])
@@ -381,7 +418,7 @@ void MC_PULL_calibration_boot()
 
         float mn, mx;
         int8_t p;
-        capture_minmax_one_ch_event(ch, center_v_ref[ch], mn, mx, p);
+        capture_minmax_one_ch_event(ch, center_v_ref[ch], run, mn, mx, p);
 
         MC_PULL_V_MIN[ch] = mn;
         MC_PULL_V_MAX[ch] = mx;
@@ -392,7 +429,8 @@ void MC_PULL_calibration_boot()
         delay(80);
     }
 
-    const bool ok_cal = Flash_MC_PULL_cal_write_all(MC_PULL_V_OFFSET, MC_PULL_V_MIN, MC_PULL_V_MAX, MC_PULL_POLARITY);
+    const bool ok_cal = Flash_MC_PULL_cal_write_all(MC_PULL_V_OFFSET, MC_PULL_V_MIN, MC_PULL_V_MAX, MC_PULL_POLARITY,
+                                                    run.fallback_mask);
     const bool ok_mot = Motion_control_save_dm_key_none_thresholds();
     const bool ok = ok_wipe && ok_cal && ok_mot;
 
@@ -405,8 +443,14 @@ void MC_PULL_calibration_boot()
     if (ok_mot) show_diag_step(0x00, 0x00, 0x10);
     else        show_diag_step(0x10, 0x10, 0x10, 460, 220);
 
-    if (ok) blink_all(0x00, 0x10, 0x00, 2, 220, 220);
-    else    blink_all(0x10, 0x00, 0x00, 2, 260, 260);
+    switch (mc_pull_cal_end(ok, &run))
+    {
+    case MC_PULL_CAL_END_GREEN:       blink_all(0x00, 0x10, 0x00, 2, 220, 220); break;
+    case MC_PULL_CAL_END_FLASH_ERROR: blink_all(0x10, 0x00, 0x00, 2, 260, 260); break;
+    default:                          break;
+    }
+
+    blink_cal_fallback(run, false);
 
     delay(200);
 }

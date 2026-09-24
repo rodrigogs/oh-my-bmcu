@@ -1,4 +1,5 @@
 #include "Flash_saves.h"
+#include "mc_pull_cal_range.h"
 #include "hal/irq_wch.h"
 #include "nvm_journal.h"
 #include <string.h>
@@ -441,23 +442,20 @@ struct alignas(4) Flash_CAL_payload
     float vmax[4];
 };
 
-bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4])
+bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4],
+                                 uint8_t fallback_mask)
 {
     Flash_CAL_payload p;
     memcpy(p.offs, offs, sizeof(p.offs));
     memcpy(p.vmin, vmin, sizeof(p.vmin));
     memcpy(p.vmax, vmax, sizeof(p.vmax));
 
-    uint32_t rsv = 0u;
-    for (uint8_t ch = 0u; ch < 4u; ch++)
-    {
-        if (pol && pol[ch] < 0) rsv |= (1u << ch);
-    }
+    const uint32_t rsv = mc_pull_cal_rsv_pack(pol, fallback_mask);
 
     return nvm256_write(FLASH_NVM_CAL_ADDR, MAGIC_CAL, VER_1, rsv, &p, (uint16_t)sizeof(p));
 }
 
-bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4])
+bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4], uint8_t* fallback_mask)
 {
     Flash_CAL_payload p;
     uint16_t got = 0u;
@@ -476,8 +474,9 @@ bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t 
     if (pol)
     {
         for (uint8_t ch = 0u; ch < 4u; ch++)
-            pol[ch] = (rsv & (1u << ch)) ? -1 : 1;
+            pol[ch] = mc_pull_cal_rsv_pol(rsv, ch);
     }
+    if (fallback_mask) *fallback_mask = mc_pull_cal_rsv_fallback(rsv);
 
     return true;
 }
