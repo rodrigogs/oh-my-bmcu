@@ -7,6 +7,7 @@
 #include "as5600_sample.h"
 #include "app_api.h"
 #include "hal/time_hw.h"
+#include "motion_limits.h"
 
 static inline float absf(float x) { return (x < 0.0f) ? -x : x; }
 static inline float clampf(float x, float a, float b)
@@ -147,6 +148,11 @@ static GPIO_TypeDef* const AS5600_SDA_PORT[4] = { GPIOD, GPIOC, GPIOC, GPIOC };
 static const uint16_t      AS5600_SDA_PIN [4] = { GPIO_Pin_0, GPIO_Pin_15, GPIO_Pin_14, GPIO_Pin_13 };
 
 float speed_as5600[4] = {0, 0, 0, 0};
+
+// Gear position in AS5600 counts: the running sum of the angle steps that AS5600_distance_updata
+// adds to filament[].meters. It wraps; the motion limits (motion_limits.h) only take differences.
+static uint32_t as5600_count[4] = {0u, 0u, 0u, 0u};
+static_assert(ML_MM_PER_CNT == -kAS5600_MM_PER_CNT, "motion_limits.h: ML_MM_PER_CNT must match the AS5600 scale");
 // ===== AS5600 health gate (anti-runaway) =====
 static uint8_t g_as5600_good[4]     = {0,0,0,0};
 static uint8_t g_as5600_fail[4]     = {0,0,0,0};
@@ -166,6 +172,9 @@ static constexpr float PULL_PWM_MIN  = 400.0f;  // "kop" przy pullback
 
 static float g_pull_remain_m[4]  = {0,0,0,0};
 static float g_pull_speed_set[4] = {-PULL_V_FAST,-PULL_V_FAST,-PULL_V_FAST,-PULL_V_FAST}; // mm/s (ujemne)
+
+// motion_limits.h budgets time at the pull's slowest commanded speed.
+static_assert(ML_V_MIN_MM_S == PULL_V_END, "motion_limits.h: ML_V_MIN_MM_S must be PULL_V_END");
 
 float MC_PULL_V_OFFSET[4]      = {0.0f, 0.0f, 0.0f, 0.0f};
 float MC_PULL_V_MIN[4]         = {1.00f, 1.00f, 1.00f, 1.00f};
@@ -240,6 +249,11 @@ static float    dm_auto_remain_m[4]     = {0,0,0,0};
 static float    dm_auto_last_m[4]       = {0,0,0,0};
 
 static uint64_t dm_loaded_drop_t0_ms[4] = {0ull,0ull,0ull,0ull};
+
+// Time and stall limits of S2_PUSH / S2_RETRACT / S2_FAIL_RETRACT (motion_limits.h).
+static motion_guard dm_s2_guard[4];
+static_assert(DM_AUTO_PWM_PUSH >= ML_STALL_PWM && DM_AUTO_PWM_PULL >= ML_STALL_PWM,
+              "DM Stage-2 PWM must be covered by the stall check");
 #endif
 
 static constexpr float    AUTO_UNLOAD_START_PCT      = 80.0f;
@@ -1090,6 +1104,8 @@ public:
                         }
                         else
                         {
+                            const uint8_t dm_state_at_entry = dm_auto_state[CHx];
+
                             if (dm_auto_state[CHx] == DM_AUTO_IDLE)
                             {
                                 if (ks == 2u)
@@ -1349,6 +1365,32 @@ public:
                                 dm_auto_remain_m[CHx] = 0.0f;
                                 dm_auto_t0_ms[CHx]    = 0ull;
                                 break;
+                            }
+
+                            // Stage-2 stages end only on a switch or buffer event (the push also after 120 mm
+                            // of gear travel), so a blocked gear or a buffer that never relaxes kept 900 PWM on
+                            // for good. These states are only entered inside this block, so one that differs
+                            // from the state at the start of the pass has just been entered and starts its
+                            // guard. A limit fails the autoload the way three buffer aborts do: motor off, red,
+                            // until ks == 0. (S2_FAIL_RETRACT does not run today: the fail latch set with it
+                            // skips this state machine.)
+                            const uint8_t st = dm_auto_state[CHx];
+                            if ((st == DM_AUTO_S2_PUSH) || (st == DM_AUTO_S2_RETRACT) || (st == DM_AUTO_S2_FAIL_RETRACT))
+                            {
+                                if (st != dm_state_at_entry)
+                                {
+                                    ml_dm_s2_start(&dm_s2_guard[CHx], now_ms, as5600_count[CHx], DM_AUTO_S2_TARGET_M);
+                                }
+                                else if (motion_guard_check(&dm_s2_guard[CHx], now_ms, as5600_count[CHx], dm_autoload_x) != ML_OK)
+                                {
+                                    dm_fail_latch[CHx]    = 1u;
+                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                    dm_auto_try[CHx]      = 0u;
+                                    dm_auto_remain_m[CHx] = 0.0f;
+                                    dm_auto_t0_ms[CHx]    = 0ull;
+                                    dm_autoload_x         = 0.0f;
+                                    MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
+                                }
                             }
                         }
                     }
@@ -2066,6 +2108,7 @@ void AS5600_distance_updata(uint32_t now_ticks)
             const float dist_mm = (float)diff * kAS5600_MM_PER_CNT;
             speed_as5600[i] = dist_mm * ((1000000.0f * (float)tpus) / (float)dt);
             A.filament[i].meters += dist_mm * 0.001f;
+            as5600_count[i] += (uint32_t)diff; // integer position for the motion limits
             break;
         }
         case AS5600_TRACK_SKIP:
@@ -2095,6 +2138,14 @@ enum filament_now_position_enum
 static filament_now_position_enum filament_now_position[4];
 static float filament_pull_back_meters[4];
 
+// Time/distance/stall limits of filament_pulling_back and filament_redetect (motion_limits.h),
+// started when the channel enters each of them.
+static motion_guard pb_guard[4];
+
+// 1 = the channel's last pull back was stopped by a limit, so its unload did not finish; the status
+// LED blinks red while ml_unload_fault_kept holds (motor_motion_run).
+static uint8_t pb_unload_fault[4] = {0u, 0u, 0u, 0u};
+
 static float filament_pull_back_target[4] = {
     motion_control_pull_back_distance,
     motion_control_pull_back_distance,
@@ -2123,21 +2174,18 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
             const float target = filament_pull_back_target[i];
             const float d = absf(A.filament[i].meters - filament_pull_back_meters[i]);
 
-            if (target <= 0.0f || d >= target)
+            // Target reached, switches empty, or a time/stall limit (x_prev: PWM of the last pass).
+            const ml_result pb_end = ml_pull_back_check(&pb_guard[i], time_now, as5600_count[i], _MOTOR_CONTROL::x_prev[i],
+                                                        target, d, MC_ONLINE_key_stu[i]);
+            if (pb_end != ML_OK)
             {
                 g_pull_remain_m[i]  = 0.0f;
                 g_pull_speed_set[i] = -PULL_V_FAST;
                 MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
                 filament_pull_back_target[i] = motion_control_pull_back_distance;
                 filament_now_position[i] = filament_redetect;
-            }
-            else if (MC_ONLINE_key_stu[i] == 0)
-            {
-                g_pull_remain_m[i]  = 0.0f;
-                g_pull_speed_set[i] = -PULL_V_FAST;
-                MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
-                filament_pull_back_target[i] = motion_control_pull_back_distance;
-                filament_now_position[i] = filament_redetect;
+                ml_redetect_start(&pb_guard[i], time_now, as5600_count[i], motion_control_pull_back_distance);
+                pb_unload_fault[i] = ml_is_limit(pb_end) ? 1u : 0u;
             }
             else
             {
@@ -2161,7 +2209,10 @@ static bool motor_motion_filamnet_pull_back_to_online_key(uint64_t time_now)
         {
             MC_STU_RGB_set_latch(i, 0xFFu, 0xFFu, 0x00u, time_now, 0u);
 
-            if (MC_ONLINE_key_stu[i] == 0)
+            // Pushes until a switch sees filament, or until a distance/time/stall limit: then it goes
+            // idle the same way, and the printer's slot shows the switches' state again.
+            if (ml_redetect_check(&pb_guard[i], time_now, as5600_count[i], _MOTOR_CONTROL::x_prev[i],
+                                  MC_ONLINE_key_stu[i]) == ML_OK)
             {
                 MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_redetect, 100, time_now);
             }
@@ -2278,6 +2329,7 @@ static void motor_motion_switch(uint64_t time_now)
 
                 g_pull_remain_m[num]  = target;
                 g_pull_speed_set[num] = -PULL_V_FAST;
+                ml_pull_back_start(&pb_guard[num], time_now, as5600_count[num], target);
 
                 before_pb_retracted_m[num] = 0.0f;
                 before_pb_sign[num]        = 0;
@@ -2513,6 +2565,19 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
     {
         for (uint8_t i = 0; i < kChCount; i++)
             MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+    }
+
+    // Unload stopped by a limit: the printer is told it finished, so the status LED blinks red (1 s on,
+    // 1 s off) until the filament leaves the switches or the printer starts another move on the channel.
+    // The DM autoload and auto-unload colours below, and the AS5600 fault red, still win.
+    for (uint8_t i = 0; i < kChCount; i++)
+    {
+        const filament_now_position_enum p = filament_now_position[i];
+        const bool busy = (p != filament_idle) && (p != filament_redetect);
+        pb_unload_fault[i] = ml_unload_fault_kept(pb_unload_fault[i] != 0u, MC_ONLINE_key_stu[i], busy) ? 1u : 0u;
+
+        if (pb_unload_fault[i])
+            MC_STU_RGB_set(i, (((time_now / 1000ull) & 1ull) != 0ull) ? 0xFFu : 0x00u, 0x00u, 0x00u);
     }
 
     for (uint8_t i = 0; i < kChCount; i++)
