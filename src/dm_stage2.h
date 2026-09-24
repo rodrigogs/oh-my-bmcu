@@ -58,7 +58,9 @@
 // the window and kept its time out of the budget, and with key blips restarting Stage-1's 5 s it gave
 // a gear that does not turn another second of 900 PWM. Only a gap of more than ML_STEP_MAX_MS (200 ms)
 // between two passes is left out, and restarts the window: the channel was not run at all, for example
-// offline, with its AS5600 failed, or with the printer holding it outside the idle control. A run the
+// offline, with its AS5600 failed, or with the printer holding it outside the idle control, or its DM
+// block was not, because a jam latch brakes the idle control before it (jam_latch_brakes(); the latch
+// needs on_use in the same insertion, which the bound below excludes). A run the
 // key interrupted also goes on through Stage-1 from IDLE ('external only' after the other state),
 // which dm_autoload_gate otherwise allows once per insertion only: without that, such a run could only
 // wait in IDLE until its budget ran out.

@@ -1095,10 +1095,12 @@ public:
             return;
         }
 
-        // Latched (jam_latch.h): the on_use control, and hold_load in before_on_use while jammed.
+        // Latched (jam_latch.h): the on_use control, and hold_load in before_on_use and the idle control
+        // while jammed.
         const jam_ctrl_t jam_ctrl =
             (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use) ? JAM_CTRL_ON_USE :
             (motion == filament_motion_enum::filament_motion_before_on_use)        ? JAM_CTRL_BEFORE_ON_USE :
+            (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle)   ? JAM_CTRL_IDLE :
                                                                                      JAM_CTRL_OTHER;
         if (jam_latch_brakes(jam_ctrl, g_on_use_low_latch[CHx], g_on_use_jam_latch[CHx]))
         {

@@ -78,11 +78,9 @@ static inline bool jam_trip_update(jam_trip_t *t, float pct, uint32_t now_ms)
 //   (press the lever and feed filament, or lift the buffer) raises the buffer above that level,
 //   and the resume then releases it; or
 // - the buffer is at or above a release level on every pass for JAM_RELEASE_MS. The BMCU does not
-//   feed a latched channel while it is the printer's active one (braked in on_use, before_on_use
-//   and stop_on_use, stopped in idle and send_out: jam_latch_brakes() below). One that is not
-//   (another channel or none is active) runs the idle control, which pushes only below 30% (and
-//   the DM autoload in it stops its 120 mm push above 75%). So only a person or the printer moving
-//   filament can get it to a release level:
+//   feed a latched channel (braked in on_use, before_on_use, stop_on_use and the idle control,
+//   and stopped in idle and send_out while it is the printer's active one: jam_latch_brakes()
+//   below), so only a person or the printer moving filament can get it there:
 //   - while the printer is in on_use or stop_on_use (printing or paused, filament held in the
 //     extruder): the on_use band's low edge (MC_ON_USE_TARGET_PCT - MC_ON_USE_BAND_LO_DELTA, where
 //     the on_use control stops pushing). The spring's rest position (50%, the calibrated neutral)
@@ -100,8 +98,8 @@ static inline bool jam_trip_update(jam_trip_t *t, float pct, uint32_t now_ms)
 
 // Outside on_use/stop_on_use the printer may move filament (a pull-back pushes it back into the
 // buffer), and nothing brings the buffer back to its rest: a latched channel is stopped in idle and
-// send_out while it is the printer's active one, and the idle control, which it runs otherwise,
-// leaves the buffer wherever it is between 30% and 70%
+// send_out while it is the printer's active one and braked in the idle control otherwise, and the
+// idle control itself leaves the buffer wherever it is between 30% and 70%
 // (MC_PULL_DEADBAND_PCT_LOW/HIGH). So after a printer-driven unload slider friction can hold it at
 // or above the on_use band (51.8% to 60% on A1), and a release there would let the printer's
 // reload drive the motor into the tangle. 85% is above that 30-70% range, and it is the level at
@@ -284,6 +282,9 @@ typedef enum
     JAM_CTRL_ON_USE = 0,     // the on_use control (filament_motion_pressure_ctrl_on_use)
     JAM_CTRL_BEFORE_ON_USE,  // hold_load in before_on_use: below MC_LOAD_S2_HOLD_TARGET_PCT (90% on
                              // A1) it pushes, at up to 1000 PWM from MC_LOAD_S2_PUSH_START_PCT down
+    JAM_CTRL_IDLE,           // the idle control (filament_motion_pressure_ctrl_idle): outside
+                             // 30-70% (MC_PULL_DEADBAND_PCT_LOW/HIGH) its PID drives the buffer
+                             // back towards 50%, at up to 800 PWM; the DM autoload runs inside it
     JAM_CTRL_OTHER,          // anything else
 } jam_ctrl_t;
 
@@ -294,12 +295,17 @@ typedef enum
 //   resumed a paused print with before_on_use while the spool was still held had the motor push
 //   into the tangle at up to 1000 PWM (duty-cycled by the anti-stall). Its silent 20 s latch cannot
 //   be set there: set_motion() clears it when the channel enters before_on_use.
-// The active channel's other states need nothing here: stop_on_use brakes anyway,
-// motor_motion_switch stops a latched active channel in idle and send_out, and before_pull_back and
-// the pull back only retract. Not covered: a latched channel that is not the printer's active one
-// (another channel or none is active, filament at the switch) runs the idle control, which is not
-// braked here: below 30% its PID pushes the buffer back towards 50%, at up to 800 PWM (and the DM
-// autoload in it pushes at 900 PWM for a channel not marked loaded).
+// - The idle control: while the jam latch is set. motor_motion_switch stops a latched channel in
+//   idle while it is the printer's active one, but one that is not (another channel or none is
+//   active, filament at the switch) ran the idle control: below 30% its PID pushed the buffer back
+//   towards 50% at up to 800 PWM, with no anti-stall, into a spool that was still held, for as long
+//   as the buffer stayed low, and the DM autoload in it pushed at 900 PWM for a channel not marked
+//   loaded. Both are braked now. The silent 20 s latch cannot be set there either (set_motion()
+//   clears it on entry).
+// The other states need nothing here: stop_on_use brakes anyway, motor_motion_switch stops a
+// latched active channel in idle and send_out, and before_pull_back and the pull back only retract.
+// The auto-unload and the manual empty pull (auto_unload.h) drive the motor instead of run(), and
+// they only retract: the buffer-lift gesture still unloads a latched channel.
 // The release rules above are unchanged. A resume with before_on_use releases the latch at once if
 // the buffer has been back at JAM_TRIP_PCT since the trip (a person fed filament or lifted the
 // buffer), and hold_load runs from that pass on. If it has not, the channel stays latched and
@@ -309,6 +315,6 @@ typedef enum
 static inline bool jam_latch_brakes(jam_ctrl_t ctrl, uint8_t brake, uint8_t jam)
 {
     if (ctrl == JAM_CTRL_ON_USE) return brake != 0u;
-    if (ctrl == JAM_CTRL_BEFORE_ON_USE) return jam != 0u;
+    if ((ctrl == JAM_CTRL_BEFORE_ON_USE) || (ctrl == JAM_CTRL_IDLE)) return jam != 0u;
     return false;
 }
