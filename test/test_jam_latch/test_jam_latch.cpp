@@ -5,9 +5,9 @@
 // once the buffer has come back to 40% since the trip, so a printer that retries by itself keeps
 // getting 0xF06F; the buffer releases it at the on_use band's low edge while the printer is in
 // on_use/stop_on_use and only at 85% in any other state; a tangle that is still there after a
-// release must latch again. While latched, the BMCU must not push the filament of the printer's
-// active channel in any printer state: its on_use control and hold_load in before_on_use are
-// braked (jam_latch_brakes).
+// release must latch again. While latched, the BMCU must not push the channel's filament in any
+// printer state, also when another channel (or none) is active: its on_use control, hold_load in
+// before_on_use and its idle control are braked (jam_latch_brakes).
 // The 20 s full-force push limit (jam_push_limit_pass) must count full-force push time at any
 // buffer level, restart below full force, brake the channel at exactly 20 s and saturate there.
 
@@ -58,32 +58,43 @@ void setUp(void)
 
 void tearDown(void) {}
 
-// What run() runs for the channel once motor_motion_switch has followed printer command m: the on_use
-// control for on_use, hold_load for before_on_use (active channel, filament at the switch).
-// Everything else it runs for the active channel cannot push a latched channel: stop_on_use brakes,
-// idle and send_out are stopped, the pull-back states only retract. A channel that is not active
-// runs the idle control, which is not braked and can push (below 30%, or the DM autoload in it);
-// these cases do not model it.
+// What run() runs for the channel once motor_motion_switch has followed printer command m. The
+// active channel with filament at the switch: the on_use control for on_use, hold_load for
+// before_on_use, the idle control for idle unless the jam latch is set; anything else it runs there
+// cannot push a latched channel (stop_on_use brakes, a latched channel is stopped in idle and
+// send_out, the pull-back states only retract). A channel that is not active, or with no filament
+// at the switch: the idle control.
 static jam_ctrl_t bmcu_ctrl(_filament_motion m)
 {
-    if (!(active && filament)) return JAM_CTRL_OTHER;
+    if (!(active && filament)) return JAM_CTRL_IDLE;
     if (m == ON_USE) return JAM_CTRL_ON_USE;
     if (m == BEFORE_ON_USE) return JAM_CTRL_BEFORE_ON_USE;
+    if ((m == IDLE) && !jam) return JAM_CTRL_IDLE;
     return JAM_CTRL_OTHER;
 }
 
-// run() on this pass: the on_use control or hold_load runs (and may push) unless it is braked.
-static bool motor_pushes(jam_ctrl_t c)
+// run() on this pass: the on_use control or hold_load runs (and may push), and so does the idle
+// control with the buffer below 30% (MC_PULL_stu -1: its PID pushes towards 50%), unless braked.
+static bool motor_pushes(jam_ctrl_t c, float pct)
 {
-    return ((c == JAM_CTRL_ON_USE) || (c == JAM_CTRL_BEFORE_ON_USE)) && !jam_latch_brakes(c, brake, jam);
+    const bool may_push = (c == JAM_CTRL_ON_USE) || (c == JAM_CTRL_BEFORE_ON_USE) ||
+                          ((c == JAM_CTRL_IDLE) && ((int)(pct + 0.5f) < 30));
+    return may_push && !jam_latch_brakes(c, brake, jam);
 }
 
-// One main-loop pass for the channel: jam_latch_pass() in Motion_control_run, then
-// motor_motion_switch, which puts the BMCU into its on_use control when the printer commands on_use
-// for the active channel and filament is at the switch, then run(). So the BMCU follows the printer
-// one pass later, as jam_latch_pass() sees it, and run() sees the latch as this pass left it.
+// One main-loop pass for the channel: Motion_control_run clears both latches when no filament is
+// at the switch and the jam latch is set, and runs jam_latch_pass(), then motor_motion_switch puts
+// the BMCU into its on_use control when the printer commands on_use for the active channel and
+// filament is at the switch, then run(). So the BMCU follows the printer one pass later, as
+// jam_latch_pass() sees it, and run() sees the latch as this pass left it.
 static jam_event_t pass(_filament_motion m, float pct)
 {
+    if (!filament && jam)
+    {
+        brake = 0u;
+        jam = 0u;
+    }
+
     jam_in_t in;
     in.on_use_ctrl = bmcu_on_use;
     in.filament = filament;
@@ -96,7 +107,7 @@ static jam_event_t pass(_filament_motion m, float pct)
     if (ev == JAM_EVENT_TRIP) trips++;
 
     bmcu_on_use = active && filament && (m == ON_USE);
-    pushing = motor_pushes(bmcu_ctrl(m));
+    pushing = motor_pushes(bmcu_ctrl(m), pct);
     if (jam && pushing) jammed_pushes++;
     now++;
     return ev;
@@ -462,9 +473,13 @@ static void test_brake_decision_per_control(void)
     TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_ON_USE, 0u, 0u));
     TEST_ASSERT_TRUE(jam_latch_brakes(JAM_CTRL_ON_USE, 1u, 0u));
     TEST_ASSERT_TRUE(jam_latch_brakes(JAM_CTRL_ON_USE, 1u, 1u));
-    // hold_load in before_on_use: the jam latch brakes it.
+    // hold_load in before_on_use and the idle control: the jam latch brakes them (the 20 s latch
+    // cannot be set there: set_motion() clears it on entry).
     TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_BEFORE_ON_USE, 0u, 0u));
     TEST_ASSERT_TRUE(jam_latch_brakes(JAM_CTRL_BEFORE_ON_USE, 1u, 1u));
+    TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_IDLE, 0u, 0u));
+    TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_IDLE, 1u, 0u));
+    TEST_ASSERT_TRUE(jam_latch_brakes(JAM_CTRL_IDLE, 1u, 1u));
     // Anything else is not run()'s business here (stopped, braked or retracting by itself).
     TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_OTHER, 0u, 0u));
     TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_OTHER, 1u, 0u));
@@ -516,6 +531,125 @@ static void test_before_on_use_pushes_again_from_the_pass_it_releases(void)
     setUp();
     TEST_ASSERT_EQUAL_INT32(-1, hold(BEFORE_ON_USE, 30.0f, 1000u));
     TEST_ASSERT_TRUE(pushing);
+}
+
+// ---- Motion_control.cpp at this commit: filament_motion_enum, verbatim ----
+enum class filament_motion_enum
+{
+    filament_motion_send,
+    filament_motion_redetect,
+    filament_motion_pull,
+    filament_motion_stop,
+    filament_motion_before_on_use,
+    filament_motion_stop_on_use,
+    filament_motion_pressure_ctrl_on_use,
+    filament_motion_pressure_ctrl_idle,
+    filament_motion_before_pull_back,
+};
+// ---- end of the Motion_control.cpp copy ----
+
+// run()'s choice of the control it asks jam_latch_brakes() about, for MOTOR_CONTROL[ch].motion.
+static jam_ctrl_t run_jam_ctrl(filament_motion_enum motion)
+{
+// ---- Motion_control.cpp at this commit: run()'s control for jam_latch_brakes(), verbatim ----
+        const jam_ctrl_t jam_ctrl =
+            (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use) ? JAM_CTRL_ON_USE :
+            (motion == filament_motion_enum::filament_motion_before_on_use)        ? JAM_CTRL_BEFORE_ON_USE :
+            (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle)   ? JAM_CTRL_IDLE :
+                                                                                     JAM_CTRL_OTHER;
+// ---- end of the Motion_control.cpp copy ----
+    return jam_ctrl;
+}
+
+static void test_run_brakes_a_jammed_channel_in_every_control_that_pushes(void)
+{
+    // With the jam latch set, run() brakes the on_use control, hold_load and the idle control. The
+    // rest brake or stop by themselves (stop, stop_on_use), only retract (pull, before_pull_back), or
+    // run only without filament at the switch (redetect) or unlatched (send: motor_motion_switch).
+    struct { filament_motion_enum m; jam_ctrl_t c; bool braked; } rows[] = {
+        {filament_motion_enum::filament_motion_pressure_ctrl_on_use, JAM_CTRL_ON_USE, true},
+        {filament_motion_enum::filament_motion_before_on_use, JAM_CTRL_BEFORE_ON_USE, true},
+        {filament_motion_enum::filament_motion_pressure_ctrl_idle, JAM_CTRL_IDLE, true},
+        {filament_motion_enum::filament_motion_send, JAM_CTRL_OTHER, false},
+        {filament_motion_enum::filament_motion_redetect, JAM_CTRL_OTHER, false},
+        {filament_motion_enum::filament_motion_pull, JAM_CTRL_OTHER, false},
+        {filament_motion_enum::filament_motion_stop, JAM_CTRL_OTHER, false},
+        {filament_motion_enum::filament_motion_stop_on_use, JAM_CTRL_OTHER, false},
+        {filament_motion_enum::filament_motion_before_pull_back, JAM_CTRL_OTHER, false},
+    };
+    for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); i++)
+    {
+        TEST_ASSERT_EQUAL_INT(rows[i].c, run_jam_ctrl(rows[i].m));
+        TEST_ASSERT_EQUAL(rows[i].braked, jam_latch_brakes(run_jam_ctrl(rows[i].m), 1u, 1u));
+        TEST_ASSERT_FALSE(jam_latch_brakes(run_jam_ctrl(rows[i].m), 0u, 0u));
+    }
+}
+
+static void test_a_latched_channel_that_is_not_active_is_braked_in_its_idle_control(void)
+{
+    // A tangle trips on the active channel with the buffer drained to 20%; the printer then makes
+    // another channel active, or none, and the filament stays at the switch: the channel runs the
+    // idle control, whose PID would push towards 50% below 30% at up to 800 PWM, into the spool that
+    // is still held. It is braked instead, for as long as it stays latched.
+    TEST_ASSERT_EQUAL_INT32(500, hold(ON_USE, 20.0f, 1000u));
+    TEST_ASSERT_EQUAL_UINT8(1u, jam);
+    TEST_ASSERT_EQUAL_INT32(-1, hold(STOP_ON_USE, 20.0f, 2000u));
+    active = false;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 20.0f, 60000u));
+    TEST_ASSERT_FALSE(pushing);
+    TEST_ASSERT_EQUAL_INT32(-1, hold(ON_USE, 29.0f, 60000u)); // its motion field is not read then
+    TEST_ASSERT_EQUAL_UINT8(1u, jam);
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
+
+    // The release rules do not depend on it: 85% held for 1 s releases it, and the idle control
+    // then pushes below 30% again.
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 84.9f, 5000u));
+    TEST_ASSERT_EQUAL_INT32(1000, hold(IDLE, JAM_RELEASE_AWAY_PCT, 2000u));
+    TEST_ASSERT_EQUAL_UINT8(0u, jam);
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 20.0f, 10u));
+    TEST_ASSERT_TRUE(pushing);
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
+
+    // Filament pulled out past the switch: Motion_control_run clears the latch, nothing is braked.
+    setUp();
+    TEST_ASSERT_EQUAL_INT32(500, hold(ON_USE, 20.0f, 1000u));
+    active = false;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 20.0f, 1000u));
+    TEST_ASSERT_FALSE(pushing);
+    filament = false;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 20.0f, 10u));
+    TEST_ASSERT_EQUAL_UINT8(0u, jam);
+    TEST_ASSERT_EQUAL_UINT8(0u, brake);
+    TEST_ASSERT_TRUE(pushing);
+
+    // Made active again with the buffer back at 40% (fed by hand): the printer's resume releases it.
+    setUp();
+    TEST_ASSERT_EQUAL_INT32(500, hold(ON_USE, 20.0f, 1000u));
+    active = false;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 20.0f, 1000u));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 45.0f, 500u));
+    active = true;
+    TEST_ASSERT_EQUAL_INT32(0, hold(BEFORE_ON_USE, 45.0f, 10u));
+    TEST_ASSERT_EQUAL_UINT8(0u, jam);
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
+}
+
+static void test_an_unlatched_or_active_idle_channel_is_not_affected(void)
+{
+    // Never latched: the idle control pushes below 30% as before, active or not.
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 20.0f, 100u));
+    TEST_ASSERT_TRUE(pushing);
+    active = false;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 20.0f, 100u));
+    TEST_ASSERT_TRUE(pushing);
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 50.0f, 100u));
+    TEST_ASSERT_FALSE(pushing); // inside 30-70%: the idle control does not drive
+
+    // Latched while active in idle: stopped by motor_motion_switch, as before.
+    setUp();
+    TEST_ASSERT_EQUAL_INT32(500, hold(ON_USE, 20.0f, 1000u));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 20.0f, 10000u));
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
 }
 
 // ---- 20 s full-force push limit ----
@@ -694,6 +828,9 @@ int main(void)
     RUN_TEST(test_brake_decision_per_control);
     RUN_TEST(test_resume_with_before_on_use_does_not_push_into_a_held_spool);
     RUN_TEST(test_before_on_use_pushes_again_from_the_pass_it_releases);
+    RUN_TEST(test_run_brakes_a_jammed_channel_in_every_control_that_pushes);
+    RUN_TEST(test_a_latched_channel_that_is_not_active_is_braked_in_its_idle_control);
+    RUN_TEST(test_an_unlatched_or_active_idle_channel_is_not_affected);
     RUN_TEST(test_push_limit_full_force_is_a_push_above_800);
     RUN_TEST(test_push_limit_brakes_at_20s);
     RUN_TEST(test_push_limit_restarts_below_full_force);
