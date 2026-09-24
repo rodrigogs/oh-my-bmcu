@@ -6,8 +6,9 @@ passes this plan. Run the **basic** checks (printer only) for every new image. T
 ones need a logic analyser on the BMCU and are for chasing a regression.
 
 Setup: Bambu Lab A1 on printer firmware 01.08.01.00, AMS type "AMS", one BMCU 370C, image
-`env:a1_solo_autoload_rgboff` (CI artifact or local `pio run`), flashed as described in
-[README.md](README.md#flash) (`bmcu_flasher.py ... --mode usb --verify-last`).
+`env:a1_solo_autoload_rgboff` (CI artifact `oh-my-bmcu-a1-<commit>-push` or a local `pio run`),
+flashed as described in [README.md](README.md#flash)
+(`bmcu_flasher.py ... --mode usb --verify-last`).
 
 ## 0. Before flashing
 
@@ -17,22 +18,30 @@ Setup: Bambu Lab A1 on printer firmware 01.08.01.00, AMS type "AMS", one BMCU 37
 
 ## 1. First boot and calibration
 
-- [ ] After flashing, calibrate properly: move each buffer to both ends when its LED prompts
-      (upstream video: https://www.youtube.com/watch?v=Hn_DNzSmhuc). The end blink is green, and later
-      boots show no red flash.
+- [ ] After flashing, calibrate properly, one buffer at a time (upstream video:
+      https://www.youtube.com/watch?v=Hn_DNzSmhuc). All LEDs blink yellow three times, then:
+      - while the buffer's LED blinks blue, move it to its low end (the end the extruder pulls it to
+        when the filament is tight, the same end you hold to recalibrate) and let it return to rest;
+      - while it blinks red, lift it to the other end and let it return.
+      Two yellow blinks confirm each step. The order matters: the first end becomes the low end. The
+      end blink is green, and later boots show no red flash.
 - [ ] Optional, to check the fallback: let one buffer time out. It flashes red quickly at the end, then
       for about 0.7 s at every boot; the printer still finds the AMS. Recalibrate it properly and the
       boot flash stops.
 - [ ] Reconnect to the printer only while it is unplugged, then power on. SYS LED: red until the
       printer's first heartbeat, then white. The printer shows AMS A.
+- [ ] Direction check, printer on and the slot still empty: push the buffer to its low end for a
+      moment (well under 5 s, or it starts a recalibration): its LED turns blue. Lift it: the LED
+      turns red, and the motor may turn backwards while it is up (upstream's manual unload). If the
+      colours are the other way round, the calibration was done in the wrong order: recalibrate.
 
 ## 2. Bus, filament info and flash
 
 - [ ] Load PLA into slot 1 (AUTOLOAD). The LEDs go through the load colours and end steady; the
       loaded slot's LED does not flicker while nothing changes.
 - [ ] Change slot 1 type/colour three times within a few seconds (printer screen or OrcaStudio).
-      Wait at least 2 s, power-cycle the printer: slot 1 keeps the last values (it used to fall back
-      to "PETG, white").
+      Wait about 2 s per edited slot, power-cycle the printer: slot 1 keeps the last values (it used
+      to fall back to "PETG, white").
 - [ ] Change slot 1's filament at least 7 times, about 1 s apart, then power-cycle: the last values
       stay. This goes through the page erase every 6 records and confirms that erased flash reads
       `0xE339E339` on this chip, which every save relies on.
@@ -58,10 +67,15 @@ Setup: Bambu Lab A1 on printer firmware 01.08.01.00, AMS type "AMS", one BMCU 37
       later than with upstream.
 - [ ] Resume with the spool still held and nothing else done: it pauses again at once, motor
       braked, no push.
-- [ ] Free the spool, feed filament until the buffer is above 40 %, then resume: printing continues.
-      While paused, holding the buffer at or above about 52 % for 1 s also turns the red LED off.
+- [ ] Free the spool, feed filament until the buffer is above 40 %, then resume: printing should
+      continue. While paused, holding the buffer at or above about 52 % for 1 s should also turn the
+      red LED off. Both depend on what the A1 sends on a resume, which has not been observed yet:
+      note which of the two worked, and what the printer showed if neither did.
 - [ ] If the A1 unloads after the tangle: the latch holds through the pull back, idle and the
       reload, unless the buffer is lifted above 85 %.
+- [ ] Optional, hard to set up by hand: brake the spool just enough that the buffer stays above
+      40 % while the motor strains at full force for more than 20 s. The channel then brakes and its
+      LED turns red; the print only pauses if the buffer then stays below 40 % for 0.5 s.
 
 ## 5. Unload limits
 
@@ -78,7 +92,10 @@ Only if the A1 ever stops finding the AMS after a power cycle with a slot loaded
 
 - [ ] With the default image (`env:a1_solo_autoload_rgboff`): load a slot into the extruder, then
       power-cycle the printer 5 times. Note each time whether the printer finds AMS A.
-- [ ] Flash `env:a1_solo_autoload_rgboff_no_boot_restore` and repeat the same 5 power cycles. Until
+- [ ] Flash `env:a1_solo_autoload_rgboff_no_boot_restore` (from the same CI artifact, or
+      `pio run -e a1_solo_autoload_rgboff_no_boot_restore`, then
+      `.pio/build/a1_solo_autoload_rgboff_no_boot_restore/firmware.bin`) and repeat the same 5 power
+      cycles. Until
       the printer uses the loaded slot, its LED shows the idle colour. A print cut by a power loss
       must still resume, and an unload right after boot must still retract.
 - [ ] Repeat both with several slots holding filament and none loaded in the extruder.
@@ -90,6 +107,8 @@ Only if the A1 ever stops finding the AMS after a power cycle with a slot loaded
 - [ ] Insert filament: Stage-2 feeds about 120 mm past the inner switch, once.
 - [ ] Nudge the filament so a switch flickers without removing it: no second 120 mm push.
 - [ ] Pull the filament out past both switches and insert it again: Stage-2 runs again.
+- [ ] If Stage-2 ever gives up (channel LED red after an insertion): loading that slot from the
+      printer clears the red LED once the load finishes, and so does pulling the filament out.
 
 ## 8. Watchdog
 
@@ -97,7 +116,9 @@ Only if the A1 ever stops finding the AMS after a power cycle with a slot loaded
 - [ ] First boot after flashing (empty NVM): the motor-direction test and a full calibration that
       takes minutes finish with no reset.
 - [ ] The 5 s recalibration hold: blue blink, NVM wipe, reboot into calibration, and no magenta
-      flash or reset during it (this confirms a software reset stops the watchdog on this chip).
+      flash or reset during it (this confirms a software reset stops the watchdog on this chip). If
+      it resets instead (magenta flashes, calibration restarting about every second), unplug the
+      BMCU, since a power-on reset does stop it, calibrate at the next boot and report it.
 - [ ] Optional, with a test build that hangs in the main loop while a motor runs: the motor stops,
       the BMCU reboots after about 1 s (0.67 to 1.6 s) with three magenta flashes, and the printer
       finds the AMS again.

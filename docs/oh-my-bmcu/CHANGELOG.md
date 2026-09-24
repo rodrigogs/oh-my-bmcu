@@ -7,9 +7,10 @@ Details, reasoning and review notes are in each commit message and in the
 
 ## Unreleased
 
-Every change below has host unit tests (where the logic can run off the hardware), an adversarial
-review and a green CI. None of it has run on the A1 yet, except upstream PR #134: follow the
-[hardware test plan](hardware-test-plan.md) before relying on an image.
+Every change below had an adversarial review and a green CI, and has host unit tests for the logic
+that can be isolated from the hardware (the trap handlers, the LED and motor wiring and the bus
+timing can only be checked on the A1). None of it has run on the A1 yet, except upstream PR #134:
+follow the [hardware test plan](hardware-test-plan.md) before relying on an image.
 
 ### Bus with the printer
 
@@ -44,7 +45,7 @@ review and a green CI. None of it has run on the A1 yet, except upstream PR #134
 
 - Give timed-out or shallow calibration steps a safe range, flag them in NVM and flash them at every
   boot (`2ba70e9`).
-- Average calibration readings in float instead of double, about 3 KB less flash (`1851c71`).
+- Average calibration readings in float instead of double, 3,828 bytes less flash (`1851c71`).
 - Erase a flash journal page before writing over a slot that is not erased (`c3b5772`).
 
 ### Watchdog and faults
@@ -65,6 +66,11 @@ review and a green CI. None of it has run on the A1 yet, except upstream PR #134
 - `.gitignore`, pinned platform/SDK revisions, an explicit default env for the A1 target, validation
   of the `env:fw` variables, a safe `build_all_firmwares.sh` that builds every published mode.
 - Host unit tests with Unity (`pio test -e native`) and a check that verbatim firmware copies in
-  tests still match `src/`.
-- CI: the A1 image with a size budget and its sha256, the host tests with GCC, and a rebuild of the
-  V10.5 sources that must match the published binaries bit for bit.
+  tests still match `src/`; every copy is marked verbatim (checked) or adapted (listed), and any
+  other marker fails (`70f4310`).
+- CI: the host tests with GCC and a rebuild of the V10.5 sources that must match the published
+  binaries bit for bit. Only after both pass, both A1 images (the default and the #148 A/B image)
+  are built with a size budget, their sha256 and an ELF check (strong trap and USART handlers, no
+  soft-double routines), and uploaded as one artifact (`06c712e`).
+- `build_all_firmwares.sh` normalises `OUT_DIR`, so no spelling of `firmwares/` slips past the
+  `BUILD_ONLY_SOLO=1` guard (`65bbd90`).
