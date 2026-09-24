@@ -39,15 +39,32 @@ private:
     int drop_bytes = 0;
     volatile uint32_t rx_last_tick = 0;
     volatile uint32_t tx_end_tick = 0;
-    void (*port_send_datas)(uint8_t *data, uint16_t len);
+    void (*port_send_datas)(uint8_t *data, uint16_t len); // starts the TX; only tx_start() calls it
 
+    // Drop the frame (or heartbeat skip) in progress. Also runs in the main loop at TX start, so the
+    // ISR-owned fields go through volatile: kept after the `idle = false` store in tx_start().
     void rx_resync()
     {
+        volatile int &drop = *(volatile int *)&drop_bytes;
         // A heartbeat whose header passed CRC8 counts even if its tail was cut, as it did before.
-        if (drop_bytes > 0)
+        if (drop > 0)
             bambubus_heartbeat_seen_fast();
-        _index = 0;
-        drop_bytes = 0;
+        *(volatile int *)&_index = 0;
+        drop = 0;
+    }
+
+    // Start of our TX (main loop). The printer waits for our reply, so normally no frame is arriving
+    // and the reset does nothing. If one did start first (we answered late), our TX garbles it and RX
+    // ignores its bytes meanwhile, so its head must not combine with the bytes after our TX. The gap
+    // resync misses that when RX echoes our own bytes (they are timestamped) or the reply is shorter
+    // than BUS_RX_RESYNC_GAP_TICKS (the 8-byte set_filament ACK takes 70 us). idle goes false first:
+    // from then on the RX ISR leaves the parser alone, so the reset cannot race with it (at worst
+    // rx_overrun() reports the same cut heartbeat again, which only refreshes its stamp).
+    void tx_start(uint8_t *data, uint16_t len)
+    {
+        idle = false;
+        rx_resync();
+        port_send_datas(data, len);
     }
 
 public:
@@ -114,9 +131,12 @@ public:
     }
 
     // TC ISR: the last byte of our reply has left the shifter and DE is released. now: STK_CNTL.
+    // RX bytes were not parsed during the TX; reset again so nothing from before it meets the
+    // bytes after it.
     inline __attribute__((always_inline)) void tx_done(uint32_t now)
     {
         tx_end_tick = now;
+        rx_resync();
         idle = true;
     }
 
@@ -277,7 +297,7 @@ public:
             uint8_t *tx = tx_build_buf();
             tx_build_sel ^= 1;
 
-            port_send_datas(tx, (uint16_t)len);
+            tx_start(tx, (uint16_t)len);
             send_data_len = 0;
         }
     }
@@ -287,7 +307,7 @@ public:
         if (len > 0 && len <= 1280)
         {
             if (!idle) return;
-            port_send_datas(data, len);
+            tx_start(data, len);
         }
     }
 } __attribute__((aligned(4)));

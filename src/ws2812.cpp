@@ -6,14 +6,13 @@
 //  - TH+TL = 1.25us ±600ns
 //  - T0H   = 0.4us  ±150ns
 //  - T1H   = 0.85us ±150ns
-//  - RES low >= 50us
+//  - RES low >= 50us (WS2812B-2020: > 280us). No wait here: RGB_update()'s 10 ms throttle keeps
+//    each strip's own pin low far longer between frames (ws2812_throttle_t in ws2812_frame.h).
 //
 // STK = HCLK/8. Przy HCLK=144MHz => STK=18MHz => 55.56ns/tick.
 #define WS2812_TBIT_TICKS  (22u)  // 1.222us @18MHz
 #define WS2812_T0H_TICKS   (7u)   // 0.389us @18MHz
 #define WS2812_T1H_TICKS   (15u)  // 0.833us @18MHz
-
-static uint32_t g_ws2812_rst_ticks = 0;
 
 #define RGB_H(p, m) do{ (p)->BSHR = (uint32_t)(m); }while(0)
 #define RGB_L(p, m) do{ (p)->BCR  = (uint32_t)(m); }while(0)
@@ -60,12 +59,6 @@ static const uint8_t kGamma8[256] =
 
 void WS2812_class::init(uint8_t _num, GPIO_TypeDef* _port, uint16_t _pin)
 {
-    if (!g_ws2812_rst_ticks) {
-        // 50us według datasheet, damy 100us
-        g_ws2812_rst_ticks = 100u * time_hw_ticks_per_us();
-        if (!g_ws2812_rst_ticks) g_ws2812_rst_ticks = 1u;
-    }
-
     if (_num > MAX_NUM) _num = MAX_NUM;
 
     ws2812_frame_init(&frame, _num);
@@ -90,12 +83,6 @@ void WS2812_class::clear(void)
     ws2812_frame_clear(&frame);
     for (uint32_t i = 0; i < (uint32_t)frame.num; i++) last_online_raw_rgb[i] = 0u;
     for (uint32_t i = 0; i < (uint32_t)frame.num; i++) last_online_is_filament[i] = 0u;
-}
-
-void WS2812_class::RST(void)
-{
-    RGB_L(port, pin);
-    delayTicks32(g_ws2812_rst_ticks);
 }
 
 void WS2812_class::updata(void)
@@ -135,7 +122,6 @@ void WS2812_class::updata(void)
     irq_restore_wch(irq);
     // outside the IRQ-off window: no ISR touches the frame
     ws2812_frame_mark_shown(&frame);
-    RST();
 }
 
 void WS2812_class::set_RGB(uint8_t R, uint8_t G, uint8_t B, uint8_t index)

@@ -57,3 +57,28 @@ static inline void ws2812_frame_mark_shown(ws2812_frame_t *f)
     for (uint32_t i = 0; i < (uint32_t)f->num; i++) f->shown[i] = f->want[i];
     f->shown_valid = 1u;
 }
+
+// Redraw throttle of RGB_update() (main.cpp), the only caller of WS2812_class::updata(). It also
+// gives the strips their reset (latch) time: every strip has its own data pin, which stays low after
+// a frame's last bit, and no redraw starts until min_gap after the previous one started. Redrawing
+// all five strips takes about 0.26 ms of bit time (29 us for SYS_RGB, 59 us per 2-LED channel strip)
+// plus the short USART ISRs served between strips, so with the 10 ms throttle each pin is low for
+// more than 9.5 ms between two frames (and for the 10 ms delay after init() before the first one).
+// The datasheets ask for more than 50 us (WS2812B) or 280 us (WS2812B-2020 V1.3). "Never drawn" is
+// its own flag: with last == 0 as the marker, a redraw that started at tick 0 disabled the throttle
+// for the next one.
+typedef struct
+{
+    uint32_t last;  // tick at which the last redraw started
+    uint8_t  valid; // 0 until the first redraw
+} ws2812_throttle_t;
+
+// True if a redraw may start at `now`, which then counts as started. Unsigned tick difference, so
+// it survives the 2^32 SysTick wrap.
+static inline bool ws2812_throttle_due(ws2812_throttle_t *t, uint32_t now, uint32_t min_gap)
+{
+    if (t->valid && (uint32_t)(now - t->last) < min_gap) return false;
+    t->last  = now;
+    t->valid = 1u;
+    return true;
+}

@@ -15,7 +15,6 @@ public:
     void init(uint8_t num, GPIO_TypeDef* port, uint16_t pin);
 
     void clear(void);
-    void RST(void);
     void updata(void);
 
     void set_RGB(uint8_t R, uint8_t G, uint8_t B, uint8_t index);

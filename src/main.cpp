@@ -31,16 +31,15 @@ void RGB_update()
           RGBOUT[2].is_dirty() || RGBOUT[3].is_dirty()))
         return;
 
-    static uint32_t last = 0u;
+    static ws2812_throttle_t throttle = {0u, 0u};
 
     uint32_t min_gap = time_hw_tpms * 10u;
     if (!min_gap) min_gap = 1u;
 
+    // This gap is also every strip's WS2812 reset time (ws2812_throttle_t), so updata() does not wait.
     const uint32_t now = time_ticks32();
-    if (last != 0u && (uint32_t)(now - last) < min_gap)
+    if (!ws2812_throttle_due(&throttle, now, min_gap))
         return;
-
-    last = now;
 
     SYS_RGB.updata();
     RGBOUT[0].updata();

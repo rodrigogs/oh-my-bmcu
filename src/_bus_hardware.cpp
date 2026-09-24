@@ -91,10 +91,8 @@ void bus_uart1_init()
 
 void bus_uart1_dma_send(unsigned char *data, uint16_t length)
 {
-    if (!bus_port_to_host.idle) return;
-
-    bus_port_to_host.idle = false;
-
+    // Only called by _bus_port_deal::tx_start(), which has checked and cleared idle and reset the
+    // RX parser.
     DMA1_Channel4->CFGR &= (uint16_t)(~DMA_CFGR1_EN);
 
     DMA1_Channel4->MADDR = (uint32_t)data;
