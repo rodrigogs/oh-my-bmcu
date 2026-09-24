@@ -1,3 +1,8 @@
+> [!NOTE]
+> **oh-my-bmcu**: a fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-PJARCZAK) for a single BMCU on a Bambu Lab A1.
+> What is different, how to build and flash, and the audit backlog are in [docs/oh-my-bmcu](docs/oh-my-bmcu/README.md).
+> Everything below is the upstream README.
+
 # BMCU Firmware – Calibration and Compatibility Notes
 
 This BMCU firmware has been tested and verified with the latest Bambu Lab A1 firmware.
