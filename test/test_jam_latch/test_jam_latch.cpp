@@ -5,7 +5,9 @@
 // once the buffer has come back to 40% since the trip, so a printer that retries by itself keeps
 // getting 0xF06F; the buffer releases it at the on_use band's low edge while the printer is in
 // on_use/stop_on_use and only at 85% in any other state; a tangle that is still there after a
-// release must latch again.
+// release must latch again. While latched, the BMCU must not push the filament of the printer's
+// active channel in any printer state: its on_use control and hold_load in before_on_use are
+// braked (jam_latch_brakes).
 
 #include <stdint.h>
 #include <string.h>
@@ -35,6 +37,8 @@ static bool bmcu_on_use;   // MOTOR_CONTROL[ch].motion is on_use control, as the
 static bool filament;      // MC_ONLINE_key_stu[ch] != 0
 static bool active;        // A.now_filament_num == ch
 static int trips;
+static bool pushing;       // run() let the channel's control push on the last pass (motor_pushes())
+static int jammed_pushes;  // passes on which it did with the jam latch set
 
 void setUp(void)
 {
@@ -46,14 +50,36 @@ void setUp(void)
     filament = true;
     active = true;
     trips = 0;
+    pushing = false;
+    jammed_pushes = 0;
 }
 
 void tearDown(void) {}
 
+// What run() runs for the channel once motor_motion_switch has followed printer command m: the on_use
+// control for on_use, hold_load for before_on_use (active channel, filament at the switch).
+// Everything else it runs for the active channel cannot push a latched channel: stop_on_use brakes,
+// idle and send_out are stopped, the pull-back states only retract. A channel that is not active
+// runs the idle control, which is not braked and can push (below 30%, or the DM autoload in it);
+// these cases do not model it.
+static jam_ctrl_t bmcu_ctrl(_filament_motion m)
+{
+    if (!(active && filament)) return JAM_CTRL_OTHER;
+    if (m == ON_USE) return JAM_CTRL_ON_USE;
+    if (m == BEFORE_ON_USE) return JAM_CTRL_BEFORE_ON_USE;
+    return JAM_CTRL_OTHER;
+}
+
+// run() on this pass: the on_use control or hold_load runs (and may push) unless it is braked.
+static bool motor_pushes(jam_ctrl_t c)
+{
+    return ((c == JAM_CTRL_ON_USE) || (c == JAM_CTRL_BEFORE_ON_USE)) && !jam_latch_brakes(c, brake, jam);
+}
+
 // One main-loop pass for the channel: jam_latch_pass() in Motion_control_run, then
 // motor_motion_switch, which puts the BMCU into its on_use control when the printer commands on_use
-// for the active channel and filament is at the switch. So the BMCU follows the printer one pass
-// later, as jam_latch_pass() sees it.
+// for the active channel and filament is at the switch, then run(). So the BMCU follows the printer
+// one pass later, as jam_latch_pass() sees it, and run() sees the latch as this pass left it.
 static jam_event_t pass(_filament_motion m, float pct)
 {
     jam_in_t in;
@@ -68,6 +94,8 @@ static jam_event_t pass(_filament_motion m, float pct)
     if (ev == JAM_EVENT_TRIP) trips++;
 
     bmcu_on_use = active && filament && (m == ON_USE);
+    pushing = motor_pushes(bmcu_ctrl(m));
+    if (jam && pushing) jammed_pushes++;
     now++;
     return ev;
 }
@@ -323,13 +351,15 @@ static void test_resume_after_the_buffer_came_back_releases(void)
     TEST_ASSERT_EQUAL_UINT8(1u, jam);
 }
 
-static void test_before_on_use_releases_once_the_push_raises_the_buffer(void)
+static void test_before_on_use_releases_once_the_buffer_has_come_back(void)
 {
-    // before_on_use runs hold_load (a push) even while latched: a freed spool refills the buffer.
+    // A latched channel is braked in before_on_use too, so only a person (feeding filament, lifting
+    // the buffer) or the printer can bring the buffer back; the first such reading releases it.
     trip_now();
     TEST_ASSERT_EQUAL_INT32(-1, hold(BEFORE_ON_USE, 30.0f, 200u));
     TEST_ASSERT_EQUAL_INT32(0, hold(BEFORE_ON_USE, 40.0f, 10u));
     TEST_ASSERT_EQUAL_UINT8(0u, jam);
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
 }
 
 static void test_a_new_trip_starts_with_fresh_release_conditions(void)
@@ -422,6 +452,70 @@ static void test_release_timer_survives_ms_counter_wrap(void)
     TEST_ASSERT_EQUAL_INT32(1000, hold(ON_USE, 55.0f, 2000u));
 }
 
+// ---- Motor ----
+
+static void test_brake_decision_per_control(void)
+{
+    // The on_use control: either latch brakes it (the 20 s latch alone, or with the jam).
+    TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_ON_USE, 0u, 0u));
+    TEST_ASSERT_TRUE(jam_latch_brakes(JAM_CTRL_ON_USE, 1u, 0u));
+    TEST_ASSERT_TRUE(jam_latch_brakes(JAM_CTRL_ON_USE, 1u, 1u));
+    // hold_load in before_on_use: the jam latch brakes it.
+    TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_BEFORE_ON_USE, 0u, 0u));
+    TEST_ASSERT_TRUE(jam_latch_brakes(JAM_CTRL_BEFORE_ON_USE, 1u, 1u));
+    // Anything else is not run()'s business here (stopped, braked or retracting by itself).
+    TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_OTHER, 0u, 0u));
+    TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_OTHER, 1u, 0u));
+    TEST_ASSERT_FALSE(jam_latch_brakes(JAM_CTRL_OTHER, 1u, 1u));
+}
+
+static void test_resume_with_before_on_use_does_not_push_into_a_held_spool(void)
+{
+    // Paused on the jam, the spool still held; the printer resumes with before_on_use (hold_load
+    // would push towards 90% at up to 1000 PWM), then prints. The channel stays latched and braked
+    // throughout, and the printer's on_use is answered with 0xF06F.
+    trip_now();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(STOP_ON_USE, 30.0f, 2000u));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(BEFORE_ON_USE, 30.0f, 10000u));
+    TEST_ASSERT_FALSE(pushing);
+    TEST_ASSERT_EQUAL_INT32(-1, hold(ON_USE, 30.0f, 10000u));
+    TEST_ASSERT_FALSE(pushing);
+    TEST_ASSERT_EQUAL_UINT8(1u, jam);
+    TEST_ASSERT_EQUAL_UINT8(1u, brake);
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
+    TEST_ASSERT_EQUAL_INT(1, trips);
+
+    // The printer retrying by itself, before_on_use and on_use over and over: the same.
+    for (int k = 0; k < 20; k++)
+    {
+        TEST_ASSERT_EQUAL_INT32(-1, hold(STOP_ON_USE, 30.0f, 300u));
+        TEST_ASSERT_EQUAL_INT32(-1, hold(BEFORE_ON_USE, 30.0f, 700u));
+        TEST_ASSERT_EQUAL_INT32(-1, hold(ON_USE, 30.0f, 1500u));
+    }
+    TEST_ASSERT_EQUAL_UINT8(1u, jam);
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
+    TEST_ASSERT_EQUAL_INT(1, trips);
+}
+
+static void test_before_on_use_pushes_again_from_the_pass_it_releases(void)
+{
+    // Paused; the user clears the snag and feeds filament to 45%; the resume with before_on_use
+    // releases the latch at once and hold_load pushes again from that pass, as before.
+    trip_now();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(STOP_ON_USE, 30.0f, 2000u));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(STOP_ON_USE, 45.0f, 500u));
+    TEST_ASSERT_EQUAL_INT(JAM_EVENT_RELEASE, pass(BEFORE_ON_USE, 45.0f));
+    TEST_ASSERT_TRUE(pushing);
+    TEST_ASSERT_EQUAL_INT32(-1, hold(BEFORE_ON_USE, 45.0f, 1000u));
+    TEST_ASSERT_TRUE(pushing);
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
+
+    // A channel that was never latched runs hold_load in before_on_use as before.
+    setUp();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(BEFORE_ON_USE, 30.0f, 1000u));
+    TEST_ASSERT_TRUE(pushing);
+}
+
 // ---- Whole scenarios ----
 
 static void test_printer_unload_and_reload_do_not_release_an_uncleared_tangle(void)
@@ -485,7 +579,7 @@ int main(void)
     RUN_TEST(test_resume_without_the_buffer_rising_keeps_the_latch);
     RUN_TEST(test_printer_retrying_by_itself_keeps_getting_the_jam);
     RUN_TEST(test_resume_after_the_buffer_came_back_releases);
-    RUN_TEST(test_before_on_use_releases_once_the_push_raises_the_buffer);
+    RUN_TEST(test_before_on_use_releases_once_the_buffer_has_come_back);
     RUN_TEST(test_a_new_trip_starts_with_fresh_release_conditions);
     RUN_TEST(test_buffer_back_at_band_for_1s_releases_in_on_use_and_stop_on_use);
     RUN_TEST(test_buffer_at_spring_rest_does_not_release);
@@ -493,6 +587,9 @@ int main(void)
     RUN_TEST(test_away_from_on_use_the_buffer_must_reach_85);
     RUN_TEST(test_release_level_follows_the_printer_state);
     RUN_TEST(test_release_timer_survives_ms_counter_wrap);
+    RUN_TEST(test_brake_decision_per_control);
+    RUN_TEST(test_resume_with_before_on_use_does_not_push_into_a_held_spool);
+    RUN_TEST(test_before_on_use_pushes_again_from_the_pass_it_releases);
     RUN_TEST(test_printer_unload_and_reload_do_not_release_an_uncleared_tangle);
     RUN_TEST(test_fixed_tangle_resumes_normally_without_a_printer_command);
     RUN_TEST(test_fixed_tangle_resumes_normally_after_a_pause);
