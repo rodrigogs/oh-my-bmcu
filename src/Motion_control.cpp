@@ -10,6 +10,7 @@
 #include "motion_limits.h"
 #include "jam_latch.h"
 #include "dm_rearm.h"
+#include "dm_stage2.h"
 #include "watchdog.h"
 
 static inline float absf(float x) { return (x < 0.0f) ? -x : x; }
@@ -262,6 +263,59 @@ static uint32_t dm_loaded_drop_cnt[4]   = {0u,0u,0u,0u};
 static motion_guard dm_s2_guard[4];
 static_assert(DM_AUTO_PWM_PUSH >= ML_STALL_PWM && DM_AUTO_PWM_PULL >= ML_STALL_PWM,
               "DM Stage-2 PWM must be covered by the stall check");
+
+// The Stage-2 run a key excursion away from 'both' interrupted (dm_stage2.h).
+static dm_s2_run_t dm_s2_run[4];
+static_assert(DM_AUTO_S1_DEBOUNCE_MS >= DM_S2_RESUME_MS, "a retract Stage-1 brought back to 'both' must go on as a push");
+
+// The key reads 'both' where Stage-2 starts (IDLE, S1_PUSH): the Stage-2 state to run, with a new
+// run's length and abort count or the interrupted run's. *resumed: that state when it keeps its
+// guard, else DM_AUTO_IDLE. *new_run: a new run starts (a new guard), else the run goes on.
+static inline uint8_t dm_s2_enter_state(uint8_t ch, uint32_t cur_cnt, uint64_t now_ms, uint8_t *resumed,
+                                        bool *new_run)
+{
+    uint8_t guard = DM_S2_GUARD_NEW;
+    const uint8_t stage = dm_s2_enter(&dm_s2_run[ch], &dm_auto_remain_m[ch], &dm_auto_try[ch], &dm_auto_last_cnt[ch],
+                                      DM_AUTO_S2_TARGET_M, cur_cnt, now_ms, &guard);
+    const uint8_t st = (stage == DM_S2_STAGE_RETRACT) ? DM_AUTO_S2_RETRACT : DM_AUTO_S2_PUSH;
+    *resumed = (guard == DM_S2_GUARD_KEEP) ? st : (uint8_t)DM_AUTO_IDLE;
+    *new_run = (guard == DM_S2_GUARD_NEW);
+    return st;
+}
+
+// A limit of the run's guard fails the autoload the way three buffer aborts do: the run is over, and
+// the fail latch keeps the motor off and the LED red until key 'none' or a finished printer load.
+static inline void dm_s2_guard_fail(uint8_t ch)
+{
+    dm_s2_end(&dm_s2_run[ch]);
+    dm_fail_latch[ch]    = 1u;
+    dm_auto_state[ch]    = DM_AUTO_IDLE;
+    dm_auto_try[ch]      = 0u;
+    dm_auto_remain_m[ch] = 0.0f;
+    dm_auto_t0_ms[ch]    = 0ull;
+}
+
+// A pass on which the auto-unload (the buffer lifted by hand, motor_motion_run) drives channel ch
+// instead of run(), so that the DM block does not run; idle_ctrl: the channel runs its idle control,
+// where the DM block would have run. Left out, such passes are a gap for the guard of a run that is in
+// a Stage-2 stage or interrupted (more than ML_STEP_MAX_MS after its last pass), which restarts the
+// stall window and leaves the time out of the stage's budget: with key blips restarting Stage-1's 5 s,
+// every buffer-lift gesture gave a gear that does not turn up to another second of 900 PWM. So each of
+// them is a pass of the run's guard that drives nothing (dm_s2_guard_pass, dm_stage2.h): its time
+// counts towards the stage's budget, and the stall window neither grows nor restarts on it. The
+// auto-unload's 850 PWM retract is the person's, with its own limits, not the autoload's drive, and a
+// gear it moves 1 mm is not stalled: the window restarts at the autoload's next drive, as after a pull
+// by hand. A limit fails the run as in the DM block.
+static inline void dm_s2_auto_unload_pass(uint8_t ch, bool idle_ctrl, uint64_t now_ms)
+{
+    if (!idle_ctrl || (dm_loaded[ch] != 0u) || dm_fail_latch[ch]) return;
+
+    const uint8_t st = dm_auto_state[ch];
+    const bool s2_stage = (st == DM_AUTO_S2_PUSH) || (st == DM_AUTO_S2_RETRACT) || (st == DM_AUTO_S2_FAIL_RETRACT);
+    if (!s2_stage && (dm_s2_run[ch].stage == DM_S2_STAGE_NONE)) return;
+
+    if (dm_s2_guard_pass(&dm_s2_guard[ch], now_ms, as5600_count[ch], 0.0f, false) != ML_OK) dm_s2_guard_fail(ch);
+}
 #endif
 
 static constexpr float    AUTO_UNLOAD_START_PCT      = 80.0f;
@@ -1119,12 +1173,15 @@ public:
                         else
                         {
                             const uint8_t dm_state_at_entry = dm_auto_state[CHx];
+                            uint8_t dm_s2_resumed = DM_AUTO_IDLE; // Stage-2 state resumed with its guard
+                            bool    dm_s2_new_run = false;        // a new Stage-2 run starts on this pass
 
                             if (dm_auto_state[CHx] == DM_AUTO_IDLE)
                             {
                                 if (ks == 2u)
                                 {
-                                    if (dm_autoload_gate[CHx] == 0u)
+                                    // Stage-1 once per insertion, and for a run the key interrupted (dm_stage2.h)
+                                    if ((dm_autoload_gate[CHx] == 0u) || (dm_s2_run[CHx].stage != DM_S2_STAGE_NONE))
                                     {
                                         dm_autoload_gate[CHx] = 1u;
                                         dm_auto_state[CHx] = DM_AUTO_S1_DEBOUNCE;
@@ -1133,10 +1190,8 @@ public:
                                 }
                                 else if (ks == 1u)
                                 {
-                                    dm_auto_state[CHx]    = DM_AUTO_S2_PUSH;
-                                    dm_auto_try[CHx]      = 0u;
-                                    dm_auto_remain_m[CHx] = DM_AUTO_S2_TARGET_M;
-                                    dm_auto_last_cnt[CHx] = cur_cnt;
+                                    dm_auto_state[CHx] =
+                                        dm_s2_enter_state(CHx, cur_cnt, now_ms, &dm_s2_resumed, &dm_s2_new_run);
                                 }
                             }
 
@@ -1169,10 +1224,8 @@ public:
                                 }
                                 else if (ks == 1u)
                                 {
-                                    dm_auto_state[CHx]    = DM_AUTO_S2_PUSH;
-                                    dm_auto_try[CHx]      = 0u;
-                                    dm_auto_remain_m[CHx] = DM_AUTO_S2_TARGET_M;
-                                    dm_auto_last_cnt[CHx] = cur_cnt;
+                                    dm_auto_state[CHx] =
+                                        dm_s2_enter_state(CHx, cur_cnt, now_ms, &dm_s2_resumed, &dm_s2_new_run);
                                 }
                                 else if ((now_ms - dm_auto_t0_ms[CHx]) >= DM_AUTO_S1_TIMEOUT_MS)
                                 {
@@ -1212,6 +1265,9 @@ public:
 
                                 if (ks != 1u)
                                 {
+                                    // The run is interrupted, not over: length and aborts are kept.
+                                    dm_s2_leave(&dm_s2_run[CHx], DM_S2_STAGE_PUSH, now_ms);
+
                                     if (ks == 2u)
                                     {
                                         dm_auto_state[CHx] = DM_AUTO_S1_DEBOUNCE;
@@ -1219,10 +1275,8 @@ public:
                                     }
                                     else
                                     {
-                                        dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                        dm_auto_try[CHx]      = 0u;
-                                        dm_auto_remain_m[CHx] = 0.0f;
-                                        dm_auto_t0_ms[CHx]    = 0ull;
+                                        dm_auto_state[CHx] = DM_AUTO_IDLE;
+                                        dm_auto_t0_ms[CHx] = 0ull;
                                     }
                                     break;
                                 }
@@ -1309,15 +1363,15 @@ public:
                                     }
                                     else if (ks == 2u)
                                     {
+                                        dm_s2_leave(&dm_s2_run[CHx], DM_S2_STAGE_RETRACT, now_ms);
                                         dm_auto_state[CHx] = DM_AUTO_S1_DEBOUNCE;
                                         dm_auto_t0_ms[CHx] = now_ms;
                                     }
                                     else
                                     {
-                                        dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                        dm_auto_try[CHx]      = 0u;
-                                        dm_auto_remain_m[CHx] = 0.0f;
-                                        dm_auto_t0_ms[CHx]    = 0ull;
+                                        dm_s2_leave(&dm_s2_run[CHx], DM_S2_STAGE_RETRACT, now_ms);
+                                        dm_auto_state[CHx] = DM_AUTO_IDLE;
+                                        dm_auto_t0_ms[CHx] = 0ull;
                                     }
                                     dm_autoload_x = 0.0f;
                                 }
@@ -1373,7 +1427,13 @@ public:
                                 }
                                 break;
 
+                            case DM_AUTO_IDLE:
+                                // Before Stage-1 or Stage-2, or a Stage-2 run the key interrupted: its
+                                // length and aborts are kept for the next 'both' (dm_stage2.h).
+                                break;
+
                             default:
+                                dm_s2_end(&dm_s2_run[CHx]);
                                 dm_auto_state[CHx]    = DM_AUTO_IDLE;
                                 dm_auto_try[CHx]      = 0u;
                                 dm_auto_remain_m[CHx] = 0.0f;
@@ -1384,27 +1444,33 @@ public:
                             // Stage-2 stages end only on a switch or buffer event (the push also after 120 mm
                             // of gear travel), so a blocked gear or a buffer that never relaxes kept 900 PWM on
                             // for good. These states are only entered inside this block, so one that differs
-                            // from the state at the start of the pass has just been entered and starts its
-                            // guard. A limit fails the autoload the way three buffer aborts do: motor off, red,
-                            // until ks == 0. (S2_FAIL_RETRACT does not run today: the fail latch set with it
-                            // skips this state machine.)
+                            // from the state at the start of the pass has just been entered, unless it is the
+                            // stage a key excursion interrupted, resumed on this pass with its guard. A new
+                            // run's first stage starts the run's guard; a later stage (after a buffer abort, or
+                            // the push an interrupted retract goes on with) gets a new time budget, and the
+                            // run's stall window goes on. While the key keeps a run interrupted, its guard goes
+                            // on on every pass as well (IDLE, S1_DEBOUNCE, and Stage-1's push back to 'both'),
+                            // so no round of Stage-1 restarts it (dm_stage2.h), and so it does on the passes an
+                            // auto-unload drives instead of run() (dm_s2_auto_unload_pass). A limit fails the
+                            // autoload the way three buffer aborts do (dm_s2_guard_fail): motor off, red, until
+                            // ks == 0 or a finished printer load. (S2_FAIL_RETRACT does not run today: the fail
+                            // latch set with it skips this state machine.)
                             const uint8_t st = dm_auto_state[CHx];
-                            if ((st == DM_AUTO_S2_PUSH) || (st == DM_AUTO_S2_RETRACT) || (st == DM_AUTO_S2_FAIL_RETRACT))
+                            const bool s2_stage =
+                                (st == DM_AUTO_S2_PUSH) || (st == DM_AUTO_S2_RETRACT) || (st == DM_AUTO_S2_FAIL_RETRACT);
+                            const bool s2_interrupted = (dm_s2_run[CHx].stage != DM_S2_STAGE_NONE);
+                            const bool s2_entered = s2_stage && (st != dm_state_at_entry) && (st != dm_s2_resumed);
+                            if (s2_entered && dm_s2_new_run)
                             {
-                                if (st != dm_state_at_entry)
-                                {
-                                    ml_dm_s2_start(&dm_s2_guard[CHx], now_ms, as5600_count[CHx], DM_AUTO_S2_TARGET_M);
-                                }
-                                else if (motion_guard_check(&dm_s2_guard[CHx], now_ms, as5600_count[CHx], dm_autoload_x) != ML_OK)
-                                {
-                                    dm_fail_latch[CHx]    = 1u;
-                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                    dm_auto_try[CHx]      = 0u;
-                                    dm_auto_remain_m[CHx] = 0.0f;
-                                    dm_auto_t0_ms[CHx]    = 0ull;
-                                    dm_autoload_x         = 0.0f;
-                                    MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
-                                }
+                                ml_dm_s2_start(&dm_s2_guard[CHx], now_ms, as5600_count[CHx], DM_AUTO_S2_TARGET_M);
+                            }
+                            else if ((s2_stage || s2_interrupted) &&
+                                     (dm_s2_guard_pass(&dm_s2_guard[CHx], now_ms, as5600_count[CHx], dm_autoload_x,
+                                                       s2_entered) != ML_OK))
+                            {
+                                dm_s2_guard_fail(CHx);
+                                dm_autoload_x = 0.0f;
+                                MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
                             }
                         }
                     }
@@ -2442,6 +2508,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             dm_auto_last_cnt[ch]     = 0u;
             dm_loaded_drop_t0_ms[ch] = 0ull;
             dm_autoload_gate[ch]     = 0u;
+            dm_s2_end(&dm_s2_run[ch]);
             continue;
         }
 
@@ -2467,6 +2534,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             dm_auto_t0_ms[ch]        = 0ull;
             dm_auto_remain_m[ch]     = 0.0f;
             dm_auto_last_cnt[ch]     = 0u;
+            dm_s2_end(&dm_s2_run[ch]); // the filament is out: the next 'both' starts a new run
             continue;
         }
 
@@ -2482,6 +2550,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             dm_auto_t0_ms[ch]    = 0ull;
             dm_auto_remain_m[ch] = 0.0f;
             dm_auto_last_cnt[ch] = 0u;
+            dm_s2_end(&dm_s2_run[ch]);
         }
     }
 #endif
@@ -2657,6 +2726,11 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
 
             Motion_control_set_PWM(i, (int)x);
             MC_STU_RGB_set_latch(i, 0xA0u, 0x2Du, 0xFFu, time_now, 1u);
+#if BMCU_DM_TWO_MICROSWITCH
+            // run() does not run on this pass: the DM autoload's Stage-2 guard counts it (dm_stage2.h).
+            dm_s2_auto_unload_pass(
+                i, MOTOR_CONTROL[i].motion == filament_motion_enum::filament_motion_pressure_ctrl_idle, time_now);
+#endif
         }
         else if (manual_empty_pull)
         {
@@ -3105,6 +3179,7 @@ void Motion_control_init()
                 dm_auto_last_cnt[ch]     = 0u;
                 dm_loaded_drop_t0_ms[ch] = 0ull;
                 dm_autoload_gate[ch]     = 0u;
+                dm_s2_end(&dm_s2_run[ch]);
                 continue;
             }
 
@@ -3120,6 +3195,7 @@ void Motion_control_init()
             dm_auto_remain_m[ch]     = 0.0f;
             dm_auto_last_cnt[ch]     = 0u;
             dm_loaded_drop_t0_ms[ch] = 0ull;
+            dm_s2_end(&dm_s2_run[ch]);
         }
     #endif
 
