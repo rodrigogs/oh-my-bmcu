@@ -1,0 +1,90 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PLATFORMIO_VERSION: "6.1.19"
+  # V10.5 release commit: its sources must still rebuild to the published firmwares/ binaries.
+  UPSTREAM_V10_5: fbff4e3
+  # Fail the A1 build if the image grows past 56 KiB (upload limit is 60 KiB, NVM lives above it).
+  IMAGE_BUDGET_BYTES: "57344"
+
+jobs:
+  a1:
+    name: A1 target (a1_solo_autoload_rgboff)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.platformio
+          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+
+      - run: pip install "platformio==${PLATFORMIO_VERSION}"
+
+      - name: Build
+        run: pio run -e a1_solo_autoload_rgboff
+
+      - name: Check size and record hash
+        run: |
+          bin=.pio/build/a1_solo_autoload_rgboff/firmware.bin
+          size=$(stat -c %s "$bin")
+          sha=$(sha256sum "$bin" | cut -d' ' -f1)
+          {
+            echo "### a1_solo_autoload_rgboff"
+            echo "- size: ${size} bytes (budget ${IMAGE_BUDGET_BYTES})"
+            echo "- sha256: \`${sha}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$size" -gt "$IMAGE_BUDGET_BYTES" ]; then
+            echo "::error::firmware.bin is ${size} bytes, over the ${IMAGE_BUDGET_BYTES}-byte budget"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oh-my-bmcu-a1_solo_autoload_rgboff-${{ github.sha }}
+          path: |
+            .pio/build/a1_solo_autoload_rgboff/firmware.bin
+            .pio/build/a1_solo_autoload_rgboff/firmware.elf
+          if-no-files-found: error
+
+  reproduce-upstream:
+    name: Reproduce upstream V10.5 SOLO images
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.platformio
+          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+
+      - run: pip install "platformio==${PLATFORMIO_VERSION}"
+
+      - name: Build the 12 SOLO images from the V10.5 sources with this branch's toolchain pins
+        run: |
+          git worktree add --detach /tmp/v10.5 HEAD
+          # Replace src/ entirely so files added after V10.5 cannot leak into this build.
+          rm -rf /tmp/v10.5/src
+          git -C /tmp/v10.5 checkout "$UPSTREAM_V10_5" -- src
+          BUILD_ONLY_SOLO=1 bash /tmp/v10.5/build_all_firmwares.sh
+
+      - name: Compare with the published manifest
+        run: python3 scripts/compare_manifest.py /tmp/v10.5/firmwares/manifest.txt firmwares/manifest.txt
