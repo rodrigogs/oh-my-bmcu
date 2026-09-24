@@ -52,3 +52,13 @@ static inline bus_link_state_t bus_link_poll(bus_link_t *l, uint32_t now_ticks, 
 
     return BUS_LINK_ALIVE;
 }
+
+// Edge of the bus_link_poll() results: true on the one poll that turns the link lost, so a caller
+// acts once per outage however long it lasts, and again after the next heartbeat and loss.
+// *prev holds the previous poll result; start it at BUS_LINK_NOT_SEEN.
+static inline bool bus_link_went_lost(bus_link_state_t *prev, bus_link_state_t now)
+{
+    const bool edge = (now == BUS_LINK_LOST) && (*prev != BUS_LINK_LOST);
+    *prev = now;
+    return edge;
+}

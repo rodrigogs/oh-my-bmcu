@@ -7,10 +7,12 @@
 #include "_bus_hardware.h"
 #include "crc_bus.h"
 #include "bus_link.h"
+#include "bambubus_set_filament.h"
 
 uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
 static void bambubus_build_static_serial(void);
 static bus_link_t bambubus_link;
+static bus_link_state_t bambubus_link_prev = BUS_LINK_NOT_SEEN;
 static volatile uint32_t bambubus_heartbeat_ticks = 0u;
 static volatile bool bambubus_heartbeat_pending = false;
 
@@ -37,6 +39,7 @@ void bambubus_init()
     bambubus_build_static_serial();
     bambubus_heartbeat_pending = false;
     bus_link_init(&bambubus_link);
+    bambubus_link_prev = BUS_LINK_NOT_SEEN;
 }
 
 void package_add_crc(uint8_t *data, int send_data_length) // 为数据包添加crc校验
@@ -98,6 +101,8 @@ void bambubus_long_package_analysis(uint8_t *buf, int data_length, bambubus_long
 bambubus_long_packge_data printer_data_long;
 
 static uint8_t online_detect_prefix_now = 0x0Cu;
+// Set by the printer's 0x05/0x01 confirm; while set, 0x05/0x00 discovery probes are ignored. Kept
+// while heartbeats flow, re-armed by bambubus_run() once the host link is lost.
 static bool have_registered = false;
 static uint8_t online_detect_phase = 0u;
 
@@ -930,6 +935,8 @@ void get_package_long_packge_filament(unsigned char *buf, int length)
 
     bambubus_long_packge_data data;
 
+    if (printer_data_long.data_length < 2u) return; // reads datas[0..1]
+
     const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
     const uint8_t ams_num = printer_data_long.datas[0];
     const uint8_t filament_num = printer_data_long.datas[1];
@@ -1091,6 +1098,8 @@ void get_package_long_packge_version(unsigned char *buf, int length)
     (void)buf;
     (void)length;
 
+    if (printer_data_long.data_length < 1u) return; // reads datas[0]
+
     const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
     const uint8_t ams_num = printer_data_long.datas[0];
 
@@ -1110,65 +1119,59 @@ void get_package_long_packge_version(unsigned char *buf, int length)
     bambubus_long_package_get(&data);
 }
 
+// Stores a decoded set-filament request for our unit in RAM and schedules its NVM save. False: the
+// request is for another unit or channel, or we are not online; nothing was changed.
+static bool set_filament_apply(const bambubus_set_filament_t *in)
+{
+    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
+    if (in->ams_num != fixed_ams_num || in->channel >= 4 || ams[bambubus_ams_map[fixed_ams_num]].online != true)
+        return false;
+
+    _filament *f = &ams[bambubus_ams_map[fixed_ams_num]].filament[in->channel];
+    static_assert(sizeof(f->bambubus_filament_id) == sizeof(in->id), "filament id size");
+    static_assert(sizeof(f->name) == sizeof(in->name), "filament name size");
+
+    memcpy(f->bambubus_filament_id, in->id, sizeof(f->bambubus_filament_id));
+    f->color_R = in->color_R;
+    f->color_G = in->color_G;
+    f->color_B = in->color_B;
+    f->color_A = in->color_A;
+    f->temperature_min = in->temperature_min;
+    f->temperature_max = in->temperature_max;
+    memcpy(f->name, in->name, sizeof(f->name));
+
+    ams_datas_set_need_to_save_filament(in->channel);
+    return true;
+}
+
+// Both set-filament handlers apply valid data even while an older reply still holds the TX buffer;
+// only the ACK needs the buffer, and it is skipped then, as before.
 unsigned char set_filament_res[] = {0x3D, 0xC0, 0x08, 0xB2, 0x08, 0x60, 0xB4, 0x04};
 void get_package_set_filament(unsigned char *buf, int length)
 {
-    (void)length;
+    bambubus_set_filament_t in;
+    if (!bambubus_decode_set_filament(buf, length, &in)) return;
+    if (!set_filament_apply(&in)) return;
 
     if (bus_port_to_host.send_data_len != 0) return;
     uint8_t* out = bus_port_to_host.tx_build_buf();
-    uint8_t b = buf[5];
-
-    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
-    uint8_t ams_num  = (b >> 4) & 0x0F;
-    uint8_t read_num = (b >> 0) & 0x0F;
-
-    if (ams_num != fixed_ams_num || read_num >= 4 || ams[bambubus_ams_map[fixed_ams_num]].online != true) return;
-
-    _ams *ams_ptr = ams + bambubus_ams_map[fixed_ams_num];
-    memcpy(ams_ptr->filament[read_num].bambubus_filament_id, buf + 7, sizeof(ams_ptr->filament[read_num].bambubus_filament_id));
-    ams_ptr->filament[read_num].color_R = buf[15];
-    ams_ptr->filament[read_num].color_G = buf[16];
-    ams_ptr->filament[read_num].color_B = buf[17];
-    ams_ptr->filament[read_num].color_A = buf[18];
-    memcpy(&ams_ptr->filament[read_num].temperature_min, buf + 19, 2);
-    memcpy(&ams_ptr->filament[read_num].temperature_max, buf + 21, 2);
-    memcpy(ams_ptr->filament[read_num].name, buf + 23, sizeof(ams_ptr->filament[read_num].name));
-    ams_ptr->filament[read_num].name[19] = 0;
     memcpy(out, set_filament_res, sizeof(set_filament_res));
     bus_port_to_host.send_data_len = sizeof(set_filament_res);
 }
 unsigned char set_filament_res_type2[] = {0x00, 0x00, 0x00};
 void get_package_set_filament_type2(unsigned char *buf, int length)
 {
-    if (bus_port_to_host.send_data_len != 0) return;
     (void)buf;
     (void)length;
 
     bambubus_long_packge_data data;
 
+    bambubus_set_filament_t in;
+    if (!bambubus_decode_set_filament_type2(printer_data_long.datas, printer_data_long.data_length, &in)) return;
+    if (!set_filament_apply(&in)) return;
+
     const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
-    const uint8_t ams_num  = printer_data_long.datas[0];
-    const uint8_t read_num = printer_data_long.datas[1];
-
-    if (ams_num != fixed_ams_num || read_num >= 4 || ams[bambubus_ams_map[fixed_ams_num]].online != true) return;
-
-    _ams *ams_ptr = ams + bambubus_ams_map[fixed_ams_num];
-
-    memcpy(ams_ptr->filament[read_num].bambubus_filament_id,
-           printer_data_long.datas + 2,
-           sizeof(ams_ptr->filament[read_num].bambubus_filament_id));
-
-    ams_ptr->filament[read_num].color_R = printer_data_long.datas[10];
-    ams_ptr->filament[read_num].color_G = printer_data_long.datas[11];
-    ams_ptr->filament[read_num].color_B = printer_data_long.datas[12];
-    ams_ptr->filament[read_num].color_A = printer_data_long.datas[13];
-
-    memcpy(&ams_ptr->filament[read_num].temperature_min, printer_data_long.datas + 14, 2);
-    memcpy(&ams_ptr->filament[read_num].temperature_max, printer_data_long.datas + 16, 2);
-    memset(ams_ptr->filament[read_num].name, 0, sizeof(ams_ptr->filament[read_num].name));
-    memcpy(ams_ptr->filament[read_num].name, printer_data_long.datas + 18, 16);
-    ams_ptr->filament[read_num].name[19] = 0;
+    const uint8_t read_num = in.channel;
 
     set_filament_res_type2[0] = fixed_ams_num;
     set_filament_res_type2[1] = read_num;
@@ -1182,7 +1185,7 @@ void get_package_set_filament_type2(unsigned char *buf, int length)
     data.source_address = printer_data_long.target_address;
     data.target_address = printer_data_long.source_address;
 
-    bambubus_long_package_get(&data);
+    bambubus_long_package_get(&data); // builds nothing while the TX buffer is taken
 }
 
 bambubus_package_type bambubus_run()
@@ -1242,23 +1245,13 @@ bambubus_package_type bambubus_run()
                 get_package_long_packge_serial_number(buf, len);
                 break;
 
+            // Both request the NVM save themselves, only for data they applied.
             case bambubus_package_type::set_filament_info:
-            {
-                const uint8_t b = buf[5];
-                const uint8_t ams_num = (b >> 4) & 0x0F;
-                const uint8_t fil = (b >> 0) & 0x0F;
-
                 get_package_set_filament(buf, len);
-
-                if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM && fil < 4)
-                    ams_datas_set_need_to_save_filament(fil);
                 break;
-            }
 
             case bambubus_package_type::set_filament_info_type2:
                 get_package_set_filament_type2(buf, len);
-                if (printer_data_long.datas[0] == (uint8_t)BAMBU_BUS_AMS_NUM && printer_data_long.datas[1] < 4)
-                    ams_datas_set_need_to_save_filament(printer_data_long.datas[1]);
                 break;
 
             default:
@@ -1292,10 +1285,19 @@ bambubus_package_type bambubus_run()
         hb_unreported = true;
     }
 
+    const bus_link_state_t link = bus_link_poll(&bambubus_link, now, ms_to_ticks32(1000u));
+
+    // Once per outage (1 s without a heartbeat, the point where main() already stops the motors),
+    // re-arm the online-detect handshake, so a discovery the printer runs after the outage is
+    // answered instead of ignored until reboot. Nothing is sent by this, and while heartbeats flow
+    // the registration stays latched as before.
+    if (bus_link_went_lost(&bambubus_link_prev, link))
+        online_detect_reset();
+
     // Error from boot until the first heartbeat, and latched once heartbeats lapse (no 32-bit wrap
     // flip). As before, a heartbeat is reported on the first pass without a packet; main() uses it
     // to learn that the host speaks BambuBus.
-    if (bus_link_poll(&bambubus_link, now, ms_to_ticks32(1000u)) != BUS_LINK_ALIVE)
+    if (link != BUS_LINK_ALIVE)
         stu = bambubus_package_type::error;
     else if (stu == bambubus_package_type::none && hb_unreported)
     {

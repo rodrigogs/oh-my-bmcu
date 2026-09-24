@@ -41,7 +41,7 @@ struct __attribute__((packed, aligned(4))) Flash_FilamentInfo
     uint8_t  color_A;
     uint16_t temperature_min;
     uint16_t temperature_max;
-    char     name[16];
+    char     name[16]; // RAM holds up to 19 chars; longer names are cut to 16 here (bambubus_set_filament.h)
 };
 
 void Flash_saves_init(void);
