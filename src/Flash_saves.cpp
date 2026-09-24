@@ -1,5 +1,6 @@
 #include "Flash_saves.h"
 #include "hal/irq_wch.h"
+#include "nvm_journal.h"
 #include <string.h>
 
 #include "ch32v20x_rcc.h"
@@ -22,23 +23,14 @@ static inline uint32_t ams_fil_page(uint8_t filament_idx)
     return FLASH_NVM_AMS_ADDR + (uint32_t)filament_idx * FLASH_NVM256_PAGE_SIZE;
 }
 
-static constexpr uint32_t FLASH_ERASED_WORD = 0xE339E339u;
-
 static inline bool flash_word_is_blank(uint32_t v)
 {
-    return v == FLASH_ERASED_WORD || v == 0xFFFFFFFFu;
+    return v == NVM_ERASED_WORD || v == 0xFFFFFFFFu;
 }
 
 static bool flash_range_is_erased(uint32_t base_addr, uint32_t bytes)
 {
-    const uint32_t* p = (const uint32_t*)base_addr;
-
-    for (uint32_t i = 0u; i < (bytes >> 2); i++)
-    {
-        if (p[i] != FLASH_ERASED_WORD) return false;
-    }
-
-    return true;
+    return nvm_words_erased((const uint32_t*)base_addr, bytes >> 2);
 }
 
 static bool flash256_prog(uint32_t page_addr, const uint32_t w[64])
@@ -158,6 +150,8 @@ static constexpr uint32_t FIL_SLOT_BYTES = FIL_SLOT_WORDS * 4u;
 static constexpr uint32_t FIL_SLOTS_PER_PAGE = 6u;
 
 static_assert(FIL_SLOT_BYTES * FIL_SLOTS_PER_PAGE <= FLASH_NVM256_PAGE_SIZE, "FIL journal too large");
+static_assert(FIL_SLOT_WORDS == NVM_FIL_SLOT_WORDS && FIL_SLOTS_PER_PAGE == NVM_FIL_SLOTS_PER_PAGE,
+              "nvm_journal.h filament geometry out of date");
 
 static inline uint32_t fil_page_addr(uint8_t filament_idx)
 {
@@ -236,6 +230,8 @@ static constexpr uint32_t STA_PAGE_COUNT = 10u;
 static constexpr uint32_t STA_SLOT_BYTES = 8u;
 static constexpr uint32_t STA_SLOTS_PER_PAGE = (FLASH_NVM256_PAGE_SIZE / STA_SLOT_BYTES);
 static constexpr uint32_t STA_TOTAL_SLOTS = (STA_PAGE_COUNT * STA_SLOTS_PER_PAGE);
+static_assert(STA_SLOT_BYTES == NVM_STA_SLOT_WORDS * 4u && STA_SLOTS_PER_PAGE == NVM_STA_SLOTS_PER_PAGE,
+              "nvm_journal.h loaded-channel geometry out of date");
 
 static uint16_t g_sta_seq = 0u;
 static uint16_t g_sta_slot = 0u;
@@ -304,9 +300,17 @@ bool Flash_AMS_filament_write(uint8_t filament_idx, const Flash_FilamentInfo* in
     uint32_t first_empty = g_fil_first_empty[filament_idx];
     const uint32_t base = fil_page_addr(filament_idx);
 
-    if (first_empty >= FIL_SLOTS_PER_PAGE)
+    // Erase first when the page is full, and also when the slot is not erased (a torn record,
+    // another layout's data, an earlier failed write here): programming over it fails its
+    // read-back on every retry. A page with no valid record gives slot 0 (fil_cache_load_one).
+    if (nvm_fil_needs_erase((const uint32_t*)base, first_empty))
     {
         if (!flash256_erase(base)) return false;
+        // The page no longer holds g_fil_last: if the program below fails, the retry must start
+        // again at slot 0 of this page instead of the stale slot, and reverting to the old info
+        // must not look already saved.
+        g_fil_have[filament_idx] = 0u;
+        g_fil_first_empty[filament_idx] = 0u;
         first_empty = 0u;
     }
 
@@ -405,11 +409,20 @@ bool Flash_AMS_state_write(uint8_t loaded_ch)
     const uint32_t slot = (uint32_t)g_sta_slot;
     const uint32_t addr = sta_slot_addr(slot);
     const uint32_t buf[2] = { w0, w1 };
+    const uint32_t page_i = slot / STA_SLOTS_PER_PAGE;
+    const uint32_t page = sta_page_addr(page_i);
+
+    // Erase first when the slot is not erased (the log has wrapped onto older records, or the page
+    // holds a torn record or another layout's data) instead of programming over it; a program that
+    // still fails erases the page and retries once, as before.
+    if (nvm_sta_needs_erase((const uint32_t*)page, slot))
+    {
+        if (!flash256_erase(page)) return false;
+    }
 
     if (!flash_prog_words(addr, buf, 2u))
     {
-        const uint32_t page_i = slot / STA_SLOTS_PER_PAGE;
-        if (!flash256_erase(sta_page_addr(page_i))) return false;
+        if (!flash256_erase(page)) return false;
         if (!flash_prog_words(addr, buf, 2u)) return false;
     }
 
