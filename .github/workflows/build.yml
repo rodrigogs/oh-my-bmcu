@@ -20,8 +20,12 @@ env:
 
 jobs:
   a1:
-    name: A1 target (a1_solo_autoload_rgboff)
+    name: A1 images (a1_solo_autoload_rgboff and the #148 A/B image)
     runs-on: ubuntu-24.04
+    # Flashable images are only published once the host tests and the V10.5 reproduction pass.
+    needs: [unit-tests, reproduce-upstream]
+    env:
+      ENVS: a1_solo_autoload_rgboff a1_solo_autoload_rgboff_no_boot_restore
     steps:
       - uses: actions/checkout@v7
 
@@ -33,7 +37,11 @@ jobs:
       # of the cache key or a cached copy would hide upstream toolchain changes.
       - name: Resolve toolchain head
         id: toolchain
-        run: echo "sha=$(git ls-remote "$TOOLCHAIN_REPO" "refs/heads/$TOOLCHAIN_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -o pipefail
+          sha=$(git ls-remote --exit-code "$TOOLCHAIN_REPO" "refs/heads/$TOOLCHAIN_BRANCH" | cut -f1)
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v6
         with:
@@ -43,32 +51,51 @@ jobs:
       - run: pip install "platformio==${PLATFORMIO_VERSION}"
 
       - name: Build
-        run: pio run -e a1_solo_autoload_rgboff
+        run: pio run $(printf -- '-e %s ' $ENVS)
 
       - name: Check size and record hash
         run: |
-          bin=.pio/build/a1_solo_autoload_rgboff/firmware.bin
-          size=$(stat -c %s "$bin")
-          sha=$(sha256sum "$bin" | cut -d' ' -f1)
-          echo "sha256 ${sha}  size ${size}"
-          {
-            echo "### a1_solo_autoload_rgboff"
-            echo "- size: ${size} bytes (budget ${IMAGE_BUDGET_BYTES})"
-            echo "- sha256: \`${sha}\`"
-            echo "- toolchain-riscv-linux: \`$(git -C ~/.platformio/packages/toolchain-riscv rev-parse HEAD)\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$size" -gt "$IMAGE_BUDGET_BYTES" ]; then
-            echo "::error::firmware.bin is ${size} bytes, over the ${IMAGE_BUDGET_BYTES}-byte budget"
-            exit 1
-          fi
+          echo "- toolchain-riscv-linux: \`$(git -C ~/.platformio/packages/toolchain-riscv rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
+          for e in $ENVS; do
+            bin=.pio/build/$e/firmware.bin
+            size=$(stat -c %s "$bin")
+            sha=$(sha256sum "$bin" | cut -d' ' -f1)
+            echo "$e: sha256 ${sha}  size ${size}"
+            {
+              echo "### $e"
+              echo "- size: ${size} bytes (budget ${IMAGE_BUDGET_BYTES})"
+              echo "- sha256: \`${sha}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$size" -gt "$IMAGE_BUDGET_BYTES" ]; then
+              echo "::error::$e firmware.bin is ${size} bytes, over the ${IMAGE_BUDGET_BYTES}-byte budget"
+              exit 1
+            fi
+          done
+
+      # Properties the host tests cannot see: the fail-safe trap handlers and both USART handlers
+      # must replace the SDK's weak endless loops, and no soft-double routine may be linked.
+      - name: Check ELF symbols
+        run: |
+          nm=$(ls ~/.platformio/packages/toolchain-riscv/bin/*-nm | head -1)
+          for e in $ENVS; do
+            syms=$("$nm" .pio/build/$e/firmware.elf)
+            for s in HardFault_Handler NMI_Handler Break_Point_Handler USART1_IRQHandler USART3_IRQHandler; do
+              echo "$syms" | grep -q " T $s\$" || { echo "::error::$e: $s is not a strong symbol"; exit 1; }
+            done
+            if echo "$syms" | grep -E ' __(add|sub|mul|div)df3$| __(extendsfdf2|truncdfsf2|float(un)?sidf|fixuns?dfsi|(eq|ne|gt|ge|lt|le|unord)df2)$'; then
+              echo "::error::$e links soft-double routines"; exit 1
+            fi
+          done
 
       - uses: actions/upload-artifact@v7
         with:
           # On pull_request github.sha is the synthetic merge commit; name artifacts after the real head.
-          name: oh-my-bmcu-a1_solo_autoload_rgboff-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.event_name }}
+          name: oh-my-bmcu-a1-${{ github.event.pull_request.head.sha || github.sha }}-${{ github.event_name }}
           path: |
             .pio/build/a1_solo_autoload_rgboff/firmware.bin
             .pio/build/a1_solo_autoload_rgboff/firmware.elf
+            .pio/build/a1_solo_autoload_rgboff_no_boot_restore/firmware.bin
+            .pio/build/a1_solo_autoload_rgboff_no_boot_restore/firmware.elf
           if-no-files-found: error
 
   unit-tests:
@@ -107,7 +134,11 @@ jobs:
 
       - name: Resolve toolchain head
         id: toolchain
-        run: echo "sha=$(git ls-remote "$TOOLCHAIN_REPO" "refs/heads/$TOOLCHAIN_BRANCH" | cut -f1)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -o pipefail
+          sha=$(git ls-remote --exit-code "$TOOLCHAIN_REPO" "refs/heads/$TOOLCHAIN_BRANCH" | cut -f1)
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v6
         with:
