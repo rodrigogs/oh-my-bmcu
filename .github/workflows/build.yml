@@ -71,6 +71,25 @@ jobs:
             .pio/build/a1_solo_autoload_rgboff/firmware.elf
           if-no-files-found: error
 
+  unit-tests:
+    name: Host unit tests (env:native)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v6
+        with:
+          path: ~/.platformio
+          key: platformio-native-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+
+      - run: pip install "platformio==${PLATFORMIO_VERSION}"
+
+      - run: pio test -e native
+
   reproduce-upstream:
     name: Reproduce upstream V10.5 SOLO images
     runs-on: ubuntu-24.04
