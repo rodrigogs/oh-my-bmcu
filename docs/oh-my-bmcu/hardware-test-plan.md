@@ -91,6 +91,17 @@ Only if the A1 ever stops finding the AMS after a power cycle with a slot loaded
 - [ ] Nudge the filament so a switch flickers without removing it: no second 120 mm push.
 - [ ] Pull the filament out past both switches and insert it again: Stage-2 runs again.
 
+## 8. Watchdog
+
+- [ ] Normal boots and a whole print: no reset, and the SYS LED never flashes magenta.
+- [ ] First boot after flashing (empty NVM): the motor-direction test and a full calibration that
+      takes minutes finish with no reset.
+- [ ] The 5 s recalibration hold: blue blink, NVM wipe, reboot into calibration, and no magenta
+      flash or reset during it (this confirms a software reset stops the watchdog on this chip).
+- [ ] Optional, with a test build that hangs in the main loop while a motor runs: the motor stops,
+      the BMCU reboots after about 1 s (0.67 to 1.6 s) with three magenta flashes, and the printer
+      finds the AMS again.
+
 ## Optional: logic analyser
 
 PA10 = RX, PA12 = DE, channel LED data pins PA11/PA8/PB1/PB0.

@@ -14,7 +14,7 @@ A fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-
 
 ## Differences from upstream
 
-Findings and their status are in the [audit backlog](audit-2026-09.md). In short:
+Findings and their status are in the [audit backlog](audit-2026-09.md), the list of commits in the [changelog](CHANGELOG.md). In short:
 
 **Bus with the printer**
 - Filament info is saved again. Upstream PR [#134](https://github.com/jarczakpawel/BMCU-C-PJARCZAK/pull/134) (Murilo Bastos) throttled LED updates to 10 ms, verified on the A1 on 2026-09-23. The root cause is also fixed: the active channel's LED strip is redrawn only when its colour actually changes, instead of 100 times a second with interrupts off.
@@ -29,6 +29,10 @@ Findings and their status are in the [audit backlog](audit-2026-09.md). In short
 - Failed or impossible AS5600 readings are skipped instead of being used as angle 0, and the motor-direction test at first boot re-reads and confirms before saving.
 - Every motion distance (unload length, autoload Stage-2) comes from an integer AS5600 count, so unloads stay 95 mm however much filament has gone through since boot (the float odometer used to lose precision after about 128 m).
 - DM autoload only re-arms its 120 mm Stage-2 push after the filament really left both switches or was retracted, not after a switch flickers.
+
+**Watchdog and faults**
+- An independent watchdog (1 s nominal, 0.67 to 1.6 s over the LSI tolerance) resets the BMCU if the firmware hangs. It starts after the first-boot calibration. After a watchdog reset the SYS LED flashes magenta three times at boot.
+- A CPU trap (illegal instruction, bad memory access) now brakes all motors and releases the bus at once, then the watchdog resets the chip. Before, the motors kept their last PWM until the printer was power-cycled.
 
 **Upstream #148 (A1 no longer finds the AMS after a power cycle with a channel loaded)**
 - The cause is unproven. A channel the BMCU restored as in use at boot is now reset to idle as soon as its switches read empty.
@@ -92,4 +96,5 @@ To recalibrate later, remove all filament and hold one buffer for about 5 s. Thi
 
 - **`firmwares/` is an upstream mirror.** It holds the images published by upstream for V10.5. It is not built from this fork's sources. BMCU-Flasher's *Online* mode downloads from upstream, not from here. Images built from this fork come from CI artifacts.
 - **Printer-facing version.** The BMCU reports the AMS version bytes `{0x00, 0x00, 0x32, 0x0A}` + `"AMS08"` (10.50) from `src/bambu_bus_ams.cpp`. The `version` file is not used by the build. We keep upstream's bytes on purpose: printers check the reported AMS version (see upstream [#73](https://github.com/jarczakpawel/BMCU-C-PJARCZAK/issues/73) and [#119](https://github.com/jarczakpawel/BMCU-C-PJARCZAK/issues/119), "the ams version is wrong, printer cannot continue"). Change them only after testing on the A1.
+- **License.** Upstream does not declare a license, so this fork does not add one either. Ask upstream before redistributing the firmware.
 - The [upstream README](../../README.md), below the fork banner, describes upstream's releases, flashing guide and safety notes. The safety notes apply here too.
