@@ -18,7 +18,8 @@
 
 #define N MC_PULL_CAL_IDLE_SAMPLES
 
-// src/ADC_DMA.cpp (keep in sync): a full-filter reading is the sum of 128 samples of both 12-bit
+// ---- adapted from ADC_DMA.cpp: the full-filter reading scale ----
+// A full-filter reading is the sum of 128 samples of both 12-bit
 // ADCs (0..1,048,320 counts, 256 per ADC LSB) times kScale128.
 #define ACC_MAX     1048320u
 #define ACC_PER_LSB 256
@@ -35,9 +36,8 @@ static float adc_reading(uint32_t acc)
 // double mean to float, at most 2^-23 V each (means < 4 V), plus 1e-12 V for the double sum itself.
 #define BOUND_V ((N - 1) * (1.0 / 65536.0) / N + 2.0 * (1.0 / 8388608.0) + 1e-12)
 
-// Copies of dm_key_round_up_to_centi() and dm_key_none_threshold_from_idle() in
-// src/MC_PULL_calibration.cpp (keep in sync).
-static uint8_t dm_key_round_up_to_centi(float v)
+// ---- MC_PULL_calibration.cpp at this commit: dm_key_round_up_to_centi and dm_key_none_threshold_from_idle, verbatim ----
+static inline uint8_t dm_key_round_up_to_centi(float v)
 {
     if (v <= 0.0f) return 0u;
 
@@ -50,7 +50,7 @@ static uint8_t dm_key_round_up_to_centi(float v)
     return (uint8_t)iv;
 }
 
-static float dm_key_none_threshold_from_idle(float key_value)
+static inline float dm_key_none_threshold_from_idle(float key_value)
 {
     const uint8_t key_cv = dm_key_round_up_to_centi(key_value);
 
@@ -60,6 +60,7 @@ static float dm_key_none_threshold_from_idle(float key_value)
 
     return 0.01f * (float)thr_cv;
 }
+// ---- end of the MC_PULL_calibration.cpp copy ----
 
 static double abs_d(double a)
 {

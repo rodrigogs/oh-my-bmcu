@@ -27,7 +27,7 @@
 #define CAL_RESET_V_DELTA 0.10f
 #define CAL_RESET_NEAR_MIN 0.03f
 
-// Copy of pull_v_to_percent_f() in src/Motion_control.cpp (keep in sync), range passed in.
+// ---- adapted from Motion_control.cpp: pull_v_to_percent_f(), with the range passed in ----
 static float pull_v_to_percent(float vmin, float vmax, float v)
 {
     const float c = 1.65f;

@@ -28,7 +28,7 @@ uint32_t time_hw_tpms = 18000u;  // SysTick ticks per ms (144 MHz / 8)
 static uint32_t g_ticks = 0x10000000u;
 static uint32_t time_ticks32(void) { return g_ticks; }
 
-// ---- main.cpp at this commit: the loaded-channel state (NVM writes only counted) ----
+// ---- adapted from main.cpp: the loaded-channel state (NVM writes only counted) ----
 static uint8_t g_loaded_ch = 0xFF;
 static boot_restore_t g_boot_restore = {0xFFu};
 static bool kRestoreAtBoot = true;  // BMCU_BOOT_RESTORE_LOADED != 0 (a constant in the firmware)
