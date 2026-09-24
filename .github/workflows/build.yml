@@ -88,6 +88,9 @@ jobs:
 
       - run: pip install "platformio==${PLATFORMIO_VERSION}"
 
+      - name: Verbatim firmware copies in tests still match src/
+        run: python3 scripts/check_test_copies.py
+
       - run: pio test -e native
 
   reproduce-upstream:
