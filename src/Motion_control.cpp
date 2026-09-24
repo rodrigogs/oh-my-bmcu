@@ -11,6 +11,7 @@
 #include "jam_latch.h"
 #include "dm_rearm.h"
 #include "dm_stage2.h"
+#include "auto_unload.h"
 #include "watchdog.h"
 
 static inline float absf(float x) { return (x < 0.0f) ? -x : x; }
@@ -318,21 +319,11 @@ static inline void dm_s2_auto_unload_pass(uint8_t ch, bool idle_ctrl, uint64_t n
 }
 #endif
 
-static constexpr float    AUTO_UNLOAD_START_PCT      = 80.0f;
-static constexpr float    AUTO_UNLOAD_NEUTRAL_LO_PCT = 45.0f;
-static constexpr float    AUTO_UNLOAD_NEUTRAL_HI_PCT = 55.0f;
-static constexpr float    AUTO_UNLOAD_ABORT_PCT      = 35.0f;
-static constexpr uint64_t AUTO_UNLOAD_ARM_MS         = 1000ull;
-static constexpr uint64_t AUTO_UNLOAD_MAX_MS         = 15000ull;
-static constexpr uint64_t AUTO_UNLOAD_EMPTY_MS       = 1500ull;
+// Auto-unload and manual empty pull (auto_unload.h): their retract strengths, and each channel's state.
 static constexpr float    AUTO_UNLOAD_PWM_PULL       = 850.0f;
+static constexpr float    MANUAL_EMPTY_PULL_PWM      = 700.0f;
 
-static uint8_t  auto_unload_arm[4]          = {0,0,0,0};
-static uint8_t  auto_unload_active[4]       = {0,0,0,0};
-static uint8_t  auto_unload_blocked[4]      = {0,0,0,0};
-static uint64_t auto_unload_arm_t0_ms[4]    = {0ull,0ull,0ull,0ull};
-static uint64_t auto_unload_active_t0_ms[4] = {0ull,0ull,0ull,0ull};
-static uint64_t auto_unload_empty_t0_ms[4]  = {0ull,0ull,0ull,0ull};
+static auto_unload_t g_auto_unload[4] = {};
 
 bool filament_channel_inserted[4]       = {false, false, false, false}; // czy kanał fizycznie wpięty
 
@@ -2620,101 +2611,17 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             continue;
         }
 
-        if (!filament_channel_inserted[i] ||
-            (!auto_unload_active[i] && MOTOR_CONTROL[i].motion != filament_motion_enum::filament_motion_pressure_ctrl_idle))
-        {
-            auto_unload_arm[i]          = 0u;
-            auto_unload_active[i]       = 0u;
-            auto_unload_blocked[i]      = 0u;
-            auto_unload_arm_t0_ms[i]    = 0ull;
-            auto_unload_active_t0_ms[i] = 0ull;
-            auto_unload_empty_t0_ms[i]  = 0ull;
-        }
-        else
-        {
-            const float pct = MC_PULL_pct_f[i];
-            const uint8_t ks = MC_ONLINE_key_stu[i];
+        // Auto-unload / manual empty pull (auto_unload.h): neither drives while offline (error != 0).
+        au_in_t au;
+        au.online    = (error == 0);
+        au.inserted  = filament_channel_inserted[i];
+        au.idle_ctrl = (MOTOR_CONTROL[i].motion == filament_motion_enum::filament_motion_pressure_ctrl_idle);
+        au.pct       = MC_PULL_pct_f[i];
+        au.ks        = MC_ONLINE_key_stu[i];
+        au.now_ms    = time_now;
+        const au_drive_t drive = auto_unload_pass(&g_auto_unload[i], &au);
 
-            if (pct >= AUTO_UNLOAD_START_PCT)
-            {
-                auto_unload_blocked[i] = 0u;
-
-                if (!auto_unload_arm[i] && !auto_unload_active[i])
-                {
-                    auto_unload_arm[i] = 1u;
-                    auto_unload_arm_t0_ms[i] = time_now;
-                }
-            }
-
-            if (auto_unload_arm[i] && !auto_unload_active[i])
-            {
-                const uint64_t dt = time_now - auto_unload_arm_t0_ms[i];
-
-                if ((pct > AUTO_UNLOAD_NEUTRAL_LO_PCT) && (pct < AUTO_UNLOAD_NEUTRAL_HI_PCT))
-                {
-                    if (!auto_unload_blocked[i] && dt <= AUTO_UNLOAD_ARM_MS)
-                    {
-                        auto_unload_active[i]       = 1u;
-                        auto_unload_active_t0_ms[i] = time_now;
-                        auto_unload_empty_t0_ms[i]  = 0ull;
-                        auto_unload_blocked[i]      = 1u;
-                    }
-
-                    auto_unload_arm[i]       = 0u;
-                    auto_unload_arm_t0_ms[i] = 0ull;
-                }
-                else if (dt > AUTO_UNLOAD_ARM_MS)
-                {
-                    auto_unload_arm[i]       = 0u;
-                    auto_unload_arm_t0_ms[i] = 0ull;
-                }
-            }
-
-            if (auto_unload_active[i])
-            {
-                if (pct < AUTO_UNLOAD_ABORT_PCT)
-                {
-                    auto_unload_active[i]       = 0u;
-                    auto_unload_active_t0_ms[i] = 0ull;
-                    auto_unload_empty_t0_ms[i]  = 0ull;
-                    auto_unload_blocked[i]      = 1u;
-                }
-                else if (ks == 1u)
-                {
-                    auto_unload_empty_t0_ms[i] = 0ull;
-
-                    if ((time_now - auto_unload_active_t0_ms[i]) >= AUTO_UNLOAD_MAX_MS)
-                    {
-                        auto_unload_active[i]       = 0u;
-                        auto_unload_active_t0_ms[i] = 0ull;
-                        auto_unload_empty_t0_ms[i]  = 0ull;
-                        auto_unload_blocked[i]      = 1u;
-                    }
-                }
-                else
-                {
-                    if (auto_unload_empty_t0_ms[i] == 0ull)
-                    {
-                        auto_unload_empty_t0_ms[i] = time_now;
-                    }
-                    else if ((time_now - auto_unload_empty_t0_ms[i]) >= AUTO_UNLOAD_EMPTY_MS)
-                    {
-                        auto_unload_active[i]       = 0u;
-                        auto_unload_active_t0_ms[i] = 0ull;
-                        auto_unload_empty_t0_ms[i]  = 0ull;
-                        auto_unload_blocked[i]      = 1u;
-                    }
-                }
-            }
-        }
-
-        const bool manual_empty_pull =
-            filament_channel_inserted[i] &&
-            (MC_ONLINE_key_stu[i] == 0u) &&
-            (MC_PULL_pct_f[i] > 80.0f) &&
-            (auto_unload_active[i] == 0u);
-
-        if (auto_unload_active[i])
+        if (drive == AU_DRIVE_UNLOAD)
         {
             float x = MOTOR_CONTROL[i].dir * AUTO_UNLOAD_PWM_PULL;
             if (x * MOTOR_CONTROL[i].dir < 0.0f) x = 0.0f;
@@ -2732,9 +2639,9 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
                 i, MOTOR_CONTROL[i].motion == filament_motion_enum::filament_motion_pressure_ctrl_idle, time_now);
 #endif
         }
-        else if (manual_empty_pull)
+        else if (drive == AU_DRIVE_EMPTY_PULL)
         {
-            float x = MOTOR_CONTROL[i].dir * 700.0f;
+            float x = MOTOR_CONTROL[i].dir * MANUAL_EMPTY_PULL_PWM;
             if (x * MOTOR_CONTROL[i].dir < 0.0f) x = 0.0f;
 
             MOTOR_CONTROL[i].PID_speed.clear();
