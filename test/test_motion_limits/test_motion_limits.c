@@ -6,9 +6,9 @@
 //
 // Each test drives the decision functions in 1 ms main-loop passes, the way Motion_control.cpp
 // calls them. The simulated gear gives both of the firmware's position sources: the AS5600 count
-// (as5600_count, what the guard reads) and the float32 odometer filament[].meters, updated per read
-// the way AS5600_distance_updata does it (what the pull's own target check reads). pwm is the PWM
-// of the previous pass.
+// (as5600_count, what the guard reads, and through ml_travel_m every distance a motor state decides
+// on) and the float32 odometer filament[].meters, updated per read the way AS5600_distance_updata
+// does it (only reported to the printer). pwm is the PWM of the previous pass.
 
 #include <stdint.h>
 #include <unity.h>
@@ -98,21 +98,21 @@ static bool old_pull_back_done(float target_m, float pulled_m, uint8_t ks)
 static ml_result s_end;
 
 // Pulls at speed_mm_s (0 = use the firmware's speed command) with a fixed PWM until the pull ends
-// or max_ms passes. pulled_m is |meters - meters at the start|, as the firmware measures it. Checks
-// every pass against the old decision while the new limits are not due. Returns the pass (ms since
-// the start) the pull ended in, or 0 if it did not.
+// or max_ms passes. pulled_m is ml_travel_m from the count at the start, as the firmware measures
+// it. Checks every pass against the old decision while the new limits are not due. Returns the pass
+// (ms since the start) the pull ended in, or 0 if it did not.
 static uint32_t run_pull(float target_m, float speed_mm_s, float pwm, uint32_t max_ms, bool expect_as_before)
 {
-    const float start_m = s_meters;
+    const uint32_t start_cnt = s_cnt;
     ml_pull_back_start(&g, now, s_cnt, target_m);
 
     for (uint32_t t = 1; t <= max_ms; t++)
     {
         now++;
-        const float v = (speed_mm_s > 0.0f) ? speed_mm_s : pull_cmd_mm_s(target_m - ml_absf(s_meters - start_m));
+        const float v = (speed_mm_s > 0.0f) ? speed_mm_s : pull_cmd_mm_s(target_m - ml_travel_m(s_cnt, start_cnt));
         gear_step(-v);
 
-        const float d = ml_absf(s_meters - start_m);
+        const float d = ml_travel_m(s_cnt, start_cnt);
         const ml_result r = ml_pull_back_check(&g, now, s_cnt, pwm, target_m, d, 1u);
         if (expect_as_before) TEST_ASSERT_EQUAL(old_pull_back_done(target_m, d, 1u), r != ML_OK);
         if (r != ML_OK)
@@ -153,14 +153,37 @@ static void test_distances_are_whole_counts_modulo_2_32(void)
     TEST_ASSERT_EQUAL_UINT32(0x80000000u, ml_cnt_dist(0x80000000u, 0u));
 }
 
+static void test_travel_m_is_the_count_distance_at_any_position(void)
+{
+    // One count is 5.7524 um. The SOLO retract (16515 counts) and the 10 m send cap convert back
+    // to within half a count of their length.
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, ml_cnt_to_m(0u));
+    TEST_ASSERT_FLOAT_WITHIN(1.0e-10f, 5.7524e-6f, ml_cnt_to_m(1u));
+    TEST_ASSERT_FLOAT_WITHIN(3.0e-6f, SOLO_RETRACT_M, ml_cnt_to_m(ml_m_to_cnt(SOLO_RETRACT_M)));
+    TEST_ASSERT_FLOAT_WITHIN(3.0e-6f, 10.0f, ml_cnt_to_m(ml_m_to_cnt(10.0f)));
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 12353.0f, ml_cnt_to_m(0x80000000u));  // the largest distance
+
+    // The same 16515 counts forwards and backwards, from any position, across the wrap too.
+    const float solo_m = ml_cnt_to_m(16515u);
+    const uint32_t starts[] = {0u, 5u, 0x7FFFFFF0u, 0x80000000u, PULL_CNT0, 0xFFFFFFFFu};
+    for (uint32_t i = 0; i < sizeof(starts) / sizeof(starts[0]); i++)
+    {
+        TEST_ASSERT_EQUAL_FLOAT(solo_m, ml_travel_m(starts[i] + 16515u, starts[i]));
+        TEST_ASSERT_EQUAL_FLOAT(solo_m, ml_travel_m(starts[i] - 16515u, starts[i]));
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, ml_travel_m(starts[i], starts[i]));
+    }
+    TEST_ASSERT_EQUAL_FLOAT(ml_cnt_to_m(1u), ml_travel_m(0u, 0xFFFFFFFFu));
+    TEST_ASSERT_EQUAL_FLOAT(ml_cnt_to_m(1u), ml_travel_m(0xFFFFFFFFu, 0u));
+}
+
 static void test_solo_unload_ends_at_target_as_before(void)
 {
     // 80 mm at 60 mm/s plus the 15 mm slow-down: about 1.84 s, far inside the 9.9 s budget.
-    const float start_m = s_meters;
     const uint32_t t = run_pull(SOLO_RETRACT_M, 0.0f, 650.0f, 20000u, true);
     TEST_ASSERT_UINT32_WITHIN(20u, 1836u, t);
     TEST_ASSERT_EQUAL(ML_END, s_end);
-    TEST_ASSERT_TRUE(ml_absf(s_meters - start_m) >= SOLO_RETRACT_M);
+    // The first pass at or past 16515 counts (95.0 mm); the 12 mm/s end speed is 2.1 counts a pass.
+    TEST_ASSERT_EQUAL_UINT32(16516u, ml_cnt_dist(s_cnt, PULL_CNT0));
 }
 
 static void test_solo_unload_at_full_pwm_ends_at_target_as_before(void)
@@ -181,24 +204,22 @@ static void test_long_retract_ends_at_target_as_before(void)
 
 static void test_slow_but_moving_pull_still_reaches_target(void)
 {
-    // 14 mm/s (just above the budget speed) at 1000 PWM: 95 mm take 6786 ms, inside 9.9 s. The pull
-    // measures itself with meters, whose float32 sums of 2-3 count steps run 0.3 % long at 1.2 m,
-    // so it ends 21 ms early, in the same pass as before.
+    // 14 mm/s (just above the budget speed) at 1000 PWM: 95 mm take 6786 ms, inside 9.9 s.
     const uint32_t t = run_pull(SOLO_RETRACT_M, 14.0f, 1000.0f, 20000u, true);
-    TEST_ASSERT_UINT32_WITHIN(2u, 6765u, t);
+    TEST_ASSERT_UINT32_WITHIN(1u, 6786u, t);
     TEST_ASSERT_EQUAL(ML_END, s_end);
 }
 
 static void test_pull_ends_when_switches_empty_as_before(void)
 {
-    const float start_m = s_meters;
+    const uint32_t start_cnt = s_cnt;
     ml_pull_back_start(&g, now, s_cnt, SOLO_RETRACT_M);
     for (uint32_t t = 1; t <= 300u; t++)
     {
         now++;
         gear_step(-60.0f);
         const uint8_t ks = (t < 300u) ? 1u : 0u;  // filament pulled out of the BMCU at 300 ms
-        const float d = ml_absf(s_meters - start_m);
+        const float d = ml_travel_m(s_cnt, start_cnt);
         const ml_result r = ml_pull_back_check(&g, now, s_cnt, 1000.0f, SOLO_RETRACT_M, d, ks);
         TEST_ASSERT_EQUAL(old_pull_back_done(SOLO_RETRACT_M, d, ks), r != ML_OK);
         if (t == 300u) TEST_ASSERT_EQUAL(ML_END, r);
@@ -302,11 +323,11 @@ static void test_stall_needs_high_pwm(void)
 static void test_creeping_pull_stops_at_time_budget(void)
 {
     // 5 mm/s at 1000 PWM: moves 1 mm every 200 ms (no stall) but would need 19 s for 95 mm.
-    const float start_m = s_meters;
+    const uint32_t start_cnt = s_cnt;
     const uint32_t t = run_pull(SOLO_RETRACT_M, 5.0f, 1000.0f, 60000u, false);
     TEST_ASSERT_EQUAL_UINT32(9917u, t);
     TEST_ASSERT_EQUAL(ML_TIME, s_end);
-    TEST_ASSERT_FLOAT_WITHIN(0.0005f, 0.0496f, ml_absf(s_meters - start_m));
+    TEST_ASSERT_FLOAT_WITHIN(0.0005f, 0.0496f, ml_travel_m(s_cnt, start_cnt));
 }
 
 static void test_long_retract_time_budget(void)
@@ -333,16 +354,16 @@ static void test_stall_threshold_is_1mm_per_s(void)
 static void test_pull_at_5000m_odometer_is_not_a_false_stall(void)
 {
     // meters is 5000 m after a long uptime. Its float32 step there is 0.49 mm, so the 0.06 mm of
-    // each 1 ms read of a 60 mm/s pull is lost and meters stands still. The guard counts AS5600
-    // steps and sees the gear turn, so a heavy-drag pull at 1000 PWM is no stall. (The pull's own
-    // target check still reads meters, a separate finding: here it never fires, and the time budget
-    // ends the pull instead of a stall 1 s in. Before the limits, this pull ran until ks == 0.)
+    // each 1 ms read of a 60 mm/s pull is lost and meters stands still. The pull's target check and
+    // the guard count AS5600 steps: a heavy-drag pull at 1000 PWM is no stall and ends at 95 mm, as
+    // at a small odometer. (Measured with meters, it never reached its target, and the time budget
+    // ended it after 595 mm of gear travel.)
     gear_reset(PULL_CNT0, 5000.0f);
-    const uint32_t t = run_pull(SOLO_RETRACT_M, 0.0f, 1000.0f, 60000u, false);
+    const uint32_t t = run_pull(SOLO_RETRACT_M, 0.0f, 1000.0f, 60000u, true);
     TEST_ASSERT_EQUAL_FLOAT(5000.0f, s_meters);
-    TEST_ASSERT_EQUAL_UINT32(9917u, t);
-    TEST_ASSERT_EQUAL(ML_TIME, s_end);
-    TEST_ASSERT_EQUAL_UINT32(103438u, ml_cnt_dist(s_cnt, PULL_CNT0));  // 595 mm turned, across the wrap
+    TEST_ASSERT_UINT32_WITHIN(20u, 1836u, t);
+    TEST_ASSERT_EQUAL(ML_END, s_end);
+    TEST_ASSERT_EQUAL_UINT32(16516u, ml_cnt_dist(s_cnt, PULL_CNT0));  // 95 mm, across the wrap
 
     // The same pull that is then held stops ML_STALL_MS after the block, as at a small odometer.
     gear_reset(PULL_CNT0, 5000.0f);
@@ -350,6 +371,25 @@ static void test_pull_at_5000m_odometer_is_not_a_false_stall(void)
     TEST_ASSERT_EQUAL_UINT32(680u + ML_STALL_MS, run_move_then_block(check_pull, -60.0f, 680u, 1000.0f));
     TEST_ASSERT_EQUAL(ML_STALL, s_end);
     TEST_ASSERT_EQUAL_FLOAT(5000.0f, s_meters);
+}
+
+static void test_pull_end_does_not_depend_on_the_odometer(void)
+{
+    // The same SOLO pull (the firmware's speed command, from near the count wrap) ends in the same
+    // pass at the same count at any odometer. Measured with meters it ended 0.5 mm long at 20 m,
+    // 1.0-2.1 mm short at 50-300 m, and not at its target at 600 m or more.
+    const uint32_t t_ref = run_pull(SOLO_RETRACT_M, 0.0f, 650.0f, 20000u, true);
+    const uint32_t cnt_ref = ml_cnt_dist(s_cnt, PULL_CNT0);
+    TEST_ASSERT_EQUAL(ML_END, s_end);
+
+    const float odometers_m[] = {20.0f, 50.0f, 130.0f, 300.0f, 600.0f, 5000.0f};
+    for (uint32_t i = 0; i < sizeof(odometers_m) / sizeof(odometers_m[0]); i++)
+    {
+        gear_reset(PULL_CNT0, odometers_m[i]);
+        TEST_ASSERT_EQUAL_UINT32(t_ref, run_pull(SOLO_RETRACT_M, 0.0f, 650.0f, 20000u, true));
+        TEST_ASSERT_EQUAL(ML_END, s_end);
+        TEST_ASSERT_EQUAL_UINT32(cnt_ref, ml_cnt_dist(s_cnt, PULL_CNT0));
+    }
 }
 
 static void test_bus_offline_gap_is_not_counted(void)
@@ -373,21 +413,21 @@ static void test_bus_offline_gap_is_not_counted(void)
 
     // Creeping for 5 s, then a 30 s gap: the budget ends 4917 ms after the gap, not at once.
     setUp();
-    const float start_m = s_meters;
+    const uint32_t start_cnt = s_cnt;
     ml_pull_back_start(&g, now, s_cnt, SOLO_RETRACT_M);
     for (uint32_t t = 1; t <= 5000u; t++)
     {
         now++;
         gear_step(-5.0f);
         TEST_ASSERT_EQUAL(ML_OK, ml_pull_back_check(&g, now, s_cnt, 1000.0f, SOLO_RETRACT_M,
-                                                    ml_absf(s_meters - start_m), 1u));
+                                                    ml_travel_m(s_cnt, start_cnt), 1u));
     }
     now += 30000u;
     t_done = 0u;
     for (uint32_t t = 0; t <= 10000u && !t_done; t++)
     {
         gear_step(-5.0f);
-        if (ml_pull_back_check(&g, now, s_cnt, 1000.0f, SOLO_RETRACT_M, ml_absf(s_meters - start_m), 1u) == ML_TIME)
+        if (ml_pull_back_check(&g, now, s_cnt, 1000.0f, SOLO_RETRACT_M, ml_travel_m(s_cnt, start_cnt), 1u) == ML_TIME)
             t_done = t;
         now++;
     }
@@ -532,6 +572,41 @@ static void test_dm_s2_retract_that_never_relaxes_the_buffer_stops_at_budget(voi
     TEST_ASSERT_EQUAL(ML_TIME, s_end);
 }
 
+// The Stage-2 push's own countdown (DM_AUTO_S2_PUSH in Motion_control.cpp): each pass subtracts
+// the gear travel since the previous pass, from the count, from the 120 mm left. Returns the pass
+// the countdown reached 0 in, 0 if it did not.
+static uint32_t run_dm_s2_countdown(float speed_mm_s, uint32_t max_ms)
+{
+    float remain_m = DM_S2_LEN_M;
+    uint32_t last_cnt = s_cnt;
+    for (uint32_t t = 1; t <= max_ms; t++)
+    {
+        now++;
+        gear_step(speed_mm_s);
+        float r = remain_m - ml_travel_m(s_cnt, last_cnt);
+        last_cnt = s_cnt;
+        if (r < 0.0f) r = 0.0f;
+        remain_m = r;
+        if (remain_m <= 0.0f) return t;
+    }
+    return 0u;
+}
+
+static void test_dm_s2_countdown_is_120mm_at_any_odometer(void)
+{
+    // 120 mm (20861 counts) at 60 mm/s: 2000 passes, through the count wrap 11.8 mm in.
+    gear_reset(FEED_CNT0, 1.2345f);
+    TEST_ASSERT_EQUAL_UINT32(2000u, run_dm_s2_countdown(60.0f, 20000u));
+    TEST_ASSERT_EQUAL_UINT32(20861u, ml_cnt_dist(s_cnt, FEED_CNT0));
+
+    // At a 5000 m odometer meters stands still (see above); the countdown is the same. Counted from
+    // meters it pushed 118.0-120.7 mm at odometers up to 600 m and never ended at 5000 m.
+    gear_reset(FEED_CNT0, 5000.0f);
+    TEST_ASSERT_EQUAL_UINT32(2000u, run_dm_s2_countdown(60.0f, 20000u));
+    TEST_ASSERT_EQUAL_UINT32(20861u, ml_cnt_dist(s_cnt, FEED_CNT0));
+    TEST_ASSERT_EQUAL_FLOAT(5000.0f, s_meters);
+}
+
 // ---- Unfinished unload fault (status LED) ----
 
 static void test_only_a_limit_is_an_unload_fault(void)
@@ -583,6 +658,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_time_budget_is_distance_at_12mm_s_plus_2s);
     RUN_TEST(test_distances_are_whole_counts_modulo_2_32);
+    RUN_TEST(test_travel_m_is_the_count_distance_at_any_position);
     RUN_TEST(test_solo_unload_ends_at_target_as_before);
     RUN_TEST(test_solo_unload_at_full_pwm_ends_at_target_as_before);
     RUN_TEST(test_long_retract_ends_at_target_as_before);
@@ -596,6 +672,7 @@ int main(void)
     RUN_TEST(test_long_retract_time_budget);
     RUN_TEST(test_stall_threshold_is_1mm_per_s);
     RUN_TEST(test_pull_at_5000m_odometer_is_not_a_false_stall);
+    RUN_TEST(test_pull_end_does_not_depend_on_the_odometer);
     RUN_TEST(test_bus_offline_gap_is_not_counted);
     RUN_TEST(test_budget_is_not_cut_by_32bit_ms);
     RUN_TEST(test_redetect_on_empty_channel_stops_after_retract_length);
@@ -609,6 +686,7 @@ int main(void)
     RUN_TEST(test_dm_s2_blocked_gear_stops);
     RUN_TEST(test_dm_s2_push_that_moves_then_blocks_stops_1s_after_the_block);
     RUN_TEST(test_dm_s2_retract_that_never_relaxes_the_buffer_stops_at_budget);
+    RUN_TEST(test_dm_s2_countdown_is_120mm_at_any_odometer);
     RUN_TEST(test_only_a_limit_is_an_unload_fault);
     RUN_TEST(test_unload_fault_stays_until_filament_out_or_next_move);
     RUN_TEST(test_stalled_pull_sets_the_fault_and_a_good_retry_clears_it);
