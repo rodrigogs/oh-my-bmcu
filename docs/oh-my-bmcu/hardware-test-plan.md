@@ -92,8 +92,12 @@ flashed as described in [README.md](README.md#flash)
 - [ ] After a tangle, printer idle, slot still selected: lift the buffer to the top and hold it
       firmly until the red LED goes out (about 1 s), keep holding 2 s, let go. The filament must
       not be unloaded. The motor may pull back while you hold it (the idle control, no purple LED);
-      only a purple-LED retract after letting go would be the auto-unload. A quick lift and release
-      from rest afterwards unloads it as usual.
+      only a purple-LED retract after letting go would be the auto-unload. Repeat, but after the LED
+      goes out let the buffer drop about a quarter of its travel (not to the middle), lift it to the
+      top again at once and let go: again no purple LED. Note where the buffer comes to rest. A
+      quick lift and release from rest afterwards unloads it as usual; if the buffer rested above
+      the middle, the first lift (pressed back down to the middle) only ends the hold-off and the
+      second one unloads.
 - [ ] Same with another slot (or none) selected: a quick lift of the latched slot's buffer does
       nothing and the LED stays red; held at the top for 1 s the LED goes out, and letting go does
       not unload.

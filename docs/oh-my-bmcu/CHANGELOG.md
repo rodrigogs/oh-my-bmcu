@@ -43,8 +43,9 @@ follow the [hardware test plan](hardware-test-plan.md) before relying on an imag
 - Brake a jam-latched channel in before_on_use (`4a0a137`) and in the idle control once it is not
   the active channel (`89d9096`), so a resume or a channel change cannot push into the tangle.
 - Do not start the auto-unload from a buffer lift while a channel is tangle-latched, nor from the
-  lift that releases the latch (`c513a32`); drop an unreachable 0xF06F report from the silent 20 s
-  latch, no change in behaviour (`26d8841`).
+  lift that releases the latch (`c513a32`), also when the hand sags and lifts the buffer again
+  before letting go: the hold-off ends only with the buffer back below 55 % (`36efea7`); drop an
+  unreachable 0xF06F report from the silent 20 s latch, no change in behaviour (`26d8841`).
 - Keep the DM Stage-2 progress (remaining length, aborts, time and stall limits) across switch dips,
   and count Stage-1 pushes and buffer-lift unloads against it: with the link up, a blocked gear
   gets at most about 6 s of 900 PWM per insertion (`000d153`).
