@@ -182,5 +182,5 @@ PA10 = RX, PA12 = DE, channel LED data pins PA11/PA8/PB1/PB0.
 ## Reporting
 
 Record, for every run, the image sha256, this checklist and anything unexpected: LED colours, the
-printer's HMS codes, OrcaStudio log lines. A regression goes into the audit backlog with the commit
-that introduced it.
+printer's HMS codes, OrcaStudio log lines, in the [hardware test log](hardware-test-log.md). A
+regression goes into the audit backlog with the commit that introduced it.

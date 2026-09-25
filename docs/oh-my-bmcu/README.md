@@ -1,6 +1,6 @@
 # oh-my-bmcu
 
-A fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-PJARCZAK) maintained for one concrete setup: a single BMCU 370C on a Bambu Lab A1. Every change lands with an adversarial code review, a green CI and host unit tests for the logic that can be isolated from the hardware, and stays easy to send back upstream. Validation on the A1 itself is tracked in the [hardware test plan](hardware-test-plan.md): until an image has passed it, treat it as untested on hardware.
+A fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-PJARCZAK) maintained for one concrete setup: a single BMCU 370C on a Bambu Lab A1. Every change lands with an adversarial code review, a green CI and host unit tests for the logic that can be isolated from the hardware, and stays easy to send back upstream. Validation on the A1 itself is tracked in the [hardware test plan](hardware-test-plan.md), with results in the [hardware test log](hardware-test-log.md): until an image has passed it, treat it as untested on hardware.
 
 ## Target setup
 
