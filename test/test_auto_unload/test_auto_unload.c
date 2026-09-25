@@ -7,8 +7,8 @@
 // drive: a running auto-unload ends with its state cleared and needs a new lift once the link is
 // back, and the manual pull runs again only while the link is up. While the channel's jam latch is
 // set, and on the pass that releases it (auto_unload_hold()), no lift may arm the auto-unload until
-// a pass with the buffer below 80%: the lift that releases the latch, and letting go of the buffer
-// after it, must not unload the channel, and a new lift after that must.
+// a pass with the buffer below 55%, back in the neutral band: the lift that releases the latch, and
+// letting go of the buffer after it, must not unload the channel, and a new lift after that must.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -291,7 +291,7 @@ static void test_no_lift_of_a_latched_channel_starts_the_auto_unload(void)
     lift_and_release();
 }
 
-static void test_the_hold_off_ends_on_the_first_pass_below_80(void)
+static void test_the_hold_off_ends_on_the_first_pass_below_55(void)
 {
     latched = true;
     TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 1u));
@@ -300,9 +300,17 @@ static void test_the_hold_off_ends_on_the_first_pass_below_80(void)
     TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(AUTO_UNLOAD_START_PCT, 1000u));
     TEST_ASSERT_EQUAL_UINT8(1u, st.wait_low);
     TEST_ASSERT_EQUAL_UINT8(0u, st.arm);
-    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(79.9f, 1u));
+    // Below 80% (where it used to end) and down to the neutral band's top, at 55%: still held off.
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(79.9f, 1000u));
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(AUTO_UNLOAD_NEUTRAL_HI_PCT, 1000u));
+    TEST_ASSERT_EQUAL_UINT8(1u, st.wait_low);
+    TEST_ASSERT_EQUAL_UINT8(0u, st.arm);
+    // The first pass in the band ends it and starts nothing: no lift has armed the auto-unload.
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(54.9f, 1u));
     TEST_ASSERT_EQUAL_UINT8(0u, st.wait_low);
-    // From there a lift is a new lift: back at 80% it arms, and the neutral band starts the unload.
+    TEST_ASSERT_EQUAL_UINT8(0u, st.arm);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(54.9f, 2000u));
+    // From there a lift is a new lift: at 80% it arms, and the neutral band starts the unload.
     TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(AUTO_UNLOAD_START_PCT, 1u));
     TEST_ASSERT_EQUAL_UINT8(1u, st.arm);
     TEST_ASSERT_EQUAL_INT(AU_DRIVE_UNLOAD, hold(50.0f, 1u));
@@ -331,7 +339,7 @@ static void test_the_hold_off_outlasts_passes_outside_the_idle_control(void)
     TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(50.0f, 2000u));
     TEST_ASSERT_EQUAL_UINT32(0u, unload_passes);
 
-    // A pass below 80% ends it in any of those states.
+    // A pass below 55% ends it in any of those states; one below 80% does not.
     for (int k = 0; k < 3; k++)
     {
         setUp();
@@ -342,6 +350,8 @@ static void test_the_hold_off_outlasts_passes_outside_the_idle_control(void)
         if (k == 1) in.online = false;
         if (k == 2) in.inserted = false;
         TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(79.0f, 1u));
+        TEST_ASSERT_EQUAL_UINT8(1u, st.wait_low);
+        TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(54.9f, 1u));
         TEST_ASSERT_EQUAL_UINT8(0u, st.wait_low);
         in.idle_ctrl = true;
         in.online = true;
@@ -533,14 +543,14 @@ static void test_online_decisions_match_the_code_before(void)
 
 // ---- Jam latch: the hold-off against the gesture, at random ----
 
-static void test_the_hold_off_only_ever_delays_arming_until_a_pass_below_80(void)
+static void test_the_hold_off_only_ever_delays_arming_until_a_pass_below_55(void)
 {
     // Two million passes of a buffer that wanders, jumps and is lifted and released at random, the
     // key, the motor state and the link changing at random, and the jam latch set and cleared at
     // random (held on every pass while set). The auto-unload arms (arm 0 -> 1) exactly on the passes
     // where the gesture arms it (buffer at 80% or above, in the idle control, online, wired, neither
     // armed nor running) that are not held and follow, since the last held pass, one with the buffer
-    // below 80%; on the others it stays unarmed.
+    // below 55%; on the others it stays unarmed.
     float pct = 50.0f;
     bool low_since_hold = true;
     uint32_t arms = 0u, held_off = 0u, starts = 0u;
@@ -562,7 +572,7 @@ static void test_the_hold_off_only_ever_delays_arming_until_a_pass_below_80(void
         if (rnd(20u) == 0u) now += rnd(300u);
 
         if (latched) low_since_hold = false;
-        if (pct < AUTO_UNLOAD_START_PCT) low_since_hold = true;
+        if (pct < AUTO_UNLOAD_NEUTRAL_HI_PCT) low_since_hold = true;
 
         const uint8_t arm0 = st.arm, active0 = st.active;
         const bool gesture_arms = (pct >= AUTO_UNLOAD_START_PCT) && in.idle_ctrl && in.online && in.inserted &&
@@ -586,8 +596,8 @@ static void test_the_hold_off_only_ever_delays_arming_until_a_pass_below_80(void
         }
         if (!active0 && st.active) starts++;
     }
-    // The walk exercised both cases, and the gesture still unloads (3094 arms, 54120 held-off
-    // passes and 1008 starts with this seed).
+    // The walk exercised both cases, and the gesture still unloads (3071 arms, 56378 held-off
+    // passes and 1002 starts with this seed).
     TEST_ASSERT_TRUE(arms > 1500u);
     TEST_ASSERT_TRUE(held_off > 10000u);
     TEST_ASSERT_TRUE(starts > 500u);
@@ -608,11 +618,11 @@ int main(void)
     RUN_TEST(test_link_lost_stops_a_manual_empty_pull);
     RUN_TEST(test_the_lift_that_releases_a_jam_latch_does_not_unload);
     RUN_TEST(test_no_lift_of_a_latched_channel_starts_the_auto_unload);
-    RUN_TEST(test_the_hold_off_ends_on_the_first_pass_below_80);
+    RUN_TEST(test_the_hold_off_ends_on_the_first_pass_below_55);
     RUN_TEST(test_the_hold_off_outlasts_passes_outside_the_idle_control);
     RUN_TEST(test_the_hold_drops_a_lift_under_way_and_leaves_a_running_auto_unload);
     RUN_TEST(test_the_hold_off_leaves_the_manual_empty_pull);
     RUN_TEST(test_online_decisions_match_the_code_before);
-    RUN_TEST(test_the_hold_off_only_ever_delays_arming_until_a_pass_below_80);
+    RUN_TEST(test_the_hold_off_only_ever_delays_arming_until_a_pass_below_55);
     return UNITY_END();
 }

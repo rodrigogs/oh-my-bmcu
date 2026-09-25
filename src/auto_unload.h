@@ -37,15 +37,28 @@
 // armed it, also one too short or too low to release the latch. Now Motion_control_run calls
 // auto_unload_hold() on every pass while the channel's jam latch is set and on the pass that
 // releases it: no lift arms the auto-unload until a pass, in any state, with the buffer below
-// AUTO_UNLOAD_START_PCT. So lifting a latched channel's buffer only ever releases the latch, letting
-// go starts nothing, and a new lift after that unloads as before. That is also upstream's handling
-// of a jam: the pull back of a latched channel is 100 mm instead of the full retract, and a latched
-// active channel is stopped in idle, where the gesture never reached it. Upstream did let a quick
-// lift unload a latched channel that is not the active one; this fork blocks that on purpose, since
-// a release attempt that fell short would otherwise unload the channel. A latched channel is
-// unloaded by the printer, by hand, or by the gesture once released. A running auto-unload keeps
-// its own ends (it only retracts), and the manual empty pull needs no filament at the switch, which
-// clears the latch, so it is unchanged.
+// AUTO_UNLOAD_NEUTRAL_HI_PCT (55%). So lifting a latched channel's buffer only ever releases the
+// latch, letting go starts nothing, and a new lift after that unloads as before. That is also
+// upstream's handling of a jam: the pull back of a latched channel is 100 mm instead of the full
+// retract, and a latched active channel is stopped in idle, where the gesture never reached it.
+// Upstream did let a quick lift unload a latched channel that is not the active one; this fork
+// blocks that on purpose, since a release attempt that fell short would otherwise unload the
+// channel. A latched channel is unloaded by the printer, by hand, or by the gesture once released.
+// A running auto-unload keeps its own ends (it only retracts), and the manual empty pull needs no
+// filament at the switch, which clears the latch, so it is unchanged.
+//
+// The hold-off ends only with the buffer back in the neutral band or below it, where a buffer
+// returns when it is let go. In c513a32 it ended on the first pass below AUTO_UNLOAD_START_PCT
+// (80%): after the release the person may still hold the buffer up, the idle control retracting
+// against the hand (up to 800 PWM above 70%), and a hand that sagged below 80% for one pass and
+// lifted the buffer again armed the auto-unload, so letting go unloaded the channel after all. The
+// gesture itself must come back into the band, so the pass that ends the hold-off comes no later
+// than the first pass on which an unload could start, and it starts nothing itself (no lift armed
+// it). A buffer that stops above 55% when let go (slider friction; the idle control leaves it
+// anywhere in 30-70%) keeps the hold-off until it is pressed down into the band once. From there
+// the gesture needs that press anyway, so the first gesture after the release only ends the
+// hold-off and the next one unloads. It never locks the gesture out: any pass below 55%, in any
+// state, ends it.
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -63,7 +76,7 @@ typedef struct
     uint8_t  arm;           // lifted to AUTO_UNLOAD_START_PCT: waiting for the neutral band
     uint8_t  active;        // the auto-unload retracts
     uint8_t  blocked;       // no new start until the buffer is lifted again
-    uint8_t  wait_low;      // auto_unload_hold(): no arming until a pass below AUTO_UNLOAD_START_PCT
+    uint8_t  wait_low;      // auto_unload_hold(): no arming until a pass below 55% (NEUTRAL_HI)
     uint64_t arm_t0_ms;
     uint64_t active_t0_ms;
     uint64_t empty_t0_ms;   // first pass with the key away from 'both' while active (0 = none)
@@ -82,7 +95,7 @@ static inline void auto_unload_reset(auto_unload_t *s)
 
 // The channel's jam latch is set, or was released on this pass (Motion_control_run): a lift that
 // is under way no longer counts, and none arms the auto-unload until the buffer has been below
-// AUTO_UNLOAD_START_PCT. A running auto-unload goes on.
+// AUTO_UNLOAD_NEUTRAL_HI_PCT. A running auto-unload goes on.
 static inline void auto_unload_hold(auto_unload_t *s)
 {
     s->wait_low  = 1u;
@@ -110,7 +123,7 @@ typedef struct
 // One main-loop pass for one channel: updates its state and returns what motor_motion_run drives.
 static inline au_drive_t auto_unload_pass(auto_unload_t *s, const au_in_t *in)
 {
-    if (in->pct < AUTO_UNLOAD_START_PCT) s->wait_low = 0u;
+    if (in->pct < AUTO_UNLOAD_NEUTRAL_HI_PCT) s->wait_low = 0u;
 
     if (!in->online || !in->inserted || (!s->active && !in->idle_ctrl))
     {

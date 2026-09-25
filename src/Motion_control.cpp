@@ -2734,7 +2734,8 @@ void Motion_control_run(int error)
             g_on_use_hi_pwm_us[ch] = 0u;
 
         // Latched, or released on this pass: no buffer lift arms the auto-unload until the buffer has
-        // been below 80% (auto_unload.h), so the lift that releases the latch does not unload it.
+        // been below 55%, the top of the neutral band (auto_unload.h), so the lift that releases the
+        // latch does not unload it.
         if (g_on_use_jam_latch[ch] || (ev == JAM_EVENT_RELEASE))
             auto_unload_hold(&g_auto_unload[ch]);
     }

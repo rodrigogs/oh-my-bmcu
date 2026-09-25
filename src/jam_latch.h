@@ -324,9 +324,11 @@ typedef enum
 // latched active channel in idle and send_out, and before_pull_back and the pull back only retract.
 // The auto-unload and the manual empty pull (auto_unload.h) drive the motor instead of run(), and
 // they only retract. No buffer lift arms the auto-unload while the jam latch is set, nor after the
-// pass that releases it until the buffer has been below 80% (auto_unload_hold()): lifting a latched
-// channel's buffer releases it and does not unload it. The manual empty pull needs no filament at
-// the switch, which clears the latch.
+// pass that releases it until the buffer has been below 55% (AUTO_UNLOAD_NEUTRAL_HI_PCT, the top of
+// the auto-unload's neutral band; auto_unload_hold()): lifting a latched channel's buffer releases
+// it and does not unload it, also when the hand sags (without reaching the middle) and lifts it
+// again before letting go. The manual empty pull needs no filament at the switch, which clears the
+// latch.
 // The release rules above are unchanged. A resume with before_on_use releases the latch at once if
 // the buffer has been back at JAM_TRIP_PCT since the trip (a person fed filament or lifted the
 // buffer), and hold_load runs from that pass on. If it has not, the channel stays latched and
