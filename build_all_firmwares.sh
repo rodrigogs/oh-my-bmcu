@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")"
+# CDPATH= : an exported CDPATH must not send a relative cd to another directory of the same name.
+CDPATH= cd -- "$(dirname "$0")"
 
 command -v pio >/dev/null 2>&1 || { echo "ERROR: nie ma 'pio' w PATH"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: nie ma 'python3' w PATH"; exit 1; }
@@ -9,22 +10,77 @@ command -v python3 >/dev/null 2>&1 || { echo "ERROR: nie ma 'python3' w PATH"; e
 # oh-my-bmcu: firmwares/ is the upstream mirror (and CI's reference), so builds from this fork's
 # sources go to an untracked dir by default. Set OUT_DIR=firmwares to regenerate the mirror.
 OUT_DIR="${OUT_DIR:-build/firmwares}"
-# Absolute and without a trailing slash, so "firmwares/", "./firmwares" or an absolute path cannot
-# slip past the check below, and the staging dir never ends up inside OUT_DIR.
+# Absolute and without a trailing slash, so the staging dir never ends up inside OUT_DIR.
 OUT_DIR="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "${OUT_DIR}")"
 PIO_ENV="fw"
 
 # BUILD_ONLY_SOLO=1 builds just the SOLO image of every mode/AUTOLOAD/RGB combination (12 builds).
 BUILD_ONLY_SOLO="${BUILD_ONLY_SOLO:-0}"
-if [[ "${BUILD_ONLY_SOLO}" == "1" && "${OUT_DIR}" == "${PWD}/firmwares" ]]; then
-  echo "ERROR: BUILD_ONLY_SOLO=1 would replace firmwares/ with a 12-image subset; use another OUT_DIR"
-  exit 1
-fi
+# FORCE=1 lets the run replace an OUT_DIR (or OUT_DIR.new / OUT_DIR.old) that holds something else.
+FORCE="${FORCE:-0}"
 
 # Build into a staging dir and only replace ${OUT_DIR} once every variant has been built,
 # so a failed build no longer leaves the previous output deleted.
 STAGE_DIR="${OUT_DIR}.new"
 MANIFEST_TMP="${STAGE_DIR}.manifest.txt"
+MANIFEST_HEADER="# format: SHA256_HEX CRC32_HEX SIZE_BYTES REL_PATH"
+
+# The run deletes ${STAGE_DIR} and ${OUT_DIR}.old and everything in ${OUT_DIR}, so check what they
+# are before anything is touched. Directories are compared by identity (-ef), not by name: through a
+# symlinked checkout (/tmp is /private/tmp on macOS) or in another letter case on a case-insensitive
+# file system the names differ.
+
+# True if directory $1 is directory $2 or one above it.
+is_or_above() {
+  local d
+  d="$(CDPATH= cd -P -- "$2" 2>/dev/null && pwd -P)" || return 1
+  while :; do
+    [[ "$1" -ef "${d}" ]] && return 0
+    [[ "${d}" == "/" ]] && return 1
+    d="${d%/*}"
+    d="${d:-/}"
+  done
+}
+
+# True if $1 is an empty directory, or an earlier output of this script: its manifest.txt starts
+# with the header written below (the committed firmwares/ mirror has it too).
+is_build_output() {
+  local first
+  [[ -d "$1" ]] || return 1
+  first="$(ls -A "$1")" || return 1
+  [[ -z "${first}" ]] && return 0
+  [[ -f "$1/manifest.txt" ]] || return 1
+  first="$(head -n 1 "$1/manifest.txt")" || return 1
+  [[ "${first}" == "${MANIFEST_HEADER}" ]]
+}
+
+if is_or_above "${OUT_DIR}" .; then
+  echo "ERROR: OUT_DIR=${OUT_DIR} is this checkout or a directory above it"
+  exit 1
+fi
+if [[ -n "${HOME:-}" ]] && is_or_above "${OUT_DIR}" "${HOME}"; then
+  echo "ERROR: OUT_DIR=${OUT_DIR} is \$HOME or a directory above it"
+  exit 1
+fi
+if [[ "${BUILD_ONLY_SOLO}" == "1" ]] && is_or_above "${OUT_DIR}" firmwares; then
+  echo "ERROR: BUILD_ONLY_SOLO=1 would replace firmwares/ with a 12-image subset; use another OUT_DIR"
+  exit 1
+fi
+for d in "${OUT_DIR}" "${STAGE_DIR}" "${OUT_DIR}.old"; do
+  [[ -e "${d}" || -L "${d}" ]] || continue
+  is_build_output "${d}" && continue
+  if [[ "${FORCE}" != "1" ]]; then
+    if [[ -d "${d}" ]]; then
+      echo "ERROR: ${d} is not empty and has no manifest.txt from this script, so it is not an"
+      echo "       earlier build output; the run would delete it. Use another OUT_DIR, or FORCE=1."
+    else
+      echo "ERROR: ${d} exists and is not a directory; the run would delete it."
+      echo "       Use another OUT_DIR, or FORCE=1."
+    fi
+    exit 1
+  fi
+done
+
 trap 'rm -rf "${STAGE_DIR}" "${MANIFEST_TMP}"' EXIT
 
 TXT_MODE="which_to_choose_mode.txt"
@@ -147,7 +203,7 @@ done
 
 # Written outside the tree first: redirecting straight into ${OUT_DIR}/manifest.txt truncated it
 # before the walk, so the manifest listed itself as an empty file.
-python3 - "${STAGE_DIR}" > "${MANIFEST_TMP}" <<'PY'
+python3 - "${STAGE_DIR}" "${MANIFEST_HEADER}" > "${MANIFEST_TMP}" <<'PY'
 import sys, os, zlib, hashlib
 
 root = sys.argv[1]
@@ -176,7 +232,7 @@ for dirpath, _, filenames in os.walk(root):
 entries.sort(key=lambda x: x[0])
 
 out = sys.stdout
-out.write("# format: SHA256_HEX CRC32_HEX SIZE_BYTES REL_PATH\n")
+out.write(sys.argv[2] + "\n")
 for rel, sha256_hex, crc32_hex, size in entries:
     out.write(f"{sha256_hex} {crc32_hex} {size} {rel}\n")
 PY
