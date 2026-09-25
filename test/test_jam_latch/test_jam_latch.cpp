@@ -10,11 +10,16 @@
 // before_on_use and its idle control are braked (jam_latch_brakes).
 // The 20 s full-force push limit (jam_push_limit_pass) must count full-force push time at any
 // buffer level, restart below full force, brake the channel at exactly 20 s and saturate there.
+// Every pass also runs the firmware's auto-unload (src/auto_unload.h) as motor_motion_run does,
+// held off by Motion_control_run while latched and on the release pass: lifting the buffer of a
+// latched channel, to release it or not, and letting go afterwards must never start it, and a new
+// lift after the release must.
 
 #include <stdint.h>
 #include <string.h>
 #include <unity.h>
 
+#include "auto_unload.h"
 #include "jam_latch.h"
 
 // A1 (standard and soft_load): MC_ON_USE_TARGET_PCT - MC_ON_USE_BAND_LO_DELTA.
@@ -41,6 +46,8 @@ static bool active;        // A.now_filament_num == ch
 static int trips;
 static bool pushing;       // run() let the channel's control push on the last pass (motor_pushes())
 static int jammed_pushes;  // passes on which it did with the jam latch set
+static auto_unload_t g_auto_unload[1]; // the channel's auto-unload (motor_motion_run)
+static int unload_passes;  // passes on which the auto-unload drove the channel
 
 void setUp(void)
 {
@@ -54,6 +61,8 @@ void setUp(void)
     trips = 0;
     pushing = false;
     jammed_pushes = 0;
+    memset(g_auto_unload, 0, sizeof(g_auto_unload));
+    unload_passes = 0;
 }
 
 void tearDown(void) {}
@@ -82,11 +91,38 @@ static bool motor_pushes(jam_ctrl_t c, float pct)
     return may_push && !jam_latch_brakes(c, brake, jam);
 }
 
+// Motion_control_run's jam loop, after jam_latch_pass() for channel ch.
+static void jam_loop_hold(const uint8_t *g_on_use_jam_latch, jam_event_t ev)
+{
+    const uint8_t ch = 0u;
+// ---- Motion_control.cpp at this commit: Motion_control_run's auto-unload hold, verbatim ----
+        if (g_on_use_jam_latch[ch] || (ev == JAM_EVENT_RELEASE))
+            auto_unload_hold(&g_auto_unload[ch]);
+// ---- end of the Motion_control.cpp copy ----
+}
+
+// ---- adapted from Motion_control.cpp: motor_motion_run's auto-unload call ----
+// For a channel whose AS5600 reads are good, with the link up: auto_unload_pass() with the motor
+// state motor_motion_switch has just set (idle_ctrl: the idle control), and the key 'both' while
+// filament is at the switch. A pass it drives does not run run().
+static au_drive_t au_pass(bool idle_ctrl, float pct)
+{
+    au_in_t au;
+    au.online    = true;
+    au.inserted  = true;
+    au.idle_ctrl = idle_ctrl;
+    au.pct       = pct;
+    au.ks        = filament ? 1u : 0u;
+    au.now_ms    = now;
+    return auto_unload_pass(&g_auto_unload[0], &au);
+}
+
 // One main-loop pass for the channel: Motion_control_run clears both latches when no filament is
-// at the switch and the jam latch is set, and runs jam_latch_pass(), then motor_motion_switch puts
-// the BMCU into its on_use control when the printer commands on_use for the active channel and
-// filament is at the switch, then run(). So the BMCU follows the printer one pass later, as
-// jam_latch_pass() sees it, and run() sees the latch as this pass left it.
+// at the switch and the jam latch is set, and runs jam_latch_pass() and the auto-unload hold, then
+// motor_motion_switch puts the BMCU into its on_use control when the printer commands on_use for
+// the active channel and filament is at the switch, then the auto-unload's pass and, unless that
+// drives the channel, run(). So the BMCU follows the printer one pass later, as jam_latch_pass()
+// sees it, and the auto-unload and run() see the latch as this pass left it.
 static jam_event_t pass(_filament_motion m, float pct)
 {
     if (!filament && jam)
@@ -105,9 +141,13 @@ static jam_event_t pass(_filament_motion m, float pct)
 
     const jam_event_t ev = jam_latch_pass(&st, &brake, &jam, &in, BAND_LO_PCT);
     if (ev == JAM_EVENT_TRIP) trips++;
+    jam_loop_hold(&jam, ev);
 
     bmcu_on_use = active && filament && (m == ON_USE);
-    pushing = motor_pushes(bmcu_ctrl(m), pct);
+    const jam_ctrl_t ctrl = bmcu_ctrl(m);
+    const au_drive_t drive = au_pass(ctrl == JAM_CTRL_IDLE, pct);
+    if (drive == AU_DRIVE_UNLOAD) unload_passes++;
+    pushing = (drive == AU_DRIVE_NONE) && motor_pushes(ctrl, pct);
     if (jam && pushing) jammed_pushes++;
     now++;
     return ev;
@@ -120,6 +160,20 @@ static int32_t hold(_filament_motion m, float pct, uint32_t ms)
     for (uint32_t i = 0; i < ms; i++)
         if (pass(m, pct) != JAM_EVENT_NONE) return (int32_t)i;
     return -1;
+}
+
+// The buffer moved from `from` to `to` in 1% steps, one pass each, at printer command m: a lift, or
+// the spring taking it back when let go (through the auto-unload's 45-55% band on the way to 50%).
+// Returns the step (0 = first) on which the latch tripped or was released, or -1.
+static int32_t ramp(_filament_motion m, float from, float to)
+{
+    const float step = (to > from) ? 1.0f : -1.0f;
+    int32_t i = 0;
+    int32_t at = -1;
+    for (float p = from; (step > 0.0f) ? (p < to) : (p > to); p += step, i++)
+        if ((pass(m, p) != JAM_EVENT_NONE) && (at < 0)) at = i;
+    if ((pass(m, to) != JAM_EVENT_NONE) && (at < 0)) at = i;
+    return at;
 }
 
 static void trip_now(void)
@@ -797,6 +851,102 @@ static void test_fixed_tangle_resumes_normally_after_a_pause(void)
     TEST_ASSERT_EQUAL_UINT8(0u, jam);
 }
 
+// ---- Lifting the buffer of a latched channel: release, not auto-unload ----
+
+static void test_releasing_the_latch_by_lifting_the_buffer_does_not_unload_the_channel(void)
+{
+    // A tangle trips while printing; the printer then leaves the channel active in idle, where
+    // motor_motion_switch stops a latched channel. A person lifts the buffer to 90% and holds it:
+    // 1 s at 85% or above releases the latch, and from that pass on the channel runs its idle
+    // control again with the buffer still held up (1.5 s more here). Then they let go and the spring
+    // takes the buffer back through 55-45%. That used to start the 850 PWM auto-unload.
+    trip_now();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 30.0f, 2000u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 30.0f, 90.0f));
+    TEST_ASSERT_TRUE(hold(IDLE, 90.0f, 2000u) >= 0);
+    TEST_ASSERT_EQUAL_UINT8(0u, jam);
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 1500u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 90.0f, 50.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 50.0f, 5000u));
+    TEST_ASSERT_EQUAL_INT(0, unload_passes);
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
+
+    // A new lift after that is the gesture again: it unloads the channel.
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 50.0f, 90.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 300u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 90.0f, 50.0f));
+    TEST_ASSERT_TRUE(unload_passes > 0);
+}
+
+static void test_no_lift_of_a_latched_channel_that_is_not_active_unloads_it(void)
+{
+    // Latched, then another channel (or none) is active: the channel runs its idle control, braked,
+    // where any lift of its buffer used to arm the auto-unload.
+    TEST_ASSERT_EQUAL_INT32(500, hold(ON_USE, 20.0f, 1000u));
+    active = false;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 20.0f, 1000u));
+
+    // The gesture itself (under 1 s at 90%): still latched, nothing unloads.
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 20.0f, 90.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 300u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 90.0f, 50.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 50.0f, 2000u));
+    // Held at 82%, below the release level, for 3 s, then let go: the same.
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 50.0f, 82.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 82.0f, 3000u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 82.0f, 50.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 50.0f, 2000u));
+    TEST_ASSERT_EQUAL_UINT8(1u, jam);
+    TEST_ASSERT_EQUAL_INT(0, unload_passes);
+
+    // Held at 90% until released, then let go: released, nothing unloads.
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 50.0f, 90.0f));
+    TEST_ASSERT_TRUE(hold(IDLE, 90.0f, 2000u) >= 0);
+    TEST_ASSERT_EQUAL_UINT8(0u, jam);
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 500u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 90.0f, 50.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 50.0f, 3000u));
+    TEST_ASSERT_EQUAL_INT(0, unload_passes);
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
+
+    // Then the gesture unloads it.
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 50.0f, 90.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 300u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 90.0f, 50.0f));
+    TEST_ASSERT_TRUE(unload_passes > 0);
+}
+
+static void test_the_pass_that_releases_the_latch_is_held_off_too(void)
+{
+    // A slow lift while paused: the buffer is at the on_use band's low edge or above for 1 s,
+    // which releases the latch, and reaches 80% only on that very pass. The printer then puts the
+    // channel into idle with the buffer still held up, and it is let go.
+    trip_now();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(STOP_ON_USE, 30.0f, 1000u));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(STOP_ON_USE, 60.0f, JAM_RELEASE_MS));
+    TEST_ASSERT_EQUAL_INT(JAM_EVENT_RELEASE, pass(STOP_ON_USE, 90.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 500u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 90.0f, 50.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 50.0f, 3000u));
+    TEST_ASSERT_EQUAL_INT(0, unload_passes);
+}
+
+static void test_the_auto_unload_still_unloads_a_channel_that_was_never_latched(void)
+{
+    // In idle, active or not: the gesture unloads as before, and the hold-off never starts.
+    for (int k = 0; k < 2; k++)
+    {
+        setUp();
+        active = (k == 0);
+        TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 50.0f, 1000u));
+        TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 50.0f, 90.0f));
+        TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 300u));
+        TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 90.0f, 50.0f));
+        TEST_ASSERT_TRUE(unload_passes > 0);
+        TEST_ASSERT_EQUAL_UINT8(0u, g_auto_unload[0].wait_low);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -839,5 +989,9 @@ int main(void)
     RUN_TEST(test_printer_unload_and_reload_do_not_release_an_uncleared_tangle);
     RUN_TEST(test_fixed_tangle_resumes_normally_without_a_printer_command);
     RUN_TEST(test_fixed_tangle_resumes_normally_after_a_pause);
+    RUN_TEST(test_releasing_the_latch_by_lifting_the_buffer_does_not_unload_the_channel);
+    RUN_TEST(test_no_lift_of_a_latched_channel_that_is_not_active_unloads_it);
+    RUN_TEST(test_the_pass_that_releases_the_latch_is_held_off_too);
+    RUN_TEST(test_the_auto_unload_still_unloads_a_channel_that_was_never_latched);
     return UNITY_END();
 }
