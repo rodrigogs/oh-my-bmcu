@@ -69,7 +69,7 @@ static inline float cal_apply_polarity(float v, int8_t pol)
 }
 
 static const float    CAL_PRESS_DELTA_V = MC_PULL_CAL_PRESS_DELTA_V;
-static const float    CAL_CENTER_EPS_V  = 0.02f;
+static const float    CAL_CENTER_EPS_V  = MC_PULL_CAL_CENTER_EPS_V;
 static const uint32_t CAL_STABLE_MS     = 200;
 static const uint32_t CAL_TIMEOUT_MS    = 30000;
 

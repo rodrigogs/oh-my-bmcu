@@ -64,6 +64,7 @@
 #include <stdint.h>
 
 #define MC_PULL_CAL_PRESS_DELTA_V  0.10f  // smallest move a calibration step accepts
+#define MC_PULL_CAL_CENTER_EPS_V   0.02f  // a step is back at rest within this of centre: the rest scatter
 #define MC_PULL_CAL_MIN_LOW_SPAN_V 0.15f  // narrowest captured low side that is kept
 #define MC_PULL_CAL_FALLBACK_V_MIN 1.00f  // low side of a buffer whose first step failed or was shallow
 #define MC_PULL_CAL_FALLBACK_V_MAX 1.75f  // high side of a buffer whose second step timed out

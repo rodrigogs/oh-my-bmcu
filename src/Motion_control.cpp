@@ -8,6 +8,7 @@
 #include "app_api.h"
 #include "hal/time_hw.h"
 #include "motion_limits.h"
+#include "mc_pull_pct.h"
 #include "jam_latch.h"
 #include "dm_rearm.h"
 #include "dm_stage2.h"
@@ -381,11 +382,7 @@ static constexpr int MC_PULL_DEADBAND_PCT_HIGH = 70;
 #endif
 // ====================================================
 
-static constexpr uint32_t CAL_RESET_HOLD_MS     = 5000;
-static constexpr int      CAL_RESET_PCT_THRESH  = 15;
-static constexpr float    CAL_RESET_V_DELTA     = 0.10f;
-static constexpr float    CAL_RESET_NEAR_MIN    = 0.03f;
-
+// Recalibration gesture (mc_pull_pct.h): the channel held, and since when.
 static int      g_hold_ch = -1;
 static uint32_t g_hold_t0_ticks = 0;
 
@@ -438,30 +435,7 @@ static void calibration_reset_and_reboot()
 
 static float pull_v_to_percent_f(uint8_t ch, float v)
 {
-    constexpr float c = 1.65f;
-
-    float vmin = MC_PULL_V_MIN[ch];
-    float vmax = MC_PULL_V_MAX[ch];
-
-    if (vmin > 1.60f) vmin = 1.60f;
-    if (vmax < 1.70f) vmax = 1.70f;
-    if (vmax <= (vmin + 0.10f)) { vmin = 1.55f; vmax = 1.75f; }
-
-    float pos01;
-    if (v <= c)
-    {
-        float den = c - vmin;
-        if (den < 0.05f) den = 0.05f;
-        pos01 = 0.5f * (v - vmin) / den;
-    }
-    else
-    {
-        float den = vmax - c;
-        if (den < 0.05f) den = 0.05f;
-        pos01 = 0.5f + 0.5f * (v - c) / den;
-    }
-
-    return clampf(pos01, 0.0f, 1.0f) * 100.0f;
+    return mc_pull_v_to_pct(MC_PULL_V_MIN[ch], MC_PULL_V_MAX[ch], v);
 }
 
 static inline float pull_v_apply_polarity(uint8_t ch, float v)
@@ -2789,10 +2763,7 @@ void Motion_control_run(int error)
             const int   pct = (int)MC_PULL_pct[ch];
             const float v   = MC_PULL_stu_raw[ch];
 
-            const bool hard_blue =
-                (pct <= CAL_RESET_PCT_THRESH) ||
-                (v <= (1.65f - CAL_RESET_V_DELTA)) ||
-                (v <= (MC_PULL_V_MIN[ch] + CAL_RESET_NEAR_MIN));
+            const bool hard_blue = MC_PULL_CAL_RESET_PRESSED(pct, v, MC_PULL_V_MIN[ch]);
 
             if (hard_blue) { pressed = (int)ch; break; }
         }
@@ -2809,7 +2780,7 @@ void Motion_control_run(int error)
             }
             else
             {
-                if ((uint32_t)(now_ticks - g_hold_t0_ticks) >= (uint32_t)CAL_RESET_HOLD_MS * tpm)
+                if ((uint32_t)(now_ticks - g_hold_t0_ticks) >= MC_PULL_CAL_RESET_HOLD_MS * tpm)
                     calibration_reset_and_reboot();
             }
         }
