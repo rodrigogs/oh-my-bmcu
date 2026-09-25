@@ -13,9 +13,10 @@
 // buffer level, restart below full force, brake the channel at exactly 20 s and saturate there,
 // and go on across the anti-stall's rests, on which run() does not call it.
 // Every pass also runs the firmware's auto-unload (src/auto_unload.h) as motor_motion_run does,
-// held off by Motion_control_run while latched and on the release pass: lifting the buffer of a
-// latched channel, to release it or not, and letting go afterwards must never start it, and a new
-// lift after the release must.
+// held off by Motion_control_run while latched and on the release pass, until the buffer is back in
+// its neutral band: lifting the buffer of a latched channel, to release it or not, and letting go
+// afterwards, also after a sag and a new lift while it is still held, must never start it, and a
+// new lift after the release must.
 
 #include <stdint.h>
 #include <string.h>
@@ -943,6 +944,39 @@ static void test_releasing_the_latch_by_lifting_the_buffer_does_not_unload_the_c
     TEST_ASSERT_TRUE(unload_passes > 0);
 }
 
+static void test_a_sag_after_the_release_by_lifting_does_not_unload_the_channel(void)
+{
+    // As above, but while the buffer is still held up after the release (the idle control retracts
+    // against the hand above 70%), the hand sags to 75% for one pass, lifts it to 90% again and then
+    // lets go. The sag used to end the hold-off (below 80%), so the new lift armed the auto-unload
+    // and letting go started it. The hold-off now lasts until the buffer is back in the neutral band.
+    // The same for a latched channel that is not the active one (its idle control braked until the
+    // release).
+    for (int k = 0; k < 2; k++)
+    {
+        setUp();
+        trip_now();
+        active = (k == 0);
+        TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 30.0f, 2000u));
+        TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 30.0f, 90.0f));
+        TEST_ASSERT_TRUE(hold(IDLE, 90.0f, 2000u) >= 0);
+        TEST_ASSERT_EQUAL_UINT8(0u, jam);
+        TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 500u));
+        TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 75.0f, 1u));
+        TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 300u));
+        TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 90.0f, 50.0f));
+        TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 50.0f, 5000u));
+        TEST_ASSERT_EQUAL_INT(0, unload_passes);
+        TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
+
+        // Back at rest: the gesture unloads it.
+        TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 50.0f, 90.0f));
+        TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 300u));
+        TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 90.0f, 50.0f));
+        TEST_ASSERT_TRUE(unload_passes > 0);
+    }
+}
+
 static void test_no_lift_of_a_latched_channel_that_is_not_active_unloads_it(void)
 {
     // Latched, then another channel (or none) is active: the channel runs its idle control, braked,
@@ -1057,6 +1091,7 @@ int main(void)
     RUN_TEST(test_fixed_tangle_resumes_normally_without_a_printer_command);
     RUN_TEST(test_fixed_tangle_resumes_normally_after_a_pause);
     RUN_TEST(test_releasing_the_latch_by_lifting_the_buffer_does_not_unload_the_channel);
+    RUN_TEST(test_a_sag_after_the_release_by_lifting_does_not_unload_the_channel);
     RUN_TEST(test_no_lift_of_a_latched_channel_that_is_not_active_unloads_it);
     RUN_TEST(test_the_pass_that_releases_the_latch_is_held_off_too);
     RUN_TEST(test_the_auto_unload_still_unloads_a_channel_that_was_never_latched);

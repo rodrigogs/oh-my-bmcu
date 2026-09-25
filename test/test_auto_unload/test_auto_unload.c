@@ -267,6 +267,110 @@ static void test_the_lift_that_releases_a_jam_latch_does_not_unload(void)
     lift_and_release();
 }
 
+// The release above, up to and with the pass that releases the latch, the buffer held at 90%.
+static void release_by_lifting(void)
+{
+    in.idle_ctrl = false;
+    latched = true;
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(50.0f, 1000u));
+    ramp(50.0f, 90.0f);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 1000u));
+    in.idle_ctrl = true;
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 1u));
+    latched = false;
+}
+
+static void test_a_sag_while_the_buffer_is_still_held_does_not_unload(void)
+{
+    // Released by lifting, the buffer still held up while the idle control retracts against the
+    // hand (at up to 800 PWM above 70%). The hand sags, for one pass or longer and anywhere down to
+    // the top of the neutral band (55%), lifts the buffer to 90% again, then lets go: the spring
+    // takes it back through 55-45%. When the hold-off ended on the first pass below 80%, the sag
+    // ended it, the new lift armed the auto-unload and letting go started the 850 PWM unload.
+    static const float sag_pct[] = {79.9f, 75.0f, 70.0f, 60.0f, AUTO_UNLOAD_NEUTRAL_HI_PCT};
+    static const uint32_t sag_ms[] = {1u, 50u, 2000u};
+
+    for (uint32_t i = 0u; i < sizeof(sag_pct) / sizeof(sag_pct[0]); i++)
+    {
+        for (uint32_t j = 0u; j < sizeof(sag_ms) / sizeof(sag_ms[0]); j++)
+        {
+            setUp();
+            release_by_lifting();
+            TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 500u));
+            TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(sag_pct[i], sag_ms[j]));
+            TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 300u));
+            TEST_ASSERT_EQUAL_UINT8(1u, st.wait_low);
+            TEST_ASSERT_EQUAL_UINT8(0u, st.arm);
+            ramp(90.0f, 50.0f);
+            TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(50.0f, 5000u));
+            TEST_ASSERT_EQUAL_UINT32(0u, unload_passes);
+
+            // Let go, the buffer came back through the band: a new lift unloads as before.
+            TEST_ASSERT_EQUAL_UINT8(0u, st.wait_low);
+            lift_and_release();
+        }
+    }
+
+    // A drop into the band is letting go, not a sag: from there a lift and a release within 1 s is
+    // the gesture, and unloads.
+    setUp();
+    release_by_lifting();
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 500u));
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(54.9f, 1u));
+    TEST_ASSERT_EQUAL_UINT8(0u, st.wait_low);
+    TEST_ASSERT_EQUAL_UINT32(0u, unload_passes);
+    lift_and_release();
+}
+
+static void test_a_buffer_resting_high_after_the_release_needs_one_pass_in_the_band(void)
+{
+    // Released by lifting, then let go: slider friction stops the buffer at 58%, above the neutral
+    // band (the idle control leaves it anywhere in 30-70%). The hold-off goes on while it rests
+    // there, however long.
+    release_by_lifting();
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 500u));
+    ramp(90.0f, 58.0f);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(58.0f, 60000u));
+    TEST_ASSERT_EQUAL_UINT8(1u, st.wait_low);
+
+    // A lift let back to 58% starts nothing, as it would not without the hold-off: the gesture must
+    // come back into 45-55%.
+    ramp(58.0f, 90.0f);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 300u));
+    ramp(90.0f, 58.0f);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(58.0f, 2000u));
+    TEST_ASSERT_EQUAL_UINT8(1u, st.wait_low);
+
+    // The gesture from there, the buffer lifted and then pressed down into the band: the first one
+    // only ends the hold-off (its lift did not arm) and the buffer goes back to 58%; the next one
+    // unloads.
+    ramp(58.0f, 90.0f);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 300u));
+    ramp(90.0f, 50.0f);
+    TEST_ASSERT_EQUAL_UINT8(0u, st.wait_low);
+    ramp(50.0f, 58.0f);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(58.0f, 2000u));
+    TEST_ASSERT_EQUAL_UINT32(0u, unload_passes);
+    ramp(58.0f, 90.0f);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 300u));
+    ramp(90.0f, 50.0f);
+    TEST_ASSERT_EQUAL_UINT8(1u, st.active);
+
+    // Or the buffer pressed into the band once, for a single pass, at any time: then the first
+    // gesture unloads.
+    setUp();
+    release_by_lifting();
+    ramp(90.0f, 58.0f);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(58.0f, 10000u));
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(54.9f, 1u));
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(58.0f, 2000u));
+    TEST_ASSERT_EQUAL_UINT8(0u, st.wait_low);
+    ramp(58.0f, 90.0f);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 300u));
+    ramp(90.0f, 50.0f);
+    TEST_ASSERT_EQUAL_UINT8(1u, st.active);
+}
+
 static void test_no_lift_of_a_latched_channel_starts_the_auto_unload(void)
 {
     // A latched channel that is not the printer's active one runs the idle control (braked), so any
@@ -550,10 +654,12 @@ static void test_the_hold_off_only_ever_delays_arming_until_a_pass_below_55(void
     // random (held on every pass while set). The auto-unload arms (arm 0 -> 1) exactly on the passes
     // where the gesture arms it (buffer at 80% or above, in the idle control, online, wired, neither
     // armed nor running) that are not held and follow, since the last held pass, one with the buffer
-    // below 55%; on the others it stays unarmed.
+    // below 55%; on the others it stays unarmed. Among those are passes after a sag to 55-80% since
+    // the last held pass: with the hold-off ending below 80%, as in c513a32, they armed.
     float pct = 50.0f;
-    bool low_since_hold = true;
-    uint32_t arms = 0u, held_off = 0u, starts = 0u;
+    bool low_since_hold = true;   // a pass below 55% since the last held pass
+    bool sag_since_hold = true;   // a pass below 80% since then
+    uint32_t arms = 0u, held_off = 0u, held_off_after_a_sag = 0u, starts = 0u;
 
     for (uint32_t i = 0; i < 2000000u; i++)
     {
@@ -571,8 +677,9 @@ static void test_the_hold_off_only_ever_delays_arming_until_a_pass_below_55(void
         if (rnd(latched ? 2000u : 20000u) == 0u) latched = !latched;             // and unlatched
         if (rnd(20u) == 0u) now += rnd(300u);
 
-        if (latched) low_since_hold = false;
+        if (latched) low_since_hold = sag_since_hold = false;
         if (pct < AUTO_UNLOAD_NEUTRAL_HI_PCT) low_since_hold = true;
+        if (pct < AUTO_UNLOAD_START_PCT) sag_since_hold = true;
 
         const uint8_t arm0 = st.arm, active0 = st.active;
         const bool gesture_arms = (pct >= AUTO_UNLOAD_START_PCT) && in.idle_ctrl && in.online && in.inserted &&
@@ -589,6 +696,7 @@ static void test_the_hold_off_only_ever_delays_arming_until_a_pass_below_55(void
         {
             TEST_ASSERT_EQUAL_UINT8(0u, st.arm);
             held_off++;
+            if (sag_since_hold) held_off_after_a_sag++;
         }
         else if (!arm0)
         {
@@ -596,10 +704,11 @@ static void test_the_hold_off_only_ever_delays_arming_until_a_pass_below_55(void
         }
         if (!active0 && st.active) starts++;
     }
-    // The walk exercised both cases, and the gesture still unloads (3071 arms, 56378 held-off
-    // passes and 1002 starts with this seed).
+    // The walk exercised both cases, also the sag, and the gesture still unloads (3071 arms, 56378
+    // held-off passes of which 2258 after a sag, and 1002 starts with this seed).
     TEST_ASSERT_TRUE(arms > 1500u);
     TEST_ASSERT_TRUE(held_off > 10000u);
+    TEST_ASSERT_TRUE(held_off_after_a_sag > 1000u);
     TEST_ASSERT_TRUE(starts > 500u);
 }
 
@@ -617,6 +726,8 @@ int main(void)
     RUN_TEST(test_short_link_loss_during_an_auto_unload);
     RUN_TEST(test_link_lost_stops_a_manual_empty_pull);
     RUN_TEST(test_the_lift_that_releases_a_jam_latch_does_not_unload);
+    RUN_TEST(test_a_sag_while_the_buffer_is_still_held_does_not_unload);
+    RUN_TEST(test_a_buffer_resting_high_after_the_release_needs_one_pass_in_the_band);
     RUN_TEST(test_no_lift_of_a_latched_channel_starts_the_auto_unload);
     RUN_TEST(test_the_hold_off_ends_on_the_first_pass_below_55);
     RUN_TEST(test_the_hold_off_outlasts_passes_outside_the_idle_control);
