@@ -4,12 +4,14 @@
 // 20 s high-PWM latch has already braked the channel; the printer's resume must release it only
 // once the buffer has come back to 40% since the trip, so a printer that retries by itself keeps
 // getting 0xF06F; the buffer releases it at the on_use band's low edge while the printer is in
-// on_use/stop_on_use and only at 85% in any other state; a tangle that is still there after a
-// release must latch again. While latched, the BMCU must not push the channel's filament in any
+// on_use/stop_on_use (also a buffer that only rests a few mV high: that edge is inside the rest
+// scatter) and only at 85% in any other state; a tangle that is still there after a release must
+// latch again. While latched, the BMCU must not push the channel's filament in any
 // printer state, also when another channel (or none) is active: its on_use control, hold_load in
 // before_on_use and its idle control are braked (jam_latch_brakes).
 // The 20 s full-force push limit (jam_push_limit_pass) must count full-force push time at any
-// buffer level, restart below full force, brake the channel at exactly 20 s and saturate there.
+// buffer level, restart below full force, brake the channel at exactly 20 s and saturate there,
+// and go on across the anti-stall's rests, on which run() does not call it.
 // Every pass also runs the firmware's auto-unload (src/auto_unload.h) as motor_motion_run does,
 // held off by Motion_control_run while latched and on the release pass: lifting the buffer of a
 // latched channel, to release it or not, and letting go afterwards must never start it, and a new
@@ -461,11 +463,32 @@ static void test_buffer_back_at_band_for_1s_releases_in_on_use_and_stop_on_use(v
 
 static void test_buffer_at_spring_rest_does_not_release(void)
 {
-    // A slack filament lets the buffer return to its rest position: that alone is no release.
+    // A slack filament lets the buffer return to its rest position: a buffer that reads the
+    // calibrated neutral there, or anything below the band's low edge, is no release. One that
+    // rests a few mV high is (next test).
     trip_now();
     TEST_ASSERT_EQUAL_INT32(-1, hold(ON_USE, REST_PCT, 60000u));
     TEST_ASSERT_EQUAL_INT32(-1, hold(ON_USE, BAND_LO_PCT - 0.1f, 60000u));
     TEST_ASSERT_EQUAL_UINT8(1u, jam);
+}
+
+static void test_a_buffer_resting_slightly_high_releases_and_the_resume_latches_again(void)
+{
+    // BAND_LO_PCT is 0.036 of the high side above the calibrated centre, +3.6 mV with the 1.75 V
+    // fallback high side: inside the 20 mV rest scatter (jam_latch.h, mc_pull_cal_range.h). A
+    // buffer that comes to rest reading that while paused releases the latch 1 s later with
+    // nothing moved. The tangle is still there: the resume pushes again, and the channel latches
+    // again 500 ms after the buffer is below 40%.
+    trip_now();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(STOP_ON_USE, 30.0f, 2000u));
+    TEST_ASSERT_EQUAL_INT32(1000, hold(STOP_ON_USE, BAND_LO_PCT, 2000u));
+    TEST_ASSERT_EQUAL_UINT8(0u, jam);
+    TEST_ASSERT_EQUAL_INT32(-1, hold(ON_USE, BAND_LO_PCT, 500u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(ON_USE, 51.0f, 40.0f));
+    TEST_ASSERT_TRUE(pushing);
+    TEST_ASSERT_EQUAL_INT32((int32_t)JAM_TRIP_MS, hold(ON_USE, 30.0f, 1000u));
+    TEST_ASSERT_EQUAL_UINT8(1u, jam);
+    TEST_ASSERT_EQUAL_INT(2, trips);
 }
 
 static void test_buffer_bounce_restarts_the_release_timer(void)
@@ -780,6 +803,36 @@ static void test_push_limit_saturates_at_20s(void)
     TEST_ASSERT_EQUAL_UINT32(5000u, hi);
 }
 
+static void test_push_limit_accumulates_across_the_anti_stall_rests(void)
+{
+    // A gear that does not turn: the on_use control pushes at full force (900 PWM, the anti-stall's
+    // 850 PWM kick after 0.15 s), and once 0.8 s have added up the anti-stall rests for 0.5 s. run()
+    // returns before jam_push_limit_pass() on the pass that starts the rest and on the rest passes,
+    // so here they are no calls at all (1 + 499 of every 1300 ms). The count goes on across them:
+    // 20 s of push, 25 bursts, braked on the last pass of the 25th, after about 32 s.
+    uint32_t hi = 0u;
+    int32_t braked_at = -1;
+    for (int32_t t = 0; (t < 120000) && (braked_at < 0); t++)
+    {
+        const int32_t phase = t % 1300;
+        if (phase >= 800) continue; // the rest: run() returns first
+        const int pwm = (phase < 150) ? -900 : -850;
+        if (jam_push_limit_pass(&hi, pwm, DIR_RETRACT_POS, 0.001f)) braked_at = t + 1;
+    }
+    TEST_ASSERT_EQUAL_INT32(24 * 1300 + 800, braked_at); // 32.000 s
+
+    // Were the rest passes passes below full force (a call with 0 PWM), every rest would restart
+    // the count and the stalled motor would go on pushing in bursts: nothing brakes in 10 minutes.
+    hi = 0u;
+    for (int32_t t = 0; t < 600000; t++)
+    {
+        const int32_t phase = t % 1300;
+        const int pwm = (phase >= 800) ? 0 : ((phase < 150) ? -900 : -850);
+        TEST_ASSERT_FALSE(jam_push_limit_pass(&hi, pwm, DIR_RETRACT_POS, 0.001f));
+    }
+    TEST_ASSERT_TRUE(hi < 800000u);
+}
+
 static void test_push_limit_counts_at_any_buffer_level(void)
 {
     // A snag keeps the buffer around 40%: 450 ms below it, one reading above it, over and over, while
@@ -971,6 +1024,7 @@ int main(void)
     RUN_TEST(test_a_new_trip_starts_with_fresh_release_conditions);
     RUN_TEST(test_buffer_back_at_band_for_1s_releases_in_on_use_and_stop_on_use);
     RUN_TEST(test_buffer_at_spring_rest_does_not_release);
+    RUN_TEST(test_a_buffer_resting_slightly_high_releases_and_the_resume_latches_again);
     RUN_TEST(test_buffer_bounce_restarts_the_release_timer);
     RUN_TEST(test_away_from_on_use_the_buffer_must_reach_85);
     RUN_TEST(test_release_level_follows_the_printer_state);
@@ -985,6 +1039,7 @@ int main(void)
     RUN_TEST(test_push_limit_brakes_at_20s);
     RUN_TEST(test_push_limit_restarts_below_full_force);
     RUN_TEST(test_push_limit_saturates_at_20s);
+    RUN_TEST(test_push_limit_accumulates_across_the_anti_stall_rests);
     RUN_TEST(test_push_limit_counts_at_any_buffer_level);
     RUN_TEST(test_printer_unload_and_reload_do_not_release_an_uncleared_tangle);
     RUN_TEST(test_fixed_tangle_resumes_normally_without_a_printer_command);
