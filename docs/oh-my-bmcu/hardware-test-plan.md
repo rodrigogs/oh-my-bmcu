@@ -19,7 +19,8 @@ flashed as described in [README.md](README.md#flash)
 ## 1. First boot and calibration
 
 - [ ] After flashing, calibrate properly, one buffer at a time (upstream video:
-      https://www.youtube.com/watch?v=Hn_DNzSmhuc). All LEDs blink yellow three times, then:
+      https://www.youtube.com/watch?v=Hn_DNzSmhuc). All LEDs blink yellow slowly for about 1.5 s
+      while the idle buffers are sampled (leave them at rest), then three quick yellow blinks, then:
       - while the buffer's LED blinks blue, move it to its low end (the end the extruder pulls it to
         when the filament is tight, the same end you hold to recalibrate) and let it return to rest;
       - while it blinks red, lift it to the other end and let it return.
@@ -31,9 +32,13 @@ flashed as described in [README.md](README.md#flash)
 - [ ] Reconnect to the printer only while it is unplugged, then power on. SYS LED: red until the
       printer's first heartbeat, then white. The printer shows AMS A.
 - [ ] Direction check, printer on and the slot still empty: push the buffer to its low end for a
-      moment (well under 5 s, or it starts a recalibration): its LED turns blue. Lift it: the LED
-      turns red, and the motor may turn backwards while it is up (upstream's manual unload). If the
-      colours are the other way round, the calibration was done in the wrong order: recalibrate.
+      moment (well under 5 s, or it starts a recalibration) and let it go: the buffer's LED is blue
+      while it is down. On this AUTOLOAD image that push also starts upstream's buffer-tap autoload:
+      the channel's status LED turns yellow and the gear feeds forward for about 5 s, then briefly
+      red with a short retract. That is expected and says nothing about the direction. Wait about
+      6 s until the motor has stopped, then lift the buffer: its LED turns red, and the motor may
+      turn backwards while it is up (upstream's manual unload). If the buffer's colours are the
+      other way round, the calibration was done in the wrong order: recalibrate.
 
 ## 2. Bus, filament info and flash
 
@@ -47,11 +52,16 @@ flashed as described in [README.md](README.md#flash)
       `0xE339E339` on this chip, which every save relies on.
 - [ ] Leave the printer idle for more than 5 minutes (covers a SysTick wrap): the SYS LED stays
       white and the slot still answers.
-- [ ] Only if safe: interrupt the bus while the BMCU stays powered (for example BMCU on USB-C power
-      and the bus data unplugged). The SYS LED turns red within about 1 s, the motors stop, and it
-      stays red for more than 4 minutes. While it is red, lifting the buffer moves no motor, and an
-      auto-unload that was running when the link dropped stops and does not restart. When the bus
-      returns the LED turns white and the slot works.
+- [ ] With the BMCU on USB-C only (not connected to the printer), the SYS LED stays red, with no
+      printer heartbeat, for more than 4 minutes.
+- [ ] Optional, only with a switch or breakout that opens just the A/B data pair, wired while the
+      printer is unplugged: opening it with the printer on turns the SYS LED red within about 1 s
+      and stops the motors; while it is red, lifting the buffer moves no motor, and an auto-unload
+      that was running stops and does not restart. Closing it turns the LED white and the slot
+      works. Do not do this by pulling the bus cable from a powered printer (the upstream safety
+      notes forbid it), and a BMCU on USB-C power alone proves nothing here: without the printer's
+      24 V no motor turns anyway. Without such a breakout, the host tests (test_auto_unload) are
+      all there is for this.
 
 ## 3. Printing and unloading
 
@@ -77,7 +87,9 @@ flashed as described in [README.md](README.md#flash)
       reload, unless the buffer is lifted above 85 %. The motor stays silent meanwhile, also once
       the printer has deselected the slot and the buffer sits below 30 % (the red LED stays on).
 - [ ] Optional, hard to set up by hand: brake the spool just enough that the buffer stays above
-      40 % while the motor strains at full force for more than 20 s. The channel then brakes and its
+      40 % while the motor strains at full force for more than 20 s of push (the anti-stall's 0.5 s
+      rests pause the count, so with a gear that stalls or crawls, likely on the 0.2 mm nozzle, this
+      takes about 32 s). The channel then brakes and its
       LED turns red; the print only pauses if the buffer then stays below 40 % for 0.5 s.
 
 ## 5. Unload limits
@@ -128,8 +140,11 @@ Only if the A1 ever stops finding the AMS after a power cycle with a slot loaded
       takes minutes finish with no reset.
 - [ ] The 5 s recalibration hold: blue blink, NVM wipe, reboot into calibration, and no magenta
       flash or reset during it (this confirms a software reset stops the watchdog on this chip). If
-      it resets instead (magenta flashes, calibration restarting about every second), unplug the
-      BMCU, since a power-on reset does stop it, calibrate at the next boot and report it.
+      it resets instead (magenta flashes, calibration restarting about every second), switch the
+      printer off and unplug it, which power-cycles a BMCU fed by the printer (on USB-C, unplug the
+      USB-C instead); a power-on reset does stop the watchdog. Connect or disconnect the BMCU only
+      with the printer unplugged. Power on again, calibrate (it runs with no watchdog) and report
+      it.
 - [ ] Optional, with a test build that hangs in the main loop while a motor runs: the motor stops,
       the BMCU reboots after about 1 s (0.67 to 1.6 s) with three magenta flashes, and the printer
       finds the AMS again.
@@ -141,7 +156,8 @@ PA10 = RX, PA12 = DE, channel LED data pins PA11/PA8/PB1/PB0.
 - [ ] Largest gap between bytes inside printer frames (expected about 0) and smallest gap between
       frames. The RX resync threshold is 200 us, so no printer frame may contain a longer gap.
 - [ ] DE goes low right after the last stop bit of every reply, and flash activity only starts
-      after at least 1 ms of silence (toggle a spare GPIO around the flash calls to see it).
+      after at least 1 ms of silence, or after about 200 us once a due write has waited 1 s without
+      such a gap (toggle a spare GPIO around the flash calls to see it).
 - [ ] No WS2812 bursts on the loaded channel's data pin while nothing changes (the old image sent a
       ~59 us burst every 10 ms).
 - [ ] Decode the bus as 8E1: no parity or framing errors on real traffic.
