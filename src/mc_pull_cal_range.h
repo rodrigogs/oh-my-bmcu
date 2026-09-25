@@ -41,7 +41,12 @@
 //    MC_PULL_V_MAX default (2.00 V) would put it at +315 mV, which a short buffer may never reach:
 //    loading would keep pushing into the end stop. A too narrow high side only stops the push
 //    earlier (less force), never later, and its other triggers stay clear of the 20 mV rest
-//    scatter (idle deadband 70 %: +40 mV, auto-unload and empty-slot pull 80 %: +60 mV).
+//    scatter (idle deadband 70 %: +40 mV, auto-unload and empty-slot pull 80 %: +60 mV), except
+//    one: the jam latch's release while printing or paused (jam_latch.h), at the on_use band's low
+//    edge, 51.8 % on A1, is 0.036 of the high side above centre, +3.6 mV here. It is inside the
+//    scatter for any high side up to 555 mV (+12.6 mV even with the 2.00 V default), so a buffer
+//    resting a few mV high releases a latched channel after 1 s with nothing moved; a narrower
+//    high side only brings it closer to centre.
 //    Since that safe span is also the least a step captures, a captured high side is always kept:
 //    replacing a shallow push by the fallback would only narrow it further.
 //  - Polarity comes from the first step alone; a shallow one still moved at least 100 mV, 5x the

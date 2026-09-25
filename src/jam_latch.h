@@ -74,17 +74,27 @@ static inline bool jam_trip_update(jam_trip_t *t, float pct, uint32_t now_ms)
 //   is still there: the channel stays latched, i.e. it is latched again at once, without another
 //   JAM_TRIP_MS of push (the time below JAM_TRIP_PCT has already qualified; a reading at that level
 //   is also what restarts the trip timer). So a printer that retries by itself (stop_on_use, on_use,
-//   ...) gets 0xF06F on every retry instead of a brief release that hides the tangle. Fixing it
-//   (press the lever and feed filament, or lift the buffer) raises the buffer above that level,
-//   and the resume then releases it; or
+//   ...) gets 0xF06F on every retry instead of a brief release that hides the tangle (unless a
+//   buffer resting slightly high has released it meanwhile, below). Fixing it (press the lever and
+//   feed filament, or lift the buffer) raises the buffer above that level, and the resume then
+//   releases it; or
 // - the buffer is at or above a release level on every pass for JAM_RELEASE_MS. The BMCU does not
 //   feed a latched channel (braked in on_use, before_on_use, stop_on_use and the idle control,
 //   and stopped in idle and send_out while it is the printer's active one: jam_latch_brakes()
-//   below), so only a person or the printer moving filament can get it there:
+//   below), so only a person or the printer moving filament can get it there (and, for the first
+//   level, a buffer at rest that reads slightly high):
 //   - while the printer is in on_use or stop_on_use (printing or paused, filament held in the
 //     extruder): the on_use band's low edge (MC_ON_USE_TARGET_PCT - MC_ON_USE_BAND_LO_DELTA, where
-//     the on_use control stops pushing). The spring's rest position (50%, the calibrated neutral)
-//     is below it, so a slack filament alone does not release it;
+//     the on_use control stops pushing; 51.8% on A1). The spring's rest position is the calibrated
+//     neutral, 50%, but on A1 that edge is only 0.036 of the buffer's high side above it
+//     (pull_v_to_percent_f()): +3.6 mV with the 1.75 V fallback high side, +5.4 to 6.3 mV with a
+//     150-175 mV side, +12.6 mV with the 2.00 V default. That is inside the 20 mV the calibration
+//     accepts as the buffer back at rest (CAL_CENTER_EPS_V, mc_pull_cal_range.h), so a slack
+//     filament alone can release it: a buffer that rests slightly high meets the edge with nothing
+//     moved, and 1 s later the latch is released and the red LED goes out, though the tangle is
+//     still there. The next resume then pushes again, and the channel latches again JAM_TRIP_MS
+//     after the buffer is below JAM_TRIP_PCT, as after any release (below): the print pauses
+//     again. Only a buffer that rests below the edge keeps it latched;
 //   - in any other state (send_out, pull-back, idle, another channel active):
 //     JAM_RELEASE_AWAY_PCT.
 // send_out alone does not release it: a latched send_out still waits (upstream's >85% lift in
@@ -233,16 +243,22 @@ static inline jam_event_t jam_latch_pass(jam_latch_t *s, uint8_t *brake, uint8_t
 }
 
 // ---- 20 s full-force push limit ----
-// The on_use control of a channel that is not braked counts how long it has pushed at full force
-// without a break: more than JAM_PUSH_HI_PWM of 1000 PWM in the push direction (on A1 its push
-// reaches that below about 50.3% and is capped at 900; the anti-stall kick is 850). At
+// The on_use control of a channel that is not braked counts how long it has pushed at full force:
+// more than JAM_PUSH_HI_PWM of 1000 PWM in the push direction (on A1 its push reaches that below
+// about 50.3% and is capped at 900; the anti-stall kick is 850). At
 // JAM_PUSH_HI_MAX_US the channel is braked silently: g_on_use_low_latch set, g_on_use_jam_latch
 // clear, no 0xF06F. jam_latch_pass() still reports it if its buffer then stays below JAM_TRIP_PCT
 // for JAM_TRIP_MS. The time counts at any buffer level (90b44bc): it used to be counted only at or
 // above JAM_TRIP_PCT, because a pass below it latched at once, and with the timed trip a buffer
 // hovering around 40% with dips shorter than JAM_TRIP_MS would have let the motor push at full
-// force with no limit. A pass below full force restarts it, and so does a pass with no filament at
-// the switch (Motion_control.cpp clears it then, without calling jam_push_limit_pass()).
+// force with no limit. A pass of the on_use control below full force restarts it, and so does a
+// pass with no filament at the switch (Motion_control.cpp clears it then, without calling
+// jam_push_limit_pass()). The anti-stall's 500 ms rests do not: run() returns before
+// jam_push_limit_pass() on those passes (and on the pass that starts a rest), so they neither add
+// to the count nor restart it, and the count goes on across the anti-stall's duty cycle. A gear
+// that does not turn gets 0.8 s bursts at 900/850 PWM and 0.5 s rests, and is braked after 20 s
+// of push: 25 bursts, about 32 s of wall time. That accumulation is what bounds a stalled,
+// duty-cycled motor; restarting the count on a rest would let it push in bursts for ever.
 #define JAM_PUSH_HI_PWM    800
 #define JAM_PUSH_HI_MAX_US 20000000u
 
@@ -256,7 +272,8 @@ static inline bool jam_push_is_full(int pwm_cmd, float dir)
 }
 
 // One pass of the on_use control of a channel that is not braked (g_on_use_low_latch clear) with
-// filament at the switch. hi_us: g_on_use_hi_pwm_us[ch], saturating at JAM_PUSH_HI_MAX_US. time_s:
+// filament at the switch, other than an anti-stall rest pass (not called on those, see above).
+// hi_us: g_on_use_hi_pwm_us[ch], saturating at JAM_PUSH_HI_MAX_US. time_s:
 // the pass's time step (time_E, at most motor_motion_run's 0.2 s cap), rounded to whole
 // microseconds. Returns true when the channel must be braked.
 static inline bool jam_push_limit_pass(uint32_t *hi_us, int pwm_cmd, float dir, float time_s)

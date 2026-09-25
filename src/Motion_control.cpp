@@ -2020,7 +2020,8 @@ public:
             {
                 // 20 s full-force push limit (jam_latch.h): the time counts at any buffer level; pct is
                 // judged by the jam trip (jam_latch_pass), which also reports a channel this latch has
-                // braked if its buffer then stays below 40%.
+                // braked if its buffer then stays below 40%. The anti-stall's rest passes return above,
+                // before this, so the count goes on across them (a stalled gear brakes after ~32 s).
                 if (jam_push_limit_pass(&g_on_use_hi_pwm_us[CHx], pwm_out0, dir, time_E))
                 {
                     g_on_use_low_latch[CHx] = 1u;
