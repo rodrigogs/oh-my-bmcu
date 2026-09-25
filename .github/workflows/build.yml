@@ -118,6 +118,9 @@ jobs:
       - name: Verbatim firmware copies in tests still match src/
         run: python3 scripts/check_test_copies.py
 
+      - name: build_all_firmwares.sh OUT_DIR guards (stub pio)
+        run: bash scripts/test_build_all_firmwares.sh
+
       - run: pio test -e native
 
   reproduce-upstream:
