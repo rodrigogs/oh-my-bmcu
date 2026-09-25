@@ -104,7 +104,8 @@ static inline bool jam_trip_update(jam_trip_t *t, float pct, uint32_t now_ms)
 // or above the on_use band (51.8% to 60% on A1), and a release there would let the printer's
 // reload drive the motor into the tangle. 85% is above that 30-70% range, and it is the level at
 // which upstream already releases the latch at once in send_out, where a person lifts the buffer
-// to resume a load.
+// to resume a load. It is also the auto-unload's lift (80%), so neither this release nor letting go
+// of the buffer after it starts an auto-unload (auto_unload_hold(), auto_unload.h).
 #define JAM_RELEASE_AWAY_PCT 85.0f
 
 // What the printer commands for the latched channel.
@@ -305,7 +306,10 @@ typedef enum
 // The other states need nothing here: stop_on_use brakes anyway, motor_motion_switch stops a
 // latched active channel in idle and send_out, and before_pull_back and the pull back only retract.
 // The auto-unload and the manual empty pull (auto_unload.h) drive the motor instead of run(), and
-// they only retract: the buffer-lift gesture still unloads a latched channel.
+// they only retract. No buffer lift arms the auto-unload while the jam latch is set, nor after the
+// pass that releases it until the buffer has been below 80% (auto_unload_hold()): lifting a latched
+// channel's buffer releases it and does not unload it. The manual empty pull needs no filament at
+// the switch, which clears the latch.
 // The release rules above are unchanged. A resume with before_on_use releases the latch at once if
 // the buffer has been back at JAM_TRIP_PCT since the trip (a person fed filament or lifted the
 // buffer), and hold_load runs from that pass on. If it has not, the channel stays latched and
