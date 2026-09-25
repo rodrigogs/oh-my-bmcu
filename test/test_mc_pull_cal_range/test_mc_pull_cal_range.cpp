@@ -7,63 +7,70 @@
 // and a run with a fallback must not end with the green success blink.
 //
 // MC_PULL_calibration.cpp itself is not built on the host: the capture loops, the LEDs and the
-// flash calls stay there, and everything they decide goes through the functions tested here.
+// flash calls stay there, and everything they decide goes through the functions tested here. The
+// ranges are judged with the firmware's own percent mapping and recalibration rule
+// (src/mc_pull_pct.h), jam trip level (src/jam_latch.h), and verbatim copies of the rounding to
+// MC_PULL_pct and of the load stops (scripts/check_test_copies.py keeps them in sync with src/).
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <unity.h>
 
+#include "jam_latch.h"  // JAM_TRIP_PCT: on_use, below it for JAM_TRIP_MS -> jam latch
 #include "mc_pull_cal_range.h"
+#include "mc_pull_pct.h"
 
-#define CENTER 1.65f            // normalised idle reading (MC_PULL_V_OFFSET)
-#define CAL_CENTER_EPS_V 0.02f  // MC_PULL_calibration.cpp: "back at rest" band = rest scatter
+#define CENTER 1.65f  // normalised idle reading (MC_PULL_V_OFFSET)
 
-// Motion_control.cpp thresholds (percent of the calibrated range).
-#define JAM_LATCH_PCT 40.0f          // on_use: pct < 40 -> jam latch
-#define A1_HARD_STOP_PCT 95.0f       // MC_LOAD_S1_HARD_STOP_PCT (A1)
-#define P1S_HARD_STOP_PCT 97.0f      // MC_LOAD_S1_HARD_STOP_PCT (P1S), the highest load stop
-#define CAL_RESET_PCT_THRESH 15      // recalibration gesture, all slots empty, held 5 s
-#define CAL_RESET_V_DELTA 0.10f
-#define CAL_RESET_NEAR_MIN 0.03f
+// ---- Motion_control.cpp at this commit: the range held before a calibration is loaded, verbatim ----
+float MC_PULL_V_MIN[4]         = {1.00f, 1.00f, 1.00f, 1.00f};
+float MC_PULL_V_MAX[4]         = {2.00f, 2.00f, 2.00f, 2.00f};
+// ---- end of the Motion_control.cpp copy ----
 
-// ---- adapted from Motion_control.cpp: pull_v_to_percent_f(), with the range passed in ----
-static float pull_v_to_percent(float vmin, float vmax, float v)
+// The Stage-1 load stops (percent of the calibrated range) of the three load modes; each image has
+// one of them.
+namespace soft_load
 {
-    const float c = 1.65f;
-
-    if (vmin > 1.60f) vmin = 1.60f;
-    if (vmax < 1.70f) vmax = 1.70f;
-    if (vmax <= (vmin + 0.10f)) { vmin = 1.55f; vmax = 1.75f; }
-
-    float pos01;
-    if (v <= c)
-    {
-        float den = c - vmin;
-        if (den < 0.05f) den = 0.05f;
-        pos01 = 0.5f * (v - vmin) / den;
-    }
-    else
-    {
-        float den = vmax - c;
-        if (den < 0.05f) den = 0.05f;
-        pos01 = 0.5f + 0.5f * (v - c) / den;
-    }
-
-    if (pos01 < 0.0f) pos01 = 0.0f;
-    if (pos01 > 1.0f) pos01 = 1.0f;
-    return pos01 * 100.0f;
+// ---- Motion_control.cpp at this commit: the soft_load Stage-1 constants, verbatim ----
+    static constexpr int   MC_LOAD_S1_FAST_PCT       = 75;
+    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 90;  // bezpiecznik
+// ---- end of the Motion_control.cpp copy ----
+}
+namespace p1s
+{
+// ---- Motion_control.cpp at this commit: the P1S Stage-1 constants, verbatim ----
+    static constexpr int   MC_LOAD_S1_FAST_PCT       = 88;
+    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 97;  // bezpiecznik
+// ---- end of the Motion_control.cpp copy ----
+}
+namespace a1
+{
+// ---- Motion_control.cpp at this commit: the A1 Stage-1 constants, verbatim ----
+    static constexpr int   MC_LOAD_S1_FAST_PCT       = 85;
+    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 95;  // bezpiecznik
+// ---- end of the Motion_control.cpp copy ----
 }
 
-// Motion_control.cpp: the per-channel "hard_blue" condition of the recalibration gesture.
+// MC_PULL_pct for a channel whose MC_PULL_pct_f is pct_f.
+static uint8_t MC_PULL_pct[4];
+static int pct_rounded(float pct_f)
+{
+    const uint8_t i = 0u;
+// ---- Motion_control.cpp at this commit: MC_PULL_ONLINE_read's rounding to MC_PULL_pct, verbatim ----
+        int pct = (int)(pct_f + 0.5f);
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        MC_PULL_pct[i] = (uint8_t)pct;
+// ---- end of the Motion_control.cpp copy ----
+    return (int)MC_PULL_pct[i];
+}
+
+// Motion_control_run's recalibration rule for a channel with range vmin..vmax reading v.
 static bool reset_gesture_pressed(float vmin, float vmax, float v)
 {
-    int pct = (int)(pull_v_to_percent(vmin, vmax, v) + 0.5f);
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
-    return (pct <= CAL_RESET_PCT_THRESH) ||
-           (v <= (1.65f - CAL_RESET_V_DELTA)) ||
-           (v <= (vmin + CAL_RESET_NEAR_MIN));
+    const int pct = pct_rounded(mc_pull_v_to_pct(vmin, vmax, v));
+    return MC_PULL_CAL_RESET_PRESSED(pct, v, vmin);
 }
 
 static uint32_t float_bits(float f)
@@ -73,7 +80,8 @@ static uint32_t float_bits(float f)
     return u;
 }
 
-// capture_minmax_one_ch_event before this fix, for the "unchanged when successful" check.
+// ---- adapted from MC_PULL_calibration.cpp: capture_minmax_one_ch_event's range before mc_pull_cal_range.h ----
+// For the "unchanged when successful" check; it is not firmware code any more, so it is not checked.
 static mc_pull_cal_range_t old_range(float center_v, float vmin, float vmax, int8_t pol)
 {
     mc_pull_cal_range_t r;
@@ -205,7 +213,8 @@ static void test_timed_out_first_step_stores_the_nominal_low_side(void)
 {
     const mc_pull_cal_range_t r = first_step_timed_out(2.10f);
     TEST_ASSERT_EQUAL_FLOAT(MC_PULL_CAL_FALLBACK_V_MIN, r.vmin);
-    TEST_ASSERT_EQUAL_FLOAT(1.00f, r.vmin);  // MC_PULL_V_MIN default in Motion_control.cpp
+    TEST_ASSERT_EQUAL_FLOAT(1.00f, r.vmin);
+    TEST_ASSERT_EQUAL_FLOAT(MC_PULL_V_MIN[0], r.vmin);  // the range held before a calibration is loaded
     TEST_ASSERT_EQUAL_FLOAT(2.10f, r.vmax);  // the measured side is kept
     TEST_ASSERT_EQUAL_INT8(1, r.pol);
     TEST_ASSERT_TRUE(r.fallback);
@@ -240,14 +249,14 @@ static void test_rest_scatter_never_trips_the_jam_latch_on_any_stored_range(void
 {
     // Whatever the steps gave, the jam latch stays clear of 1.5x the rest scatter (30 mV): true for
     // a kept low side from 150 mV and for the fallback; a kept 100 mV side put it at 20 mV.
-    const float v = CENTER - (1.5f * CAL_CENTER_EPS_V - 0.0001f);
+    const float v = CENTER - (1.5f * MC_PULL_CAL_CENTER_EPS_V - 0.0001f);
 
     for (int i = 0; i < LO_CASES; i++)
     {
         for (int j = 0; j < N_HI; j++)
         {
             const mc_pull_cal_range_t r = outcome(lo_case(i), HI_CASES[j], 1);
-            TEST_ASSERT_TRUE(pull_v_to_percent(r.vmin, r.vmax, v) >= JAM_LATCH_PCT);
+            TEST_ASSERT_TRUE(mc_pull_v_to_pct(r.vmin, r.vmax, v) >= JAM_TRIP_PCT);
         }
     }
 }
@@ -260,18 +269,18 @@ static void test_jam_latch_needs_a_deliberate_pull_and_still_trips_on_a_real_one
     // Nothing up to CAL_PRESS_DELTA_V (100 mV), the move the firmware treats as deliberate.
     for (int mv = 0; mv <= 100; mv++)
     {
-        TEST_ASSERT_TRUE(pull_v_to_percent(a.vmin, a.vmax, CENTER - 0.001f * (float)mv) >= JAM_LATCH_PCT);
-        TEST_ASSERT_TRUE(pull_v_to_percent(b.vmin, b.vmax, CENTER - 0.001f * (float)mv) >= JAM_LATCH_PCT);
+        TEST_ASSERT_TRUE(mc_pull_v_to_pct(a.vmin, a.vmax, CENTER - 0.001f * (float)mv) >= JAM_TRIP_PCT);
+        TEST_ASSERT_TRUE(mc_pull_v_to_pct(b.vmin, b.vmax, CENTER - 0.001f * (float)mv) >= JAM_TRIP_PCT);
     }
 
     // Trips at 0.2 * 650 mV = 130 mV, so a real jam pulling the buffer to its end is still seen.
-    TEST_ASSERT_TRUE(pull_v_to_percent(a.vmin, a.vmax, CENTER - 0.132f) < JAM_LATCH_PCT);
-    TEST_ASSERT_TRUE(pull_v_to_percent(a.vmin, a.vmax, CENTER - 0.300f) < JAM_LATCH_PCT);
-    TEST_ASSERT_TRUE(pull_v_to_percent(b.vmin, b.vmax, CENTER - 0.132f) < JAM_LATCH_PCT);
+    TEST_ASSERT_TRUE(mc_pull_v_to_pct(a.vmin, a.vmax, CENTER - 0.132f) < JAM_TRIP_PCT);
+    TEST_ASSERT_TRUE(mc_pull_v_to_pct(a.vmin, a.vmax, CENTER - 0.300f) < JAM_TRIP_PCT);
+    TEST_ASSERT_TRUE(mc_pull_v_to_pct(b.vmin, b.vmax, CENTER - 0.132f) < JAM_TRIP_PCT);
 
     // A kept 150 mV side trips at 0.2 * 150 = 30 mV.
     const mc_pull_cal_range_t c = outcome(151, 300, 1);
-    TEST_ASSERT_TRUE(pull_v_to_percent(c.vmin, c.vmax, CENTER - 0.032f) < JAM_LATCH_PCT);
+    TEST_ASSERT_TRUE(mc_pull_v_to_pct(c.vmin, c.vmax, CENTER - 0.032f) < JAM_TRIP_PCT);
 }
 
 static void test_recalibration_gesture_keeps_its_absolute_100mV_rule(void)
@@ -304,10 +313,18 @@ static void test_load_stops_stay_within_the_minimum_real_travel(void)
     const float v = CENTER + MC_PULL_CAL_PRESS_DELTA_V;
 
     // Any buffer the calibration can measure moves at least CAL_PRESS_DELTA_V: every hard stop
-    // (A1 95 %, P1S 97 %) trips within that travel.
-    TEST_ASSERT_TRUE(pull_v_to_percent(a.vmin, a.vmax, v) >= P1S_HARD_STOP_PCT);
-    TEST_ASSERT_TRUE(pull_v_to_percent(b.vmin, b.vmax, v) >= P1S_HARD_STOP_PCT);
-    TEST_ASSERT_TRUE(pull_v_to_percent(a.vmin, a.vmax, CENTER + 0.090f) >= A1_HARD_STOP_PCT - 0.01f);
+    // (A1 95 %, P1S 97 %, soft_load 90 %) trips within that travel, A1's by +90 mV, and each mode's
+    // slower approach (MC_LOAD_S1_FAST_PCT) starts before its stop.
+    const int stops[] = {a1::MC_LOAD_S1_HARD_STOP_PCT, p1s::MC_LOAD_S1_HARD_STOP_PCT,
+                         soft_load::MC_LOAD_S1_HARD_STOP_PCT};
+    const int fast[] = {a1::MC_LOAD_S1_FAST_PCT, p1s::MC_LOAD_S1_FAST_PCT, soft_load::MC_LOAD_S1_FAST_PCT};
+    for (unsigned k = 0; k < sizeof(stops) / sizeof(stops[0]); k++)
+    {
+        TEST_ASSERT_TRUE(mc_pull_v_to_pct(a.vmin, a.vmax, v) >= (float)stops[k]);
+        TEST_ASSERT_TRUE(mc_pull_v_to_pct(b.vmin, b.vmax, v) >= (float)stops[k]);
+        TEST_ASSERT_TRUE(fast[k] < stops[k]);
+    }
+    TEST_ASSERT_TRUE(mc_pull_v_to_pct(a.vmin, a.vmax, CENTER + 0.090f) >= (float)a1::MC_LOAD_S1_HARD_STOP_PCT - 0.01f);
 }
 
 static void test_no_stored_side_is_narrower_than_its_floor(void)
@@ -443,7 +460,8 @@ static void test_boot_flash_is_brief_and_only_on_connected_fallback_buffers(void
     TEST_ASSERT_EQUAL_HEX8(0x00u, mc_pull_cal_run_loaded(inserted, 0xF0u).fallback_mask);
 }
 
-// Flash_MC_PULL_cal_write_all's rsv in V10.3..V10.5 (V6..V10.2 wrote 0), and their reader.
+// ---- adapted from Flash_saves.cpp: Flash_MC_PULL_cal_write_all's rsv and its reader in V10.3..V10.5 ----
+// V6..V10.2 wrote 0. Older releases' code, not checked.
 static uint32_t v105_rsv_pack(const int8_t pol[4])
 {
     uint32_t rsv = 0u;
