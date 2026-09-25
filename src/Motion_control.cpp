@@ -2031,10 +2031,9 @@ public:
                 {
                     g_on_use_hi_pwm_us[CHx] = 0u;
 
-                    auto &A = ams[motion_control_ams_num];
-                    if (g_on_use_jam_latch[CHx] && A.now_filament_num == (uint8_t)CHx)
-                        A.pressure = 0xF06Fu;
-
+                    // The silent latch: the jam latch is clear here (set only with this one, which it
+                    // was not on entry, and cleared just above), so no 0xF06F. The jam is reported by
+                    // jam_latch_pass() and Motion_control_run.
                     MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
 
                     PID_speed.clear();
