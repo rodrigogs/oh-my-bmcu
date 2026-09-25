@@ -24,10 +24,18 @@
 #include "auto_unload.h"
 #include "jam_latch.h"
 
-// A1 (standard and soft_load): MC_ON_USE_TARGET_PCT - MC_ON_USE_BAND_LO_DELTA.
-#define BAND_LO_PCT (52.0f - 0.2f)
-#define TARGET_PCT 52.0f
-#define BAND_HI_PCT 60.0f  // MC_ON_USE_BAND_HI_PCT
+// The A1 on_use band (standard(A1); soft_load(A1) has the same one). The copy ends with the #endif
+// that closes the A1 branch, so it matches the A1 constants only; #if 1 opens it here.
+#if 1
+// ---- Motion_control.cpp at this commit: the A1 on_use band, verbatim ----
+    static constexpr float MC_ON_USE_TARGET_PCT    = 52.0f;
+    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;  // band_lo = target - delta
+    static constexpr float MC_ON_USE_BAND_HI_PCT   = 60.0f;
+#endif
+// ---- end of the Motion_control.cpp copy ----
+#define BAND_LO_PCT (MC_ON_USE_TARGET_PCT - MC_ON_USE_BAND_LO_DELTA) // what Motion_control_run passes
+#define TARGET_PCT MC_ON_USE_TARGET_PCT
+#define BAND_HI_PCT MC_ON_USE_BAND_HI_PCT
 #define REST_PCT 50.0f     // the buffer spring's rest position (calibrated neutral)
 
 static const _filament_motion IDLE = _filament_motion::idle;
@@ -69,6 +77,7 @@ void setUp(void)
 
 void tearDown(void) {}
 
+// ---- adapted from Motion_control.cpp: the control motor_motion_switch picks for printer command m ----
 // What run() runs for the channel once motor_motion_switch has followed printer command m. The
 // active channel with filament at the switch: the on_use control for on_use, hold_load for
 // before_on_use, the idle control for idle unless the jam latch is set; anything else it runs there
@@ -84,6 +93,7 @@ static jam_ctrl_t bmcu_ctrl(_filament_motion m)
     return JAM_CTRL_OTHER;
 }
 
+// ---- adapted from Motion_control.cpp: whether run()'s control may push (idle: MC_PULL_stu -1, below 30%) ----
 // run() on this pass: the on_use control or hold_load runs (and may push), and so does the idle
 // control with the buffer below 30% (MC_PULL_stu -1: its PID pushes towards 50%), unless braked.
 static bool motor_pushes(jam_ctrl_t c, float pct)
@@ -119,6 +129,7 @@ static au_drive_t au_pass(bool idle_ctrl, float pct)
     return auto_unload_pass(&g_auto_unload[0], &au);
 }
 
+// ---- adapted from Motion_control.cpp: Motion_control_run's latch clear, jam_latch_pass() call and motor order ----
 // One main-loop pass for the channel: Motion_control_run clears both latches when no filament is
 // at the switch and the jam latch is set, and runs jam_latch_pass() and the auto-unload hold, then
 // motor_motion_switch puts the BMCU into its on_use control when the printer commands on_use for
@@ -848,6 +859,7 @@ static void test_push_limit_counts_at_any_buffer_level(void)
         const float pct = ((t % 451) == 450) ? 41.0f : 30.0f;
         if (pct >= JAM_TRIP_PCT) last_high = t;
         TEST_ASSERT_EQUAL_INT(JAM_EVENT_NONE, pass(ON_USE, pct));
+// ---- adapted from Motion_control.cpp: run()'s on_use jam_push_limit_pass() call ----
         if (!brake && jam_push_limit_pass(&hi, -900, DIR_RETRACT_POS, 0.001f))
         {
             brake = 1u; // Motion_control.cpp: g_on_use_low_latch set, g_on_use_jam_latch clear

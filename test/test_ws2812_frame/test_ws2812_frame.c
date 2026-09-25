@@ -9,12 +9,16 @@
 
 #include "ws2812_frame.h"
 
-// Same packing as WS2812_class::set_RGB.
-static uint32_t grb(uint8_t r, uint8_t g, uint8_t b)
+// The packing of WS2812_class::set_RGB.
+static uint32_t grb(uint8_t R, uint8_t G, uint8_t B)
 {
-    return ((uint32_t)g << 16) | ((uint32_t)r << 8) | (uint32_t)b;
+// ---- ws2812.cpp at this commit: WS2812_class::set_RGB's packing, verbatim ----
+    const uint32_t packed = ((uint32_t)G << 16) | ((uint32_t)R << 8) | (uint32_t)B;
+// ---- end of the ws2812.cpp copy ----
+    return packed;
 }
 
+// ---- adapted from Motion_control.cpp: status LED colours it sets ----
 // Colours used by Motion_control.cpp.
 #define C_OFF      grb(0x00, 0x00, 0x00)
 #define C_WHITE    grb(0x38, 0x35, 0x32)   // loaded baseline (stu_apply_baseline)
@@ -23,6 +27,7 @@ static uint32_t grb(uint8_t r, uint8_t g, uint8_t b)
 #define C_SEND_OUT grb(0x00, 0xD5, 0x2A)
 #define C_PULLBACK grb(0xA0, 0x2D, 0xFF)
 
+// ---- adapted from main.cpp: RGB_update without the 10 ms throttle ----
 // RGB_update without the 10 ms throttle: send every dirty strip, count the redraws.
 static unsigned rgb_update(ws2812_frame_t *s)
 {
@@ -31,6 +36,7 @@ static unsigned rgb_update(ws2812_frame_t *s)
     return 1u;
 }
 
+// ---- adapted from Motion_control.cpp: the order of the LED writes in one main-loop pass ----
 // One main-loop pass for the active channel strip (LED0 = state, LED1 = online LED):
 // stu_apply_baseline writes the baseline, motor_motion_switch overrides it with the state colour,
 // then the online LED is written.
@@ -193,9 +199,25 @@ static void test_init_clamps_led_count(void)
 // ---- redraw throttle (ws2812_throttle_t), as used by RGB_update() ----
 
 #define TICKS_PER_US 18u                           // SysTick = HCLK/8 at 144 MHz
-#define MIN_GAP      (10u * 1000u * TICKS_PER_US)  // RGB_update(): time_hw_tpms * 10
 #define LATCH_TICKS  (280u * TICKS_PER_US)         // WS2812B-2020 reset time, the longest one quoted
-#define TBIT_TICKS   22u                           // WS2812_TBIT_TICKS in ws2812.cpp
+
+// RGB_update()'s gap between redraws, at the firmware's SysTick rate.
+static uint32_t time_hw_tpms = 1000u * TICKS_PER_US;
+static uint32_t rgb_update_min_gap(void)
+{
+// ---- main.cpp at this commit: RGB_update's throttle gap, verbatim ----
+    uint32_t min_gap = time_hw_tpms * 10u;
+    if (!min_gap) min_gap = 1u;
+// ---- end of the main.cpp copy ----
+    return min_gap;
+}
+#define MIN_GAP rgb_update_min_gap()
+
+// One bit on the data pin, in SysTick ticks (ws2812.cpp).
+// ---- ws2812.cpp at this commit: the bit time, verbatim ----
+#define WS2812_TBIT_TICKS  (22u)  // 1.222us @18MHz
+// ---- end of the ws2812.cpp copy ----
+#define TBIT_TICKS WS2812_TBIT_TICKS
 
 static void test_throttle_first_redraw_is_immediate_then_spaced(void)
 {
@@ -237,6 +259,7 @@ static void test_throttle_across_the_systick_wrap(void)
     TEST_ASSERT_TRUE(ws2812_throttle_due(&t, t0 + MIN_GAP + 200u, MIN_GAP));
 }
 
+// ---- adapted from main.cpp: RGB_update() over SYS_RGB and RGBOUT[0..3], and the strips' bit timing ----
 // main.cpp: SYS_RGB (1 LED) and RGBOUT[0..3] (2 LEDs each), one data pin each.
 #define N_STRIPS 5
 

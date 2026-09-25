@@ -17,6 +17,8 @@
 
 #include "auto_unload.h"
 
+// ---- adapted from Motion_control.cpp: dm_key_to_state()'s key states, which auto_unload.h reads ----
+// dm_rearm.h names 0 and 1 (DM_KEY_NONE, DM_KEY_BOTH) but needs C++; auto_unload.h tests ks == 1u.
 #define KS_NONE 0u
 #define KS_BOTH 1u
 #define KS_EXT  2u

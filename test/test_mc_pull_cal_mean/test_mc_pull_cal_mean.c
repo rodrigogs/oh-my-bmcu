@@ -107,6 +107,7 @@ static uint32_t acc_for_volts(double v)
     return (uint32_t)(v / 3.3 * (double)ACC_MAX + 0.5);
 }
 
+// ---- adapted from MC_PULL_calibration.cpp: MC_PULL_calibration_boot's idle sums, float and (before) double ----
 static float sum_readings(const float *r)
 {
     float sum = 0.0f;

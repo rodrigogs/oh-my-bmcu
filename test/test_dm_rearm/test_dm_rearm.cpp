@@ -14,8 +14,9 @@
 #include "dm_rearm.h"
 #include "motion_limits.h" // ML_MM_PER_CNT, the AS5600 scale Motion_control.cpp asserts
 
-#define KS_NONE 0u
-#define KS_BOTH 1u
+#define KS_NONE DM_KEY_NONE
+#define KS_BOTH DM_KEY_BOTH
+// ---- adapted from Motion_control.cpp: dm_key_to_state()'s other two key states ----
 #define KS_EXT  2u  // external switch only
 #define KS_OTHER 3u // any other key voltage between 'none' and 'external only'
 
@@ -42,6 +43,7 @@ static int events[4];         // count of each dm_rearm_event
 static int32_t last_event_ms; // now of the last event other than DM_REARM_NONE, relative to mark
 static uint64_t mark;
 
+// ---- adapted from Motion_control.cpp: when run()'s DM block starts Stage-2 from IDLE ----
 // Stage-2 would start on this pass: the DM block in run() only runs for a channel in idle that is
 // not loaded, and from IDLE it goes to S2_PUSH when the key reads 'both'.
 static bool stage2_armed(void) { return (loaded == 0u) && (ks == KS_BOTH); }
@@ -80,6 +82,7 @@ void setUp(void)
 
 void tearDown(void) {}
 
+// ---- adapted from Motion_control.cpp: motor_motion_run's dm_rearm_pass() call for one channel ----
 // One main-loop pass: the AS5600 read (gear_step) comes first in Motion_control_run.
 static dm_rearm_event pass(uint8_t key, double v_mm_s)
 {

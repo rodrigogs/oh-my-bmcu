@@ -354,6 +354,12 @@ static const _filament_motion STOP_ON_USE = _filament_motion::stop_on_use;
 static _ams &A = ams[BAMBU_BUS_AMS_NUM];
 static bool filament[4];  // MC_ONLINE_key_stu[ch] != 0: filament at the channel's switches
 
+// ---- Motion_control.cpp at this commit: kChCount, verbatim ----
+static constexpr uint8_t  kChCount = 4;
+// ---- end of the Motion_control.cpp copy ----
+static uint8_t MC_ONLINE_key_stu[4];
+
+// ---- adapted from main.cpp: power-on, ams_init() and the STA record's restore (Motion_control_init sets online) ----
 // Power-on: RAM as after ams_init(), then main.cpp's restore. sta_ch: the STA record (0xFF: none
 // loaded, or no valid record: g_loaded_ch then stays 0xFF and the restore does nothing either).
 static void boot(bool restore_at_boot, uint8_t sta_ch)
@@ -376,11 +382,18 @@ static void boot(bool restore_at_boot, uint8_t sta_ch)
 // Motion_control_run up to the empty-switch check, once per main-loop pass (with or without link).
 static void pass(void)
 {
-    for (uint8_t i = 0; i < 4u; i++) A.filament[i].online = filament[i];
+// ---- adapted from Motion_control.cpp: MC_PULL_ONLINE_read's key state and Motion_control_run's online flags ----
+    for (uint8_t i = 0; i < 4u; i++)
+    {
+        MC_ONLINE_key_stu[i] = filament[i] ? 1u : 0u;
+        A.filament[i].online = filament[i];
+    }
 
+// ---- Motion_control.cpp at this commit: Motion_control_run's empty-switch check, verbatim ----
     const uint8_t loaded_ch = ams_state_get_loaded();
-    if ((loaded_ch < 4u) && !filament[loaded_ch])
+    if ((loaded_ch < kChCount) && (MC_ONLINE_key_stu[loaded_ch] == 0u))
         ams_state_set_unloaded(loaded_ch);
+// ---- end of the Motion_control.cpp copy ----
 }
 
 // One printer motion command (0x03 or 0x04 packet), then a main-loop pass.
@@ -400,6 +413,7 @@ static void on_use(uint8_t ch) { cmd(ch, 0x07, 0x7F); }
 static void stop_on_use(uint8_t ch) { cmd(ch, 0x07, 0x00); }
 static void before_pull_back(uint8_t ch) { cmd(ch, 0x09, 0x3F); }
 
+// ---- adapted from bambu_bus_ams.cpp: the channel, use and state fields of get_package_motion's reply ----
 // What get_package_motion / get_package_stu_motion report for the current state.
 typedef struct
 {

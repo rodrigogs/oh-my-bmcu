@@ -10,13 +10,13 @@
 #include "Flash_saves.h"
 #include "nvm_journal.h"
 
-// Journal geometry, as in Flash_saves.cpp. Filament info: one 256-byte page per slot, 6 records of
-// 10 words (MAGIC_FIL, 32-byte info, CRC). Loaded channel: 32 records of 2 words per page.
+// Journal geometry of Flash_saves.cpp (nvm_journal.h). Filament info: one 256-byte page per slot, 6
+// records of 10 words (MAGIC_FIL, 32-byte info, CRC). Loaded channel: 32 records of 2 words per page.
 static const uint32_t PAGE_WORDS = FLASH_NVM256_PAGE_SIZE / 4u;
-static const uint32_t FIL_WORDS = 10u;
-static const uint32_t FIL_SLOTS = 6u;
-static const uint32_t STA_WORDS = 2u;
-static const uint32_t STA_SLOTS = 32u;
+static const uint32_t FIL_WORDS = NVM_FIL_SLOT_WORDS;
+static const uint32_t FIL_SLOTS = NVM_FIL_SLOTS_PER_PAGE;
+static const uint32_t STA_WORDS = NVM_STA_SLOT_WORDS;
+static const uint32_t STA_SLOTS = NVM_STA_SLOTS_PER_PAGE;
 static const uint32_t MAGIC_FIL2 = 0x324C4946u; // 'FIL2', V10.0 filament records
 
 // The page under test followed by a second, erased page, so a helper that looks past its page (a
@@ -31,16 +31,18 @@ void setUp(void)
 
 void tearDown(void) {}
 
+// The calls Flash_saves.cpp makes before it programs a record (slot < STA_SLOTS: the first page).
 static bool fil_needs_erase(uint32_t slot)
 {
-    return nvm_journal_needs_erase(page, slot, FIL_WORDS, FIL_SLOTS);
+    return nvm_fil_needs_erase(page, slot);
 }
 
 static bool sta_needs_erase(uint32_t slot)
 {
-    return nvm_journal_needs_erase(page, slot, STA_WORDS, STA_SLOTS);
+    return nvm_sta_needs_erase(page, slot);
 }
 
+// ---- adapted from Flash_saves.cpp: the layouts of a filament-info and a loaded-channel record ----
 // A complete journal record in filament slot `slot`. The helper only asks whether words are erased,
 // so the CRC word is a stand-in.
 static void fil_record(uint32_t slot, uint32_t tag)

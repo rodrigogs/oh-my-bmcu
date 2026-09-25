@@ -40,8 +40,10 @@ static uint16_t ref_crc16(const uint8_t *data, uint32_t len)
     return r;
 }
 
-// Short-header ACK the BMCU sends for set_filament_info (src/bambu_bus_ams.cpp, set_filament_res).
-static const uint8_t k_set_filament_res[] = {0x3D, 0xC0, 0x08, 0xB2, 0x08, 0x60, 0xB4, 0x04};
+// Short-header ACK the BMCU sends for set_filament_info, with its CRCs precomputed.
+// ---- bambu_bus_ams.cpp at this commit: set_filament_res, verbatim ----
+unsigned char set_filament_res[] = {0x3D, 0xC0, 0x08, 0xB2, 0x08, 0x60, 0xB4, 0x04};
+// ---- end of the bambu_bus_ams.cpp copy ----
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -75,20 +77,20 @@ static void test_crcs_match_reference_on_a_long_buffer(void)
 
 static void test_set_filament_ack_header_crc8(void)
 {
-    TEST_ASSERT_EQUAL_HEX8(k_set_filament_res[3], bus_crc8(k_set_filament_res, 3));
+    TEST_ASSERT_EQUAL_HEX8(set_filament_res[3], bus_crc8(set_filament_res, 3));
 }
 
 static void test_set_filament_ack_frame_crc16_little_endian(void)
 {
-    const uint16_t crc = bus_crc16(k_set_filament_res, 6);
-    TEST_ASSERT_EQUAL_HEX8(k_set_filament_res[6], (uint8_t)(crc & 0xFFu));
-    TEST_ASSERT_EQUAL_HEX8(k_set_filament_res[7], (uint8_t)(crc >> 8));
+    const uint16_t crc = bus_crc16(set_filament_res, 6);
+    TEST_ASSERT_EQUAL_HEX8(set_filament_res[6], (uint8_t)(crc & 0xFFu));
+    TEST_ASSERT_EQUAL_HEX8(set_filament_res[7], (uint8_t)(crc >> 8));
 }
 
 static void test_empty_input_returns_init_values(void)
 {
-    TEST_ASSERT_EQUAL_HEX8(0x66, bus_crc8(k_set_filament_res, 0));
-    TEST_ASSERT_EQUAL_HEX16(0x913D, bus_crc16(k_set_filament_res, 0));
+    TEST_ASSERT_EQUAL_HEX8(0x66, bus_crc8(set_filament_res, 0));
+    TEST_ASSERT_EQUAL_HEX16(0x913D, bus_crc16(set_filament_res, 0));
 }
 
 int main(void)

@@ -30,7 +30,9 @@
 #include "motion_limits.h"
 
 // ---- What the copied firmware code uses (Motion_control.cpp names) ----
-static constexpr uint8_t kChCount = 4;
+// ---- Motion_control.cpp at this commit: kChCount, verbatim ----
+static constexpr uint8_t  kChCount = 4;
+// ---- end of the Motion_control.cpp copy ----
 _ams ams[ams_max_number];
 #define motion_control_ams_num 0
 
@@ -629,8 +631,9 @@ static au_drive_t au_pass(uint8_t i, uint64_t time_now)
 }
 
 // ---- Simulation ----
-#define KS_NONE  0u
-#define KS_BOTH  1u
+#define KS_NONE  DM_KEY_NONE
+#define KS_BOTH  DM_KEY_BOTH
+// ---- adapted from Motion_control.cpp: dm_key_to_state()'s other two key states ----
 #define KS_EXT   2u // external switch only
 #define KS_OTHER 3u
 
@@ -723,6 +726,7 @@ static void pass(void)
     const uint8_t st_mid = dm_auto_state[0];
     const uint8_t run_stage = dm_s2_run[0].stage;
 
+// ---- adapted from Motion_control.cpp: stu_apply_baseline's DM colour and the auto-unload's purple ----
     // The status LED's baseline (stu_apply_baseline): red for a failed channel, else off; what drives
     // the channel sets its colour after it (the auto-unload's is purple).
     led_r = dm_fail_latch[0] ? 0xFFu : 0x00u;

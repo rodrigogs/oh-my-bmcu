@@ -9,6 +9,7 @@
 #include <unity.h>
 
 #include "as5600_sample.h"
+#include "motion_limits.h" // ML_MM_PER_CNT, the AS5600 scale Motion_control.cpp asserts
 
 // SysTick at 18 MHz, as on the CH32V203 (time_hw_tpus / time_hw_tpms).
 #define TPUS 18u
@@ -16,6 +17,7 @@
 
 // ===== distance/speed tracker =====
 
+// ---- adapted from Motion_control.cpp: AS5600_distance_updata's use of as5600_track_sample(), in counts ----
 // One channel as AS5600_distance_updata runs it: counts moved, sum of |moves| (what DM Stage-2
 // autoload adds up), speed in counts per ms (held on a skip, 0 on a new baseline).
 typedef struct
@@ -297,7 +299,7 @@ static void test_speed_is_held_for_at_most_8_polls(void)
 // counted total is exactly the gear travel.
 static void run_at_speed(float mm_s, int n)
 {
-    const float cnt_per_ms = mm_s / (3.14159265f * 7.5f / 4096.0f) / 1000.0f;
+    const float cnt_per_ms = mm_s / ML_MM_PER_CNT / 1000.0f;
     float pos = 1234.0f;
     poll(true, (uint16_t)pos);
     for (int k = 0; k < n; k++)

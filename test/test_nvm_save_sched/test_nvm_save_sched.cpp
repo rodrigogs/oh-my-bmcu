@@ -77,6 +77,7 @@ static void tx_isr(void)
         port.tx_done(tx_end_at);
 }
 
+// ---- adapted from main.cpp: ams_nvm_save_run (one tick for the three samples; the writes only counted) ----
 // ams_nvm_save_run (src/main.cpp): sample the bus, pick a job, run it.
 static void nvm_pass(void)
 {
@@ -110,6 +111,7 @@ static void nvm_pass(void)
     }
 }
 
+// ---- adapted from main.cpp: the main loop's order of bambubus_run, send_package and ams_nvm_save_run ----
 // One main-loop pass: bambubus_run consumes a received frame and may queue a reply,
 // send_package starts it, then the NVM step.
 static void main_pass(void)

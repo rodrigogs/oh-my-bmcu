@@ -15,8 +15,11 @@
 
 #include "motion_limits.h"
 
+// ---- adapted from platformio.ini: AMS_RETRACT_LEN of env:a1_solo_autoload_rgboff ----
 #define SOLO_RETRACT_M 0.095f   // AMS_RETRACT_LEN of env:a1_solo_autoload_rgboff
+// ---- adapted from build_all_firmwares.sh: its longest AMS_RETRACT_LEN ----
 #define LONG_RETRACT_M 0.90f    // longest AMS_RETRACT_LEN built by build_all_firmwares.sh
+// ---- adapted from Motion_control.cpp: DM_AUTO_S2_TARGET_M (a C++ constant) ----
 #define DM_S2_LEN_M    0.120f   // DM_AUTO_S2_TARGET_M
 #define PULL_CNT0      0xFFFFF000u  // pulls count up: they wrap the uint32_t count after 23.6 mm
 #define FEED_CNT0      0x00000800u  // feeds count down: they wrap it after 11.8 mm
@@ -44,6 +47,7 @@ static void gear_reset(uint32_t cnt0, float meters0)
     s_meters    = meters0;
 }
 
+// ---- adapted from Motion_control.cpp: AS5600_distance_updata's count and odometer update ----
 // One AS5600 read after the gear moved v_mm_s for 1 ms (v > 0 feeds, v < 0 pulls). The angle falls
 // when meters rises (kAS5600_MM_PER_CNT < 0). Both sources get the same whole-count step.
 static void gear_step(float v_mm_s)
@@ -65,6 +69,7 @@ void setUp(void)
 
 void tearDown(void) {}
 
+// ---- adapted from Motion_control.cpp: the pull back's speed command (PULL_V_FAST, PULL_V_END, PULL_RAMP_M) ----
 // The pull back's speed command in motor_motion_filamnet_pull_back_to_online_key: 60 mm/s, linear
 // down to 12 mm/s over the last 15 mm (PULL_V_FAST, PULL_V_END, PULL_RAMP_M).
 static float pull_cmd_mm_s(float remain_m)
@@ -75,6 +80,7 @@ static float pull_cmd_mm_s(float remain_m)
     return 12.0f + (60.0f - 12.0f) * k;
 }
 
+// ---- adapted from Motion_control.cpp: the pull's speed PID against a held filament, simplified ----
 // The speed PID from standstill against a held filament: the error is the full 60 mm/s (P 2, I 20),
 // with the 500 PWM floor and the 2500 PWM/s soft-start ramp, clamped at 1000.
 static float pull_pwm_blocked(uint32_t t_ms)
@@ -87,6 +93,7 @@ static float pull_pwm_blocked(uint32_t t_ms)
     return x;
 }
 
+// ---- adapted from Motion_control.cpp: the pull back's end before motion_limits.h ----
 // What the firmware did before: the pull ended only on the target or empty switches, the redetect
 // only when a switch saw filament.
 static bool old_pull_back_done(float target_m, float pulled_m, uint8_t ks)
@@ -572,6 +579,7 @@ static void test_dm_s2_retract_that_never_relaxes_the_buffer_stops_at_budget(voi
     TEST_ASSERT_EQUAL(ML_TIME, s_end);
 }
 
+// ---- adapted from Motion_control.cpp: the DM_AUTO_S2_PUSH countdown ----
 // The Stage-2 push's own countdown (DM_AUTO_S2_PUSH in Motion_control.cpp): each pass subtracts
 // the gear travel since the previous pass, from the count, from the 120 mm left. Returns the pass
 // the countdown reached 0 in, 0 if it did not.

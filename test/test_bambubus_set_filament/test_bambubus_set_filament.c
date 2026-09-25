@@ -16,6 +16,8 @@
 void setUp(void) {}
 void tearDown(void) {}
 
+// ---- adapted from bambu_bus_ams.cpp: the 0x08 and 0x218 set-filament handlers before bambubus_set_filament.h ----
+// The reference for "decodes as before"; not firmware code any more, so not checked.
 // The 0x08 handler before this change: fixed offsets, length ignored.
 static void old_decode_0x08(const uint8_t *buf, bambubus_set_filament_t *o)
 {
