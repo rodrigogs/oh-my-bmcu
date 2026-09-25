@@ -40,6 +40,13 @@ follow the [hardware test plan](hardware-test-plan.md) before relying on an imag
   the pull back length deterministic (`a003d33`).
 - Re-arm the DM Stage-2 push only after the filament really left both switches (`a604637`); clear
   its failure latch when the printer loads the channel (`b1fe02c`).
+- Brake a jam-latched channel in before_on_use (`4a0a137`) and in the idle control once it is not
+  the active channel (`89d9096`), so a resume or a channel change cannot push into the tangle.
+- Keep the DM Stage-2 progress (remaining length, aborts, time and stall limits) across switch dips,
+  and count Stage-1 pushes and buffer-lift unloads against it: with the link up, a blocked gear
+  gets at most about 6 s of 900 PWM per insertion (`000d153`).
+- Stop the auto-unload and the empty-channel pull while the printer link is down (`91387ff`).
+- Move the 20 s full-force push limit into a host-tested helper, same behaviour (`7f9cbf9`).
 
 ### Calibration and flash
 
@@ -74,3 +81,6 @@ follow the [hardware test plan](hardware-test-plan.md) before relying on an imag
   soft-double routines), and uploaded as one artifact (`06c712e`).
 - `build_all_firmwares.sh` normalises `OUT_DIR`, so no spelling of `firmwares/` slips past the
   `BUILD_ONLY_SOLO=1` guard (`65bbd90`).
+- Host tests for the motion fixes above, including a simulation of the DM autoload with the
+  firmware's own state machine and auto-unload code (`46b5895`, `8e6d597`, `ab5e978`, `31d5511`,
+  `2ee7551`, `e12c340`).

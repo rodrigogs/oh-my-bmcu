@@ -24,11 +24,12 @@ Findings and their status are in the [audit backlog](audit-2026-09.md), the list
 - The set-filament handlers check frame lengths, and AMS discovery is answered again after a link loss.
 
 **Motor and sensors**
-- Tangle detection: the buffer must stay below 40% for 500 ms while the BMCU pushes at full force before the print pauses (it used to trip on a few milliseconds). The latch is meant to release when the printer resumes the channel after the buffer has been above 40% at least once (free the spool, feed filament, resume), or when the buffer is held at or above about 52% for 1 s while printing or paused. Which commands the A1 sends on a resume has not been observed yet, so this is still to be confirmed on the printer. Continuous full-force pushing is still capped at 20 s, at any buffer level.
+- Tangle detection: the buffer must stay below 40% for 500 ms while the BMCU pushes at full force before the print pauses (it used to trip on a few milliseconds). The latch is meant to release when the printer resumes the channel after the buffer has been above 40% at least once (free the spool, feed filament, resume), or when the buffer is held at or above about 52% for 1 s while printing or paused. Which commands the A1 sends on a resume has not been observed yet, so this is still to be confirmed on the printer. Continuous full-force pushing is still capped at 20 s, at any buffer level. While latched, the channel is braked whatever the printer commands next (before_on_use, or the idle control once another channel or none is active), so the BMCU does not push into a tangle nobody has cleared.
 - Unload pull back, redetect and the DM autoload Stage-2 have time, distance and stall limits. A pull that stalls (for example filament still held by the extruder) stops after about 1.6 s, and that channel's LED blinks red (1 s on, 1 s off) until the filament is pulled out or the slot is used again.
 - Failed or impossible AS5600 readings are skipped instead of being used as angle 0, and the motor-direction test at first boot re-reads and confirms before saving.
 - Every motion distance (unload length, autoload Stage-2) comes from an integer AS5600 count, so unloads stay 95 mm however much filament has gone through since boot (the float odometer used to lose precision after about 128 m).
-- DM autoload only re-arms its 120 mm Stage-2 push after the filament really left both switches or was retracted, not after a switch flickers.
+- DM autoload only re-arms its 120 mm Stage-2 push after the filament really left both switches or was retracted, not after a switch flickers. A flickering switch no longer restarts the push either: the remaining length, the abort count and the time and stall limits carry over, so with the printer link up a gear that cannot turn gets at most about 6 s of push per insertion, whatever the switches, the buffer or buffer-lift unloads do.
+- While the printer link is down (SYS LED red), lifting the buffer no longer drives the motor: the auto-unload and the empty-channel pull only run with the link up.
 
 **Watchdog and faults**
 - An independent watchdog (1 s nominal, 0.67 to 1.6 s over the LSI tolerance) resets the BMCU if the firmware hangs. It starts after the first-boot calibration. After a watchdog reset the SYS LED flashes magenta three times at boot.
@@ -92,6 +93,7 @@ To recalibrate later, remove all filament and hold one buffer for about 5 s. Thi
 - Reference hashes:
   - V10.5 `standard(A1)/AUTOLOAD/FILAMENT_RGB_OFF/SOLO/solo_0.095f.bin`: `9237be17296e1d3c2a92162a859b1363dafd835df0dd953ffe0a52bdb91231d9`
   - This fork's A1 target at `73497e9` (V10.5 + #134): `052651efe729b611556b0c38badae09fca5e8351e1b7fcbf6fad883ef64596a1`
+- This fork's own images are reproducible across hosts too: at `65bbd90` a local build on macOS (`toolchain-riscv-mac` `e6360e0f`) and the CI build on Linux gave the same `a1_solo_autoload_rgboff` (`fb40deab...`) and `a1_solo_autoload_rgboff_no_boot_restore` (`779705a8...`) images.
 
 ## Notes
 

@@ -49,7 +49,9 @@ flashed as described in [README.md](README.md#flash)
       white and the slot still answers.
 - [ ] Only if safe: interrupt the bus while the BMCU stays powered (for example BMCU on USB-C power
       and the bus data unplugged). The SYS LED turns red within about 1 s, the motors stop, and it
-      stays red for more than 4 minutes. When the bus returns the LED turns white and the slot works.
+      stays red for more than 4 minutes. While it is red, lifting the buffer moves no motor, and an
+      auto-unload that was running when the link dropped stops and does not restart. When the bus
+      returns the LED turns white and the slot works.
 
 ## 3. Printing and unloading
 
@@ -66,13 +68,14 @@ flashed as described in [README.md](README.md#flash)
 - [ ] Hold the spool until the print pauses: red LED and the printer's tangle error, about 0.5 s
       later than with upstream.
 - [ ] Resume with the spool still held and nothing else done: it pauses again at once, motor
-      braked, no push.
+      braked, no push (also when the printer resumes through its load step, before_on_use).
 - [ ] Free the spool, feed filament until the buffer is above 40 %, then resume: printing should
       continue. While paused, holding the buffer at or above about 52 % for 1 s should also turn the
       red LED off. Both depend on what the A1 sends on a resume, which has not been observed yet:
       note which of the two worked, and what the printer showed if neither did.
 - [ ] If the A1 unloads after the tangle: the latch holds through the pull back, idle and the
-      reload, unless the buffer is lifted above 85 %.
+      reload, unless the buffer is lifted above 85 %. The motor stays silent meanwhile, also once
+      the printer has deselected the slot and the buffer sits below 30 % (the red LED stays on).
 - [ ] Optional, hard to set up by hand: brake the spool just enough that the buffer stays above
       40 % while the motor strains at full force for more than 20 s. The channel then brakes and its
       LED turns red; the print only pauses if the buffer then stays below 40 % for 0.5 s.
@@ -109,6 +112,14 @@ Only if the A1 ever stops finding the AMS after a power cycle with a slot loaded
 - [ ] Pull the filament out past both switches and insert it again: Stage-2 runs again.
 - [ ] If Stage-2 ever gives up (channel LED red after an insertion): loading that slot from the
       printer clears the red LED once the load finishes, and so does pulling the filament out.
+- [ ] Flick the lever now and then during the Stage-2 push: the push still ends after about
+      120 mm in all, not 120 mm from the last flick.
+- [ ] Optional, with the outlet blocked: three aborts, then red, also while flicking the lever.
+      With the filament jammed in the gear and the tip at the inner lever, flicking the lever and
+      moving the buffer (past 75 %, or lift gestures) drive the motor about 6 s in all, then red.
+- [ ] Lift gesture during the Stage-2 push (buffer to 80 % or more and back to the middle within
+      1 s): the filament comes out. The LED is red only while the buffer is held up, then purple,
+      and does not stay red; inserted again, the filament gets a full autoload.
 
 ## 8. Watchdog
 
