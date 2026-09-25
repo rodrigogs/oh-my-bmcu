@@ -83,9 +83,20 @@ flashed as described in [README.md](README.md#flash)
       continue. While paused, holding the buffer at or above about 52 % for 1 s should also turn the
       red LED off. Both depend on what the A1 sends on a resume, which has not been observed yet:
       note which of the two worked, and what the printer showed if neither did.
+- [ ] While paused after a tangle, touch nothing for 10 s: note whether the red LED goes out by
+      itself (a buffer resting a few mV above neutral releases the latch). If it does, the resume
+      must pause again about 0.5 s after the buffer drops below 40 %.
 - [ ] If the A1 unloads after the tangle: the latch holds through the pull back, idle and the
       reload, unless the buffer is lifted above 85 %. The motor stays silent meanwhile, also once
       the printer has deselected the slot and the buffer sits below 30 % (the red LED stays on).
+- [ ] After a tangle, printer idle, slot still selected: lift the buffer to the top and hold it
+      firmly until the red LED goes out (about 1 s), keep holding 2 s, let go. The filament must
+      not be unloaded. The motor may pull back while you hold it (the idle control, no purple LED);
+      only a purple-LED retract after letting go would be the auto-unload. A quick lift and release
+      from rest afterwards unloads it as usual.
+- [ ] Same with another slot (or none) selected: a quick lift of the latched slot's buffer does
+      nothing and the LED stays red; held at the top for 1 s the LED goes out, and letting go does
+      not unload.
 - [ ] Optional, hard to set up by hand: brake the spool just enough that the buffer stays above
       40 % while the motor strains at full force for more than 20 s of push (the anti-stall's 0.5 s
       rests pause the count, so with a gear that stalls or crawls, likely on the 0.2 mm nozzle, this

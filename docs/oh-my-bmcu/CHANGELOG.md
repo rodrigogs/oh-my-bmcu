@@ -42,6 +42,9 @@ follow the [hardware test plan](hardware-test-plan.md) before relying on an imag
   its failure latch when the printer loads the channel (`b1fe02c`).
 - Brake a jam-latched channel in before_on_use (`4a0a137`) and in the idle control once it is not
   the active channel (`89d9096`), so a resume or a channel change cannot push into the tangle.
+- Do not start the auto-unload from a buffer lift while a channel is tangle-latched, nor from the
+  lift that releases the latch (`c513a32`); drop an unreachable 0xF06F report from the silent 20 s
+  latch, no change in behaviour (`26d8841`).
 - Keep the DM Stage-2 progress (remaining length, aborts, time and stall limits) across switch dips,
   and count Stage-1 pushes and buffer-lift unloads against it: with the link up, a blocked gear
   gets at most about 6 s of 900 PWM per insertion (`000d153`).
@@ -75,12 +78,21 @@ follow the [hardware test plan](hardware-test-plan.md) before relying on an imag
 - Host unit tests with Unity (`pio test -e native`) and a check that verbatim firmware copies in
   tests still match `src/`; every copy is marked verbatim (checked) or adapted (listed), and any
   other marker fails (`70f4310`).
+- The calibration's safety tests use the firmware's own jam trip level, percent mapping and
+  recalibration rule, and checked copies of its rounding and load stops (`8b2c1f1`, `a467620`);
+  every other firmware copy in the host tests is now a real include, a checked copy or marked
+  adapted (`95de679`), and the copy check also fails on a test that redefines a `src/` constant or
+  macro, and on a verbatim copy that src/ has only inside a longer line (`8969b66`).
 - CI: the host tests with GCC and a rebuild of the V10.5 sources that must match the published
   binaries bit for bit. Only after both pass, both A1 images (the default and the #148 A/B image)
   are built with a size budget, their sha256 and an ELF check (strong trap and USART handlers, no
   soft-double routines), and uploaded as one artifact (`06c712e`).
-- `build_all_firmwares.sh` normalises `OUT_DIR`, so no spelling of `firmwares/` slips past the
-  `BUILD_ONLY_SOLO=1` guard (`65bbd90`).
+- `build_all_firmwares.sh` normalises `OUT_DIR` (`65bbd90`) and compares it by file identity, so no
+  spelling, letter case or symlinked path of `firmwares/` slips past the `BUILD_ONLY_SOLO=1` guard.
+  It refuses an `OUT_DIR` that is the checkout, `$HOME` or a directory above either, and one that
+  exists and is neither empty nor an earlier output of the script (a `manifest.txt` with its
+  header) unless `FORCE=1`, and ignores an exported `CDPATH` (`88b1467`). CI tests these guards
+  with a stub `pio` (`c7cfcb3`).
 - Host tests for the motion fixes above, including a simulation of the DM autoload with the
   firmware's own state machine and auto-unload code (`46b5895`, `8e6d597`, `ab5e978`, `31d5511`,
   `2ee7551`, `e12c340`).
