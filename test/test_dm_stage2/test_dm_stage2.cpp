@@ -4,8 +4,8 @@
 // Motion_control_init's DM reset and of the filament position enum (scripts/check_test_copies.py
 // checks that they still match src/), and drives them in 1 ms passes for one channel in the idle
 // control, with a simulated gear, filament tip, key and buffer. The auto-unload that a buffer-lift
-// gesture starts, and that motor_motion_run then runs instead of run(), is modelled with an adapted
-// copy of its code.
+// gesture starts, and that motor_motion_run then runs instead of run(), is the firmware's own
+// src/auto_unload.h, called as motor_motion_run calls it.
 //
 // Stage-2 pushes 120 mm at 900 PWM once the key reads 'both'. Key dips away from 'both' (one pass
 // to 'external only' or the other state, up to 99 ms, or longer ones that Stage-1 ends) must not
@@ -24,6 +24,7 @@
 #include <unity.h>
 
 #include "ams.h"
+#include "auto_unload.h"
 #include "dm_rearm.h"
 #include "dm_stage2.h"
 #include "motion_limits.h"
@@ -597,137 +598,34 @@ static void dm_init(void)
 // ---- end of the Motion_control.cpp copy ----
 }
 
-// ---- adapted from Motion_control.cpp: motor_motion_run's auto-unload, manual empty pull and drive choice ----
-// What motor_motion_run does for a channel after its DM pass and the status LED's baseline, with
-// main's inline auto-unload code (its arrays and constants): printer_idle stands for the channel's
-// MOTOR_CONTROL motion being the idle control. Instead of driving the motor it returns what drives
-// the channel on the pass: the auto-unload (a retract at AUTO_UNLOAD_PWM_PULL, then the Stage-2
-// guard's pass dm_s2_auto_unload_pass), the manual empty pull (a retract at 700 PWM) or, for
-// AU_RUN, run() with the DM block.
-static bool printer_idle;   // the printer commands idle: the channel runs its idle control
-
-static constexpr float    AUTO_UNLOAD_START_PCT      = 80.0f;
-static constexpr float    AUTO_UNLOAD_NEUTRAL_LO_PCT = 45.0f;
-static constexpr float    AUTO_UNLOAD_NEUTRAL_HI_PCT = 55.0f;
-static constexpr float    AUTO_UNLOAD_ABORT_PCT      = 35.0f;
-static constexpr uint64_t AUTO_UNLOAD_ARM_MS         = 1000ull;
-static constexpr uint64_t AUTO_UNLOAD_MAX_MS         = 15000ull;
-static constexpr uint64_t AUTO_UNLOAD_EMPTY_MS       = 1500ull;
+// ---- Motion_control.cpp at this commit: the auto-unload and manual pull strengths, verbatim ----
 static constexpr float    AUTO_UNLOAD_PWM_PULL       = 850.0f;
 static constexpr float    MANUAL_EMPTY_PULL_PWM      = 700.0f;
+// ---- end of the Motion_control.cpp copy ----
 
-static uint8_t  auto_unload_arm[4]          = {0,0,0,0};
-static uint8_t  auto_unload_active[4]       = {0,0,0,0};
-static uint8_t  auto_unload_blocked[4]      = {0,0,0,0};
-static uint64_t auto_unload_arm_t0_ms[4]    = {0ull,0ull,0ull,0ull};
-static uint64_t auto_unload_active_t0_ms[4] = {0ull,0ull,0ull,0ull};
-static uint64_t auto_unload_empty_t0_ms[4]  = {0ull,0ull,0ull,0ull};
+// ---- adapted from Motion_control.cpp: motor_motion_run's auto-unload call and drive choice ----
+// What motor_motion_run does for a channel after its DM pass and the status LED's baseline, with the
+// link up and the AS5600 read: auto_unload_pass() decides whether the auto-unload (a retract at
+// AUTO_UNLOAD_PWM_PULL, then the Stage-2 guard's pass dm_s2_auto_unload_pass) or the manual empty
+// pull (a retract at 700 PWM) drives the channel, or, for AU_DRIVE_NONE, run() with the DM block.
+// printer_idle stands for the channel's MOTOR_CONTROL motion being the idle control.
+static bool printer_idle;   // the printer commands idle: the channel runs its idle control
 
-enum au_drive_t { AU_RUN, AU_UNLOAD, AU_EMPTY_PULL };
+static auto_unload_t g_auto_unload[4];
 
 static au_drive_t au_pass(uint8_t i, uint64_t time_now)
 {
-        if (!filament_channel_inserted[i] ||
-            (!auto_unload_active[i] && !printer_idle))
-        {
-            auto_unload_arm[i]          = 0u;
-            auto_unload_active[i]       = 0u;
-            auto_unload_blocked[i]      = 0u;
-            auto_unload_arm_t0_ms[i]    = 0ull;
-            auto_unload_active_t0_ms[i] = 0ull;
-            auto_unload_empty_t0_ms[i]  = 0ull;
-        }
-        else
-        {
-            const float pct = MC_PULL_pct_f[i];
-            const uint8_t ks = MC_ONLINE_key_stu[i];
+        au_in_t au;
+        au.online    = true;
+        au.inserted  = filament_channel_inserted[i];
+        au.idle_ctrl = printer_idle;
+        au.pct       = MC_PULL_pct_f[i];
+        au.ks        = MC_ONLINE_key_stu[i];
+        au.now_ms    = time_now;
+        const au_drive_t drive = auto_unload_pass(&g_auto_unload[i], &au);
 
-            if (pct >= AUTO_UNLOAD_START_PCT)
-            {
-                auto_unload_blocked[i] = 0u;
-
-                if (!auto_unload_arm[i] && !auto_unload_active[i])
-                {
-                    auto_unload_arm[i] = 1u;
-                    auto_unload_arm_t0_ms[i] = time_now;
-                }
-            }
-
-            if (auto_unload_arm[i] && !auto_unload_active[i])
-            {
-                const uint64_t dt = time_now - auto_unload_arm_t0_ms[i];
-
-                if ((pct > AUTO_UNLOAD_NEUTRAL_LO_PCT) && (pct < AUTO_UNLOAD_NEUTRAL_HI_PCT))
-                {
-                    if (!auto_unload_blocked[i] && dt <= AUTO_UNLOAD_ARM_MS)
-                    {
-                        auto_unload_active[i]       = 1u;
-                        auto_unload_active_t0_ms[i] = time_now;
-                        auto_unload_empty_t0_ms[i]  = 0ull;
-                        auto_unload_blocked[i]      = 1u;
-                    }
-
-                    auto_unload_arm[i]       = 0u;
-                    auto_unload_arm_t0_ms[i] = 0ull;
-                }
-                else if (dt > AUTO_UNLOAD_ARM_MS)
-                {
-                    auto_unload_arm[i]       = 0u;
-                    auto_unload_arm_t0_ms[i] = 0ull;
-                }
-            }
-
-            if (auto_unload_active[i])
-            {
-                if (pct < AUTO_UNLOAD_ABORT_PCT)
-                {
-                    auto_unload_active[i]       = 0u;
-                    auto_unload_active_t0_ms[i] = 0ull;
-                    auto_unload_empty_t0_ms[i]  = 0ull;
-                    auto_unload_blocked[i]      = 1u;
-                }
-                else if (ks == 1u)
-                {
-                    auto_unload_empty_t0_ms[i] = 0ull;
-
-                    if ((time_now - auto_unload_active_t0_ms[i]) >= AUTO_UNLOAD_MAX_MS)
-                    {
-                        auto_unload_active[i]       = 0u;
-                        auto_unload_active_t0_ms[i] = 0ull;
-                        auto_unload_empty_t0_ms[i]  = 0ull;
-                        auto_unload_blocked[i]      = 1u;
-                    }
-                }
-                else
-                {
-                    if (auto_unload_empty_t0_ms[i] == 0ull)
-                    {
-                        auto_unload_empty_t0_ms[i] = time_now;
-                    }
-                    else if ((time_now - auto_unload_empty_t0_ms[i]) >= AUTO_UNLOAD_EMPTY_MS)
-                    {
-                        auto_unload_active[i]       = 0u;
-                        auto_unload_active_t0_ms[i] = 0ull;
-                        auto_unload_empty_t0_ms[i]  = 0ull;
-                        auto_unload_blocked[i]      = 1u;
-                    }
-                }
-            }
-        }
-
-        const bool manual_empty_pull =
-            filament_channel_inserted[i] &&
-            (MC_ONLINE_key_stu[i] == 0u) &&
-            (MC_PULL_pct_f[i] > 80.0f) &&
-            (auto_unload_active[i] == 0u);
-
-        if (auto_unload_active[i])
-        {
-            dm_s2_auto_unload_pass(i, printer_idle, time_now);
-            return AU_UNLOAD;
-        }
-        if (manual_empty_pull) return AU_EMPTY_PULL;
-        return AU_RUN;
+        if (drive == AU_DRIVE_UNLOAD) dm_s2_auto_unload_pass(i, printer_idle, time_now);
+        return drive;
 }
 
 // ---- Simulation ----
@@ -762,7 +660,7 @@ static int aborts;          // S2_PUSH -> S2_RETRACT or S2_FAIL_RETRACT (buffer 
 static uint8_t last_s2;     // last Stage-2 state run (S2_PUSH / S2_RETRACT), 0 = none yet
 static uint32_t push_ms;    // passes (1 ms each) on which the autoload pushed, whatever the gear did
 static uint32_t drive_ms;   // passes on which it drove the motor at all (push or retract)
-static uint64_t run_t0;     // first pass of the current Stage-2 run (0: none since the last 'none')
+static uint64_t run_t0;     // first pass of the current Stage-2 run (0: no run live)
 static uint64_t stage_t0;   // first pass of the run's current stage (S2_PUSH / S2_RETRACT)
 static uint32_t run_stages; // stages the run has had
 static uint64_t fail_t0;    // first pass with the fail latch set (0: none since the last 'none')
@@ -820,6 +718,7 @@ static void pass(void)
     as5600_count[0] = cnt0 + (uint32_t)(int32_t)llround(gear_mm / (double)ML_MM_PER_CNT);
 
     const uint8_t st0 = dm_auto_state[0];
+    const uint8_t try0 = dm_auto_try[0];
     dm_motor_motion_run(now);
     const uint8_t st_mid = dm_auto_state[0];
     const uint8_t run_stage = dm_s2_run[0].stage;
@@ -828,19 +727,19 @@ static void pass(void)
     // the channel sets its colour after it (the auto-unload's is purple).
     led_r = dm_fail_latch[0] ? 0xFFu : 0x00u;
     led_g = 0x00u;
-    const uint8_t au_was = auto_unload_active[0];
+    const uint8_t au_was = g_auto_unload[0].active;
     const au_drive_t au = au_pass(0u, now);
     float x = 0.0f;
-    if (au == AU_UNLOAD)
+    if (au == AU_DRIVE_UNLOAD)
     {
         led_r = 0xA0u;
         led_g = 0x2Du;
     }
-    else if (au == AU_RUN)
+    else if (au == AU_DRIVE_NONE)
     {
         x = printer_idle ? dm_run(0, now) : 0.0f;
     }
-    if (!au_was && auto_unload_active[0]) au_starts++;
+    if (!au_was && g_auto_unload[0].active) au_starts++;
     const uint8_t st1 = dm_auto_state[0];
 
     if ((st0 == DM_AUTO_S2_PUSH) && ((st1 == DM_AUTO_S2_RETRACT) || (st1 == DM_AUTO_S2_FAIL_RETRACT))) aborts++;
@@ -856,12 +755,15 @@ static void pass(void)
         run_stages = 1u;
         run_pushed0 = pushed_mm;
     }
-    else if (s2 && (st1 != last_s2))
+    else if (s2 && ((st1 != last_s2) || (dm_auto_try[0] > try0)))
     {
         // A resumed stage is the same one; any other change is a new stage (a buffer abort, the push
-        // after a retract, or the push an interrupted retract goes on with).
+        // after a retract, or the push an interrupted retract goes on with). A buffer abort raises
+        // dm_auto_try, so it counts even when the pass ends in the state it began in: an interrupted
+        // retract that goes on as a push which aborts on that pass is two stages (the push, which
+        // lasted no pass, and the new retract).
         stage_t0 = now;
-        run_stages++;
+        run_stages += (st1 == last_s2) ? 2u : 1u;
     }
     if (s2) last_s2 = st1;
     if ((fail_t0 == 0u) && dm_fail_latch[0]) fail_t0 = now;
@@ -876,17 +778,20 @@ static void pass(void)
         run_live = true;
     }
     if (dm_loaded[0] || dm_fail_latch[0] || (MC_ONLINE_key_stu[0] == KS_NONE)) run_live = false;
+    // The run record ends with the run (loaded, failed, key 'none' or a dm_rearm change leave no
+    // Stage-2 state and no run interrupted), so a later run in the same insertion gets its own.
+    if (!s2 && (st1 != DM_AUTO_S2_FAIL_RETRACT) && (dm_s2_run[0].stage == DM_S2_STAGE_NONE)) run_t0 = 0u;
 
     TEST_ASSERT_TRUE((x == 0.0f) || (x == 900.0f) || (x == -900.0f));
     if (x != 0.0f) drive_ms++;
     const double d = v_mm_s * 0.001;
-    if (au != AU_RUN)
+    if (au != AU_DRIVE_NONE)
     {
-        const double da = d * ((au == AU_UNLOAD) ? AUTO_UNLOAD_PWM_PULL : MANUAL_EMPTY_PULL_PWM) / 900.0;
+        const double da = d * ((au == AU_DRIVE_UNLOAD) ? AUTO_UNLOAD_PWM_PULL : MANUAL_EMPTY_PULL_PWM) / 900.0;
         au_ms++;
         tip_mm -= da;
         gear_mm += da;
-        if (au == AU_UNLOAD) au_last = now;
+        if (au == AU_DRIVE_UNLOAD) au_last = now;
     }
     else if (x < 0.0f)
     {
@@ -953,12 +858,7 @@ void setUp(void)
     au_ms = au_starts = 0u;
     au_last = 0u;
     led_r = led_g = 0u;
-    memset(auto_unload_arm, 0, sizeof(auto_unload_arm));
-    memset(auto_unload_active, 0, sizeof(auto_unload_active));
-    memset(auto_unload_blocked, 0, sizeof(auto_unload_blocked));
-    memset(auto_unload_arm_t0_ms, 0, sizeof(auto_unload_arm_t0_ms));
-    memset(auto_unload_active_t0_ms, 0, sizeof(auto_unload_active_t0_ms));
-    memset(auto_unload_empty_t0_ms, 0, sizeof(auto_unload_empty_t0_ms));
+    for (uint8_t ch = 0u; ch < 4u; ch++) auto_unload_reset(&g_auto_unload[ch]);
 
     for (uint8_t ch = 0; ch < 4u; ch++)
     {
@@ -1687,8 +1587,8 @@ static void check_blocked_failed(void)
 {
     TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
     // Red, unless an auto-unload still retracts: its purple wins while it does.
-    TEST_ASSERT_EQUAL_UINT8(auto_unload_active[0] ? 0xA0u : 0xFFu, led_r);
-    TEST_ASSERT_EQUAL_UINT8(auto_unload_active[0] ? 0x2Du : 0x00u, led_g);
+    TEST_ASSERT_EQUAL_UINT8(g_auto_unload[0].active ? 0xA0u : 0xFFu, led_r);
+    TEST_ASSERT_EQUAL_UINT8(g_auto_unload[0].active ? 0x2Du : 0x00u, led_g);
     TEST_ASSERT_TRUE(fail_t0 != 0u);
     TEST_ASSERT_TRUE(push_ms <= BLOCKED_PUSH_MAX_MS);
     TEST_ASSERT_TRUE(drive_ms <= BLOCKED_PUSH_MAX_MS);
@@ -1992,20 +1892,20 @@ static void test_an_auto_unload_counts_for_the_run_as_time_not_as_drive(void)
     TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S1_PUSH, dm_auto_state[0]);
     gesture(20u);
     blocked_pass();
-    TEST_ASSERT_EQUAL_UINT8(1u, auto_unload_active[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT32(1u, au_ms);
     const uint32_t stall0 = dm_s2_guard[0].stall_ms;
     const uint32_t run0 = dm_s2_guard[0].run_ms;
     TEST_ASSERT_EQUAL_UINT32(520u, stall0);
     while (au_ms < (uint32_t)AUTO_UNLOAD_EMPTY_MS) blocked_pass();
-    TEST_ASSERT_EQUAL_UINT8(1u, auto_unload_active[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
     TEST_ASSERT_EQUAL_UINT32(stall0, dm_s2_guard[0].stall_ms);
     TEST_ASSERT_EQUAL_UINT32(run0 + (uint32_t)AUTO_UNLOAD_EMPTY_MS - 1u, dm_s2_guard[0].run_ms);
     TEST_ASSERT_EQUAL_UINT32(520u, drive_ms - d0);
     // It ends on the next pass, on which run() runs again and Stage-1 pushes.
     blocked_pass();
-    TEST_ASSERT_EQUAL_UINT8(0u, auto_unload_active[0]);
+    TEST_ASSERT_EQUAL_UINT8(0u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT32(stall0 + 1u, dm_s2_guard[0].stall_ms);
     TEST_ASSERT_EQUAL_UINT32(521u, drive_ms - d0);
     for (int n = 0; (n < 5000) && !dm_fail_latch[0]; n++) blocked_pass();
@@ -2045,13 +1945,13 @@ static void test_auto_unload_gestures_and_key_blips_bound_a_blocked_gear(void)
     {
         if (dm_s2_guard[0].stall_ms < window) armed = true; // the window restarted
         window = dm_s2_guard[0].stall_ms;
-        if (armed && !auto_unload_active[0] && !dm_fail_latch[0] && (window >= 800u))
+        if (armed && !g_auto_unload[0].active && !dm_fail_latch[0] && (window >= 800u))
         {
             armed = false;
             gestures++;
             gesture(20u);
         }
-        else if (!auto_unload_active[0] && (now - blip >= 3000u))
+        else if (!g_auto_unload[0].active && (now - blip >= 3000u))
         {
             forced_ks = KS_BOTH;
             blocked_pass();
@@ -2094,14 +1994,14 @@ static void test_a_long_auto_unload_runs_the_stage_budget_out(void)
     const uint64_t abort_t = stage_t0;
     TEST_ASSERT_EQUAL_UINT32(309u, drive_ms);
     blocked_pass();
-    TEST_ASSERT_EQUAL_UINT8(1u, auto_unload_active[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     const uint64_t au_t0 = now - 1u;
-    while (!dm_fail_latch[0] && auto_unload_active[0]) blocked_pass();
+    while (!dm_fail_latch[0] && g_auto_unload[0].active) blocked_pass();
     TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
-    TEST_ASSERT_EQUAL_UINT8(1u, auto_unload_active[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT64(abort_t + STAGE_FAIL_MAX_MS - 1u, fail_t0);
     check_blocked_failed();
-    while (auto_unload_active[0]) blocked_pass();
+    while (g_auto_unload[0].active) blocked_pass();
     TEST_ASSERT_EQUAL_UINT64(au_t0 + AUTO_UNLOAD_MAX_MS, au_last + 1u);
     TEST_ASSERT_EQUAL_UINT32((uint32_t)AUTO_UNLOAD_MAX_MS, au_ms);
     check_blocked_failed();
@@ -2127,9 +2027,9 @@ static void test_an_auto_unload_while_the_printer_has_the_channel_is_not_counted
     run_for(10u);
     forced_pct = 50.0f;
     pass();
-    TEST_ASSERT_EQUAL_UINT8(1u, auto_unload_active[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     printer_idle = false;
-    while (auto_unload_active[0]) pass();
+    while (g_auto_unload[0].active) pass();
     TEST_ASSERT_EQUAL_UINT32((uint32_t)AUTO_UNLOAD_MAX_MS, au_ms);
     TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
     printer_idle = true;
@@ -2152,13 +2052,13 @@ static void test_an_auto_unload_during_the_autoload_unloads_and_the_next_inserti
     TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S2_RETRACT, dm_auto_state[0]);
     forced_pct = 50.0f;
     pass();
-    TEST_ASSERT_EQUAL_UINT8(1u, auto_unload_active[0]);
-    for (int n = 0; (n < 20000) && auto_unload_active[0]; n++)
+    TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
+    for (int n = 0; (n < 20000) && g_auto_unload[0].active; n++)
     {
         pass();
         TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
     }
-    TEST_ASSERT_EQUAL_UINT8(0u, auto_unload_active[0]);
+    TEST_ASSERT_EQUAL_UINT8(0u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT8(KS_NONE, MC_ONLINE_key_stu[0]);
     TEST_ASSERT_EQUAL_UINT8(0u, dm_loaded[0]);
     TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
@@ -2220,7 +2120,7 @@ static void random_gesture_sweep(uint32_t seed0, uint32_t trials, uint32_t none_
         const uint64_t t_end = now;
         for (uint32_t n = 0u; (n < 13000u + (uint32_t)AUTO_UNLOAD_MAX_MS) && !dm_fail_latch[0]; n++) blocked_pass();
         TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
-        TEST_ASSERT_EQUAL_UINT8(auto_unload_active[0] ? 0xA0u : 0xFFu, led_r);
+        TEST_ASSERT_EQUAL_UINT8(g_auto_unload[0].active ? 0xA0u : 0xFFu, led_r);
         const uint64_t from = ((au_last + 1u) > t_end) ? (au_last + 1u) : t_end;
         TEST_ASSERT_TRUE((fail_t0 < from) || (fail_t0 - from < 13000u));
         au_total += au_starts;
@@ -2267,14 +2167,14 @@ static void test_gestures_and_key_dips_do_not_take_a_run_past_120mm(void)
             }
             else if (r < 25u) forced_pct = 85.0f;
             else if ((r < 60u) && (forced_pct > 80.0f)) forced_pct = 50.0f;
-            else if ((r < 62u) && auto_unload_active[0]) forced_pct = 30.0f;
+            else if ((r < 62u) && g_auto_unload[0].active) forced_pct = 30.0f;
             else if (r < 70u) forced_pct = -1.0f;
             const bool loaded0 = dm_loaded[0] != 0u;
             pass();
             if (!loaded0 && dm_loaded[0]) loaded++;
             if (dip > 0u && --dip == 0u) forced_ks = -1;
             TEST_ASSERT_TRUE(run_fwd_max <= S2_LEN_MM + v_mm_s * 0.001 + 0.01);
-            if ((key_from_tip() == KS_NONE) && !auto_unload_active[0]) tip_mm = -10.0;
+            if ((key_from_tip() == KS_NONE) && !g_auto_unload[0].active) tip_mm = -10.0;
         }
         starts += au_starts;
     }
