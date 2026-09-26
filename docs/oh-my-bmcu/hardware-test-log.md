@@ -27,11 +27,19 @@ has not been run yet.
 | 2 | Slot 1 set to PLA white from OrcaStudio | pass: the printer reports slot 1 as PLA, white (`GFL99`, 190-240 °C), read back from the BMCU |
 | 2 | The slot keeps its type and colour across a printer power cycle | pending |
 | 2 | Seven filament changes, then a power cycle (journal page erase) | pending |
-| 3 | Test print, unload at the end | pending |
+| 3 | Test print (the 5 h 27 min `两侧` project, 485 layers, PLA from slot 1) | running: the BMCU loaded slot 1 for every attempt (the printer reported it in the extruder within about 30 s), and the fifth attempt, started 21:26, is printing normally (layer 3 of 485 at 21:42, no print error) |
+| 3 | Unloads and reloads between attempts | pass: five unload/reload cycles of slot 1 between 20:41 and 21:26, each confirmed by the printer (filament out of, then back in, the extruder) |
+| 3 | Unload at the end of the print, about 95 mm, no red channel LED | pending |
 | 4, 5, 7 | Tangle, unload limits, DM autoload | pending |
 | 8 | Normal boots and a whole print with no reset (no magenta) | no magenta so far; the print is pending |
 
 Notes:
+
+- The first four print attempts were cancelled (printer error `0300-400C`, task cancelled) because
+  of a clogged nozzle, not the BMCU: the user cleared it at 300 °C between attempts. The modified
+  OrcaStudio restarted the first cancelled attempt by itself 5 s later. One AMS HMS,
+  `0700-4500-0002-0001`, showed for about 6 s at 20:48 during that work and cleared by itself.
+- The print was started with parts from an earlier print still on the plate, at the user's choice.
 
 - After the flash erased the NVM, slot 1 read as "PETG, white", the firmware's default, until it
   was set again. This is expected: flashing erases the whole NVM sector.
