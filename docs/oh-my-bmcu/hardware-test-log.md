@@ -32,14 +32,14 @@ has not been run yet.
 | 3 | A whole print from slot 1: `SpeedBoatRace_Bambu Pla Basic` (Benchy), 192 layers, 02:07-02:25 on 2026-09-26 | pass: every layer printed, `FINISH` with no print error and no new HMS |
 | 3 | Unload at the end of that print | pass as far as the printer shows it: unload requested at 02:24 (`tray_tar` 255), filament out of the extruder (`tray_now` 255) within a minute, no error; the length (about 95 mm) and the channel LED (no red blink) were not observed |
 | 4, 5, 7 | Tangle, unload limits, DM autoload | pending |
-| 8 | Normal boots and a whole print with no reset (no magenta) | no reset seen: the printer kept AMS A through the Benchy (polled every minute) and the user reported no magenta flash |
+| 8 | Normal boots and a whole print with no reset (no magenta) | no reset seen: the printer kept AMS A through the Benchy (polled every minute); the user saw no magenta flash from the flash to the calibration, and the SYS LED was not watched during the print |
 
 Notes:
 
 - The first three print attempts were cancelled (printer error `0300-400C`, task cancelled, at
   20:33, 20:41 and 20:56) because of a clogged nozzle, not the BMCU: the user cleared it at 300 °C
   between attempts. The modified OrcaStudio restarted the first cancelled attempt by itself 5 s
-  later. One AMS HMS, `0700-4500-0002-0001`, showed for about 6 s at 20:48 during that work and
+  later. One HMS, `0700-4500-0002-0001`, showed for about 6 s at 20:48 during that work and
   cleared by itself.
 - The print was started with parts from an earlier print still on the plate, at the user's choice.
 - From 22:21 the user cancelled several more attempts early (again `0300-400C`), at layer 37 and
