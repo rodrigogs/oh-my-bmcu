@@ -41,6 +41,10 @@ Notes:
   later. One AMS HMS, `0700-4500-0002-0001`, showed for about 6 s at 20:48 during that work and
   cleared by itself.
 - The print was started with parts from an earlier print still on the plate, at the user's choice.
+- From 22:21 the user cancelled several more attempts early (again `0300-400C`), at layer 37 and
+  then at layers 1 to 4, and the print was started again each time; one restart at 23:56 met the
+  known `0500-409D` block, which OrcaStudio got past by starting again. Slot 1 stayed loaded
+  throughout, with no BMCU error.
 - After the flash erased the NVM, slot 1 read as "PETG, white", the firmware's default, until it
   was set again. This is expected: flashing erases the whole NVM sector.
 - The printer got a new DHCP address after the power cycle; tools that remember the old one see it
