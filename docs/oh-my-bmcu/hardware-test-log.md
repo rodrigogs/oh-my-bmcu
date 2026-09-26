@@ -34,6 +34,10 @@ has not been run yet.
 | 4, 5, 7 | Tangle, unload limits, DM autoload | pending |
 | 8 | Normal boots and a whole print with no reset (no magenta) | no reset seen: the printer kept AMS A through the Benchy (polled every minute); the user saw no magenta flash from the flash to the calibration, and the SYS LED was not watched during the print |
 
+User report (2026-09-26): after the Benchy and the power cycle, the BMCU works well in normal
+use. The steps still marked pending are the fault cases (tangle, unload limits, DM autoload
+corner cases), the direction check, the journal page erase and the boot LEDs.
+
 Notes:
 
 - The first three print attempts were cancelled (printer error `0300-400C`, task cancelled, at
