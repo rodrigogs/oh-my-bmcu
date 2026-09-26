@@ -25,7 +25,7 @@ has not been run yet.
 | 1 | SYS LED red until the first heartbeat, then white; no red flash at boot | pending |
 | 1 | Direction check (buffer LED blue at the low end, red when lifted) | pending |
 | 2 | Slot 1 set to PLA white from OrcaStudio | pass: the printer reports slot 1 as PLA, white (`GFL99`, 190-240 °C), read back from the BMCU |
-| 2 | The slot keeps its type and colour across a printer power cycle | pending |
+| 2 | The slot keeps its type and colour across a printer power cycle | pass: after the printer was switched off and on (2026-09-26 02:37) slot 1 still read PLA, white (`GFL99`, 190-240 °C), with AMS A and the filament present; this was the original bug (the slot fell back to "PETG, white") |
 | 2 | Seven filament changes, then a power cycle (journal page erase) | pending |
 | 3 | Test print (the 5 h 27 min `两侧` project, 485 layers, PLA from slot 1) | running: the BMCU loaded slot 1 at the first attempt (31 s from the printer's request to the filament in the extruder; later attempts started with it loaded), and the fourth attempt, started 21:21, is printing normally (layer 3 of 485 at 21:42, no print error) |
 | 3 | Unloads and reloads between attempts | pass: four unload/reload cycles of slot 1 between 20:42 and 21:20, two of them through the external-spool position (tray 254), each confirmed by the printer (filament out of, then back in, the extruder) |
