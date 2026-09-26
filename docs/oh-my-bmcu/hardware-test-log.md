@@ -57,3 +57,8 @@ Notes:
   was set again. This is expected: flashing erases the whole NVM sector.
 - The printer got a new DHCP address after the power cycle; tools that remember the old one see it
   as offline.
+- Over the printer's LAN MQTT the BMCU's state can be read (slots, loaded slot, AMS HMS), but
+  commands are refused on this firmware: an unsigned `ams_filament_setting` from a script was
+  rejected with HMS `0500-0500-0001-0007` ("MQTT Command verification failed") and changed
+  nothing. Slot changes, loads and unloads go through OrcaStudio (signed by the network plugin) or
+  the printer screen.
