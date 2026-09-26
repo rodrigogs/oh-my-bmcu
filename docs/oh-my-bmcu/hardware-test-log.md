@@ -29,9 +29,10 @@ has not been run yet.
 | 2 | Seven filament changes, then a power cycle (journal page erase) | pending |
 | 3 | Test print (the 5 h 27 min `两侧` project, 485 layers, PLA from slot 1) | running: the BMCU loaded slot 1 at the first attempt (31 s from the printer's request to the filament in the extruder; later attempts started with it loaded), and the fourth attempt, started 21:21, is printing normally (layer 3 of 485 at 21:42, no print error) |
 | 3 | Unloads and reloads between attempts | pass: four unload/reload cycles of slot 1 between 20:42 and 21:20, two of them through the external-spool position (tray 254), each confirmed by the printer (filament out of, then back in, the extruder) |
-| 3 | Unload at the end of the print, about 95 mm, no red channel LED | pending |
+| 3 | A whole print from slot 1: `SpeedBoatRace_Bambu Pla Basic` (Benchy), 192 layers, 02:07-02:25 on 2026-09-26 | pass: every layer printed, `FINISH` with no print error and no new HMS |
+| 3 | Unload at the end of that print | pass as far as the printer shows it: unload requested at 02:24 (`tray_tar` 255), filament out of the extruder (`tray_now` 255) within a minute, no error; the length (about 95 mm) and the channel LED (no red blink) were not observed |
 | 4, 5, 7 | Tangle, unload limits, DM autoload | pending |
-| 8 | Normal boots and a whole print with no reset (no magenta) | no magenta so far; the print is pending |
+| 8 | Normal boots and a whole print with no reset (no magenta) | no reset seen: the printer kept AMS A through the Benchy (polled every minute) and the user reported no magenta flash |
 
 Notes:
 
@@ -45,6 +46,13 @@ Notes:
   then at layers 1 to 4, and the print was started again each time; one restart at 23:56 met the
   known `0500-409D` block, which OrcaStudio got past by starting again. Slot 1 stayed loaded
   throughout, with no BMCU error.
+- At 01:04 an unload of slot 1 ended with printer error `0700-8003` ("Failed to pull out the
+  filament from the extruder. This might be caused by clogged extruder or filament broken inside
+  the extruder.") and HMS `0700-2000-0002-0004` ("AMS A Slot 1 filament may be broken in the tool
+  head."): the same clog, with filament stuck in the tool head. After the user cleared it, slot 1
+  loaded again and the Benchy printed and unloaded normally.
+- The `0700-4500-0002-0001` HMS seen at 20:48 is the printer's filament cutter sensor ("The
+  filament cutter sensor is malfunctioning"), not the BMCU.
 - After the flash erased the NVM, slot 1 read as "PETG, white", the firmware's default, until it
   was set again. This is expected: flashing erases the whole NVM sector.
 - The printer got a new DHCP address after the power cycle; tools that remember the old one see it
