@@ -31,8 +31,13 @@
 #define NVM_FIL_SETTLE_TICKS (500u * NVM_TICKS_PER_MS)
 #define NVM_FIL_MAX_DELAY_TICKS (5000u * NVM_TICKS_PER_MS)
 
-// A write that failed is retried after this long, not in every quiet pass.
+// A write that failed is retried after this long, not in every quiet pass, and later failures
+// after NVM_RETRY_SLOW_TICKS. After NVM_RETRY_MAX_FAILS failures in a row the job waits for the
+// next change: a failed write can leave its slot programmed, so every attempt may erase a page
+// (Flash_saves.cpp), and a page lasts about 10k erases.
 #define NVM_RETRY_TICKS (500u * NVM_TICKS_PER_MS)
+#define NVM_RETRY_SLOW_TICKS (5000u * NVM_TICKS_PER_MS)
+#define NVM_RETRY_MAX_FAILS 3u
 
 // nvm_pick_job() result: a filament slot 0..3, the loaded-channel state, or nothing.
 #define NVM_JOB_NONE (-1)
@@ -42,10 +47,11 @@
 // they survive the 2^32 SysTick wrap.
 struct nvm_job
 {
-    uint8_t pending; // RAM changed since the last successful write
-    uint8_t failed;  // the last write failed: wait NVM_RETRY_TICKS
-    uint32_t first;  // tick of the first change since the last successful write
-    uint32_t last;   // tick of the latest change or failed write
+    uint8_t pending;   // RAM changed since the last successful write
+    uint8_t fails;     // failed writes since the last change or success
+    uint16_t give_ups; // changes left unsaved after NVM_RETRY_MAX_FAILS (never cleared, saturates)
+    uint32_t first;    // tick of the first change since the last successful or failed write
+    uint32_t last;     // tick of the latest change or failed write
 };
 
 // How long the due job has waited for a quiet window.
@@ -89,16 +95,19 @@ static inline nvm_bus nvm_bus_from_samples(bool rx_idle, bool tx_idle, uint32_t 
 
 static inline void nvm_job_changed(nvm_job *j, uint32_t now)
 {
-    if (!j->pending) j->first = now;
+    // New data: scheduled by the normal rule, not held back by a retry delay or a give-up, and
+    // after a failed write debounced from this change, not from the one before the failure.
+    if (!j->pending || j->fails) j->first = now;
     j->pending = 1u;
-    j->failed = 0u; // new data: scheduled by the normal rule, not held back by a retry delay
+    j->fails = 0u;
     j->last = now;
 }
 
 static inline bool nvm_job_due(const nvm_job *j, uint32_t now, uint32_t settle, uint32_t max_delay)
 {
-    if (!j->pending) return false;
-    if (j->failed) return (uint32_t)(now - j->last) >= NVM_RETRY_TICKS;
+    if (!j->pending || j->fails >= NVM_RETRY_MAX_FAILS) return false;
+    if (j->fails)
+        return (uint32_t)(now - j->last) >= (j->fails == 1u ? NVM_RETRY_TICKS : NVM_RETRY_SLOW_TICKS);
     return (uint32_t)(now - j->last) >= settle || (uint32_t)(now - j->first) >= max_delay;
 }
 
@@ -107,11 +116,12 @@ static inline void nvm_job_result(nvm_job *j, bool ok, uint32_t now)
     if (ok)
     {
         j->pending = 0u;
-        j->failed = 0u;
+        j->fails = 0u;
         return;
     }
-    j->failed = 1u;
+    j->fails++;
     j->last = now;
+    if (j->fails == NVM_RETRY_MAX_FAILS && j->give_ups != 0xFFFFu) j->give_ups++;
 }
 
 static inline bool nvm_bus_window(const nvm_bus *b, bool waited_long)
