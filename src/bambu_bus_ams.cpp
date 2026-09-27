@@ -988,10 +988,18 @@ unsigned char long_packge_version_serial_number[] = {15,
                                                      0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00,
                                                      0x00};
 
+// The chip's 96-bit unique ID. Host builds (env:native) hash a test's 12 bytes instead.
+#if defined(__riscv)
+#define BAMBUBUS_UID_BASE ((volatile const uint8_t *)0x1FFFF7E8)
+#else
+extern const uint8_t bambubus_host_uid[12];
+#define BAMBUBUS_UID_BASE ((volatile const uint8_t *)bambubus_host_uid)
+#endif
+
 static void bambubus_build_static_serial(void)
 {
     static const char hex[] = "0123456789ABCDEF";
-    volatile const uint8_t *uid = (volatile const uint8_t *)0x1FFFF7E8;
+    volatile const uint8_t *uid = BAMBUBUS_UID_BASE;
     const uint8_t ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
 
     uint64_t v = 1469598103934665603ull;

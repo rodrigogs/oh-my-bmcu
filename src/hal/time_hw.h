@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+#if defined(__riscv)
 #define TIME_HW_STK_BASE (0xE000F000u)
 
 #define STK_CTLR  (*(volatile uint32_t *)(TIME_HW_STK_BASE + 0x00u))
@@ -13,6 +14,11 @@ extern "C" {
 #define STK_CNTH  (*(volatile uint32_t *)(TIME_HW_STK_BASE + 0x0Cu))
 #define STK_CMPLR (*(volatile uint32_t *)(TIME_HW_STK_BASE + 0x10u))
 #define STK_CMPHR (*(volatile uint32_t *)(TIME_HW_STK_BASE + 0x14u))
+#else
+// Host builds (env:native): the SysTick counter is a variable the test defines and advances.
+extern volatile uint32_t time_hw_host_stk_cntl;
+#define STK_CNTL  time_hw_host_stk_cntl
+#endif
 
 void     time_hw_init(void);
 uint32_t time_hw_ticks_per_us(void);

@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 
+#if defined(__riscv)
 static inline __attribute__((always_inline)) uint32_t irq_save_wch(void)
 {
     uint32_t s;
@@ -15,3 +16,8 @@ static inline __attribute__((always_inline)) void irq_restore_wch(uint32_t s88)
     __asm volatile("csrc 0x800, %0" :: "r"(m)   : "memory");
     __asm volatile("csrs 0x800, %0" :: "r"(s88) : "memory");
 }
+#else
+// Host builds (env:native): no interrupts to mask.
+static inline uint32_t irq_save_wch(void) { return 0u; }
+static inline void irq_restore_wch(uint32_t s88) { (void)s88; }
+#endif
