@@ -123,6 +123,8 @@ jobs:
 
       - run: pio test -e native
 
+      - run: pio test -e native_asan
+
   reproduce-upstream:
     name: Reproduce upstream V10.5 SOLO images
     runs-on: ubuntu-24.04
