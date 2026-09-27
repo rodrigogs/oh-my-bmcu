@@ -3,6 +3,8 @@
 // does not move at high PWM, so the motor stops and motor_motion_switch serves the printer again.
 // Normal 95 mm SOLO unloads, long retracts and a redetect ended by re-inserted filament must end
 // exactly when they did before. A pull stopped by a limit must leave the unload fault (red LED).
+// The send (load) stops on a stalled gear or after 10 m as before, with no time budget, and a
+// normal A1 load is never stopped.
 //
 // Each test drives the decision functions in 1 ms main-loop passes, the way Motion_control.cpp
 // calls them. The simulated gear gives both of the firmware's position sources: the AS5600 count
@@ -615,6 +617,221 @@ static void test_dm_s2_countdown_is_120mm_at_any_odometer(void)
     TEST_ASSERT_EQUAL_FLOAT(5000.0f, s_meters);
 }
 
+// ---- Send (filament_motion_send) ----
+
+// ---- adapted from Motion_control.cpp: the send's speed PID against a blocked gear, simplified ----
+// The send's first stage against a gear that does not turn, in 1 ms passes: the speed command
+// (10 mm/s rising to 60 mm/s over the 300 ms soft start), its speed PID (P 2, I 20, the integral
+// clamped at 1000) with the gear at 0 mm/s, the 500 PWM floor (pwm_zero), the 1000 PWM clamp and the
+// 18000 PWM/s ramp. Returns the PWM of pass t (t >= 1).
+typedef struct
+{
+    float i_save;
+    float x;
+} send_pid_model;
+
+static float send_pwm_blocked(send_pid_model *m, uint32_t t_ms)
+{
+    const float v_set = (t_ms < 300u) ? (10.0f + 50.0f * (float)t_ms / 300.0f) : 60.0f;
+    m->i_save += 20.0f * v_set * 0.001f;
+    if (m->i_save > 1000.0f) m->i_save = 1000.0f;
+    float x = 2.0f * v_set + m->i_save;
+    if (x < 500.0f) x = 500.0f;
+    if (x > 1000.0f) x = 1000.0f;
+    if (x > m->x + 18.0f) x = m->x + 18.0f;
+    m->x = x;
+    return x;
+}
+
+static ml_result check_send(uint32_t pos_cnt, float pwm)
+{
+    return motion_guard_check(&g, now, pos_cnt, pwm);
+}
+
+// ---- adapted from Motion_control.cpp: the send's end before its guard ----
+// What the firmware did before: the send stopped (send_len_abort) only after SEND_MAX_M (10 m) of
+// gear travel.
+static bool old_send_done(uint32_t pos_cnt, uint32_t start_cnt)
+{
+    return ml_travel_m(pos_cnt, start_cnt) >= 10.0f;
+}
+
+// Sends at speed_mm_s and pwm for up to passes 1 ms passes, checking every pass; returns the pass
+// the guard ended the send in (s_end: why), 0 if it did not. The guard must have been started.
+static uint32_t run_send(float speed_mm_s, float pwm, uint32_t passes)
+{
+    for (uint32_t t = 1; t <= passes; t++)
+    {
+        now++;
+        gear_step(speed_mm_s);
+        const ml_result r = check_send(s_cnt, pwm);
+        if (r != ML_OK)
+        {
+            s_end = r;
+            return t;
+        }
+    }
+    s_end = ML_OK;
+    return 0u;
+}
+
+static void test_send_cap_is_10m_of_gear_travel_as_before(void)
+{
+    // The gear spins at 120 mm/s and never gets the buffer to its stop (it slips on the filament, or
+    // the filament goes nowhere): the send stops after 10 m, in the same pass as before, and never
+    // on time, although 10 m take 83 s. From near the count wrap. (The count cap is one count short
+    // of where the float comparison tripped, 1738397: a pass would have to land on 1738396.)
+    TEST_ASSERT_EQUAL_FLOAT(10.0f, ML_SEND_MAX_M);
+    gear_reset(FEED_CNT0, 1.2345f);
+    const uint32_t start_cnt = s_cnt;
+    ml_send_start(&g, now, s_cnt);
+    uint32_t t_done = 0u;
+    for (uint32_t t = 1; t <= 100000u && !t_done; t++)
+    {
+        now++;
+        gear_step(120.0f);
+        const ml_result r = check_send(s_cnt, 1000.0f);
+        TEST_ASSERT_EQUAL(old_send_done(s_cnt, start_cnt), r != ML_OK);
+        if (r != ML_OK)
+        {
+            TEST_ASSERT_EQUAL(ML_DIST, r);
+            t_done = t;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(83334u, t_done);  // 10 m / 120 mm/s = 83333.3 ms
+    // The first pass at or past 1738396 counts (10 m); 120 mm/s is 20.9 counts a pass.
+    TEST_ASSERT_EQUAL_UINT32(1738396u, ml_m_to_cnt(ML_SEND_MAX_M));
+    TEST_ASSERT_EQUAL_UINT32(1738411u, ml_cnt_dist(s_cnt, FEED_CNT0));
+}
+
+static void test_send_has_no_time_budget(void)
+{
+    // The printer decides how long a send lasts. A slow feed (5 mm/s at 1000 PWM: 1 mm every 200 ms,
+    // no stall) goes on for 30 min (9 m); the pull back's rule would have ended it after 835 s.
+    ml_send_start(&g, now, s_cnt);
+    TEST_ASSERT_EQUAL_UINT32(0u, run_send(5.0f, 1000.0f, 1800000u));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 9.0f, ml_travel_m(s_cnt, PULL_CNT0));
+
+    // Held for 2 h with the buffer at its stop (no drive, the gear still), in 100 ms passes.
+    setUp();
+    ml_send_start(&g, now, s_cnt);
+    for (uint32_t t = 1; t <= 72000u; t++)
+    {
+        now += 100u;
+        TEST_ASSERT_EQUAL(ML_OK, check_send(s_cnt, 0.0f));
+    }
+}
+
+static void test_blocked_send_stops_1s_after_reaching_800_pwm(void)
+{
+    // A tangle on the spool: the gear does not turn from the start (+-1 count of jitter), the buffer
+    // never rises, the PID winds up to 1000 PWM. Before, that went on as long as the printer sent
+    // send_out; now the send stops ML_STALL_MS after the PWM reached 800.
+    const uint32_t start = s_cnt;
+    ml_send_start(&g, now, start);
+
+    send_pid_model m = {0.0f, 0.0f};
+    uint32_t t800 = 0u, t1000 = 0u, t_done = 0u;
+    float pwm_prev = 0.0f;  // PWM applied since the previous pass (x_prev)
+    for (uint32_t t = 1; t <= 60000u && !t_done; t++)
+    {
+        now++;
+        const uint32_t p = ((t & 1u) != 0u) ? (start + 1u) : (start - 1u);
+        const ml_result r = check_send(p, pwm_prev);
+        TEST_ASSERT_FALSE(old_send_done(p, start));  // before: never
+        if (r != ML_OK)
+        {
+            TEST_ASSERT_EQUAL(ML_STALL, r);
+            t_done = t;
+        }
+        pwm_prev = send_pwm_blocked(&m, t);
+        if (!t800 && pwm_prev >= ML_STALL_PWM) t800 = t;
+        if (!t1000 && pwm_prev >= 1000.0f) t1000 = t;
+    }
+    TEST_ASSERT_EQUAL_UINT32(692u, t800);   // 500 PWM floor until 442 ms, then +1.2 PWM a pass
+    TEST_ASSERT_EQUAL_UINT32(t800 + ML_STALL_MS, t_done);
+    TEST_ASSERT_EQUAL_UINT32(858u, t1000);
+
+    // The printer's next command after the stop, or the next send_out after it, starts a new guard:
+    // the same 1.7 s against the same tangle, and a full load once the spool is free.
+    ml_send_start(&g, now, s_cnt);
+    TEST_ASSERT_EQUAL_UINT32(ML_STALL_MS, run_move_then_block(check_send, 0.0f, 0u, 1000.0f));
+    TEST_ASSERT_EQUAL(ML_STALL, s_end);
+    ml_send_start(&g, now, s_cnt);
+    TEST_ASSERT_EQUAL_UINT32(0u, run_send(60.0f, 1000.0f, 20000u));
+}
+
+static void test_send_that_feeds_then_blocks_stops_1s_after_the_block(void)
+{
+    // 40.8 mm at 60 mm/s, then the spool catches and the gear stops at 1000 PWM.
+    gear_reset(FEED_CNT0, 1.2345f);
+    ml_send_start(&g, now, s_cnt);
+    TEST_ASSERT_EQUAL_UINT32(680u + ML_STALL_MS, run_move_then_block(check_send, 60.0f, 680u, 1000.0f));
+    TEST_ASSERT_EQUAL(ML_STALL, s_end);
+
+    // The same stall at 0.8 mm/s, and none at 1.5 mm/s (1 mm every 667 ms), as for the pull back.
+    setUp();
+    ml_send_start(&g, now, s_cnt);
+    TEST_ASSERT_EQUAL_UINT32(ML_STALL_MS, run_send(0.8f, 1000.0f, 60000u));
+    TEST_ASSERT_EQUAL(ML_STALL, s_end);
+    setUp();
+    ml_send_start(&g, now, s_cnt);
+    TEST_ASSERT_EQUAL_UINT32(0u, run_send(1.5f, 1000.0f, 60000u));
+}
+
+static void test_normal_a1_load_is_not_limited(void)
+{
+    // A whole load on the A1, with the guard checked on every pass as the firmware does it:
+    gear_reset(FEED_CNT0, 1.2345f);
+    ml_send_start(&g, now, s_cnt);
+
+    // the 300 ms soft start (10 to 60 mm/s) and 20 s at 60 mm/s through the tubes (1.2 m, more than
+    // the A1's path), at 1000 PWM (heavy drag, the worst case);
+    for (uint32_t t = 1; t <= 300u; t++)
+    {
+        now++;
+        gear_step(10.0f + 50.0f * (float)t / 300.0f);
+        TEST_ASSERT_EQUAL(ML_OK, check_send(s_cnt, 1000.0f));
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, run_send(60.0f, 1000.0f, 20000u));
+
+    // the tip at the extruder: the gear slows from 60 to 2 mm/s over 600 ms while it pushes the
+    // buffer to 85 % (18.6 mm), still at 1000 PWM;
+    for (uint32_t t = 1; t <= 600u; t++)
+    {
+        now++;
+        gear_step(60.0f - 58.0f * (float)t / 600.0f);
+        TEST_ASSERT_EQUAL(ML_OK, check_send(s_cnt, 1000.0f));
+    }
+
+    // hold_load then brings the buffer to 90 %. A buffer whose end is at 85 % never gets there: its
+    // 5-point error keeps the on_use anti-stall going for 60 s with the gear still: 732 PWM for
+    // 150 ms, the 850 PWM kick up to 0.8 s, then a 500 ms rest, over and over. With +-1 count of
+    // jitter the speed reads 5.75 mm/s on every other pass, so the anti-stall never counts and the
+    // hold stays at 732 PWM, under ML_STALL_PWM, for another 60 s;
+    const uint32_t hold_cnt = s_cnt;
+    for (uint32_t t = 0; t < 60000u; t++)
+    {
+        now++;
+        const uint32_t c = t % 1300u;
+        const float pwm = (c < 150u) ? 732.0f : ((c < 800u) ? 850.0f : 0.0f);
+        TEST_ASSERT_EQUAL(ML_OK, check_send(hold_cnt, pwm));
+    }
+    for (uint32_t t = 0; t < 60000u; t++)
+    {
+        now++;
+        const uint32_t p = ((t & 1u) != 0u) ? (hold_cnt + 1u) : hold_cnt;
+        TEST_ASSERT_EQUAL(ML_OK, check_send(p, 732.0f));
+    }
+
+    // and a buffer at its 95 % hard stop is braked (0 PWM) for another 60 s, still in send_out.
+    for (uint32_t t = 0; t < 60000u; t++)
+    {
+        now++;
+        TEST_ASSERT_EQUAL(ML_OK, check_send(hold_cnt, 0.0f));
+    }
+}
+
 // ---- Unfinished unload fault (status LED) ----
 
 static void test_only_a_limit_is_an_unload_fault(void)
@@ -695,6 +912,11 @@ int main(void)
     RUN_TEST(test_dm_s2_push_that_moves_then_blocks_stops_1s_after_the_block);
     RUN_TEST(test_dm_s2_retract_that_never_relaxes_the_buffer_stops_at_budget);
     RUN_TEST(test_dm_s2_countdown_is_120mm_at_any_odometer);
+    RUN_TEST(test_send_cap_is_10m_of_gear_travel_as_before);
+    RUN_TEST(test_send_has_no_time_budget);
+    RUN_TEST(test_blocked_send_stops_1s_after_reaching_800_pwm);
+    RUN_TEST(test_send_that_feeds_then_blocks_stops_1s_after_the_block);
+    RUN_TEST(test_normal_a1_load_is_not_limited);
     RUN_TEST(test_only_a_limit_is_an_unload_fault);
     RUN_TEST(test_unload_fault_stays_until_filament_out_or_next_move);
     RUN_TEST(test_stalled_pull_sets_the_fault_and_a_good_retry_clears_it);
