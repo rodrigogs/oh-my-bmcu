@@ -1,7 +1,8 @@
 // Host tests for src/nvm_save_sched.h and the bus accessors it relies on (_bus_port_deal::tx_idle,
 // rx_idle, last_rx_tick, last_tx_end_tick): main-loop NVM writes must never start while a reply
 // is in flight or queued, or while a frame is arriving or waiting, should wait for 1 ms of silence
-// in both directions, and filament-info bursts must collapse into one write.
+// in both directions, filament-info bursts must collapse into one write, and a write that keeps
+// failing must back off and stop until the next change.
 
 #include <stdint.h>
 #include <string.h>
@@ -31,6 +32,7 @@ static uint32_t last_write_rx_gap;
 static uint32_t last_write_tx_gap;
 static int last_write_job;
 static bool fail_fil[4];
+static bool fail_state;
 
 // What the simulated bambubus_run does with a received frame: a handler, and a reply length.
 static void (*on_frame)(void);
@@ -53,6 +55,7 @@ void setUp(void)
     memset(&wait_st, 0, sizeof(wait_st));
     memset(writes_fil, 0, sizeof(writes_fil));
     memset(fail_fil, 0, sizeof(fail_fil));
+    fail_state = false;
     writes_state = 0;
     last_write_tick = 0u;
     last_write_rx_gap = 0u;
@@ -102,7 +105,7 @@ static void nvm_pass(void)
     if (job == NVM_JOB_STATE)
     {
         writes_state++;
-        nvm_job_result(&state_job, true, tick);
+        nvm_job_result(&state_job, !fail_state, tick);
     }
     else
     {
@@ -376,6 +379,120 @@ static void test_failed_write_waits_before_retrying(void)
     TEST_ASSERT_FALSE(nvm_job_due(&j, t0 + NVM_RETRY_TICKS, 0u, 0u));
 }
 
+// A write that keeps failing: retried after NVM_RETRY_TICKS, then after NVM_RETRY_SLOW_TICKS, and
+// after NVM_RETRY_MAX_FAILS failures in a row not again until the next change. The same for the
+// loaded-channel rule (no settle) and the filament rule; the change stays pending.
+static void test_failing_write_backs_off_then_gives_up(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(500u * MS, NVM_RETRY_TICKS);
+    TEST_ASSERT_EQUAL_UINT32(5000u * MS, NVM_RETRY_SLOW_TICKS);
+    TEST_ASSERT_EQUAL_UINT32(3u, NVM_RETRY_MAX_FAILS);
+
+    for (int rule = 0; rule < 2; rule++)
+    {
+        const uint32_t settle = rule ? NVM_FIL_SETTLE_TICKS : 0u;
+        const uint32_t max_delay = rule ? NVM_FIL_MAX_DELAY_TICKS : 0u;
+        const uint32_t t0 = 0xFFFFFFFFu - 1000u * MS; // the retries cross the SysTick wrap
+        nvm_job j;
+        memset(&j, 0, sizeof(j));
+
+        nvm_job_changed(&j, t0);
+        uint32_t t = t0 + settle;
+        TEST_ASSERT_TRUE(nvm_job_due(&j, t, settle, max_delay));
+        nvm_job_result(&j, false, t);
+
+        TEST_ASSERT_FALSE(nvm_job_due(&j, t + NVM_RETRY_TICKS - 1u, settle, max_delay));
+        t += NVM_RETRY_TICKS;
+        TEST_ASSERT_TRUE(nvm_job_due(&j, t, settle, max_delay));
+        nvm_job_result(&j, false, t);
+
+        TEST_ASSERT_FALSE(nvm_job_due(&j, t + NVM_RETRY_TICKS, settle, max_delay));
+        TEST_ASSERT_FALSE(nvm_job_due(&j, t + NVM_RETRY_SLOW_TICKS - 1u, settle, max_delay));
+        t += NVM_RETRY_SLOW_TICKS;
+        TEST_ASSERT_TRUE(nvm_job_due(&j, t, settle, max_delay));
+        TEST_ASSERT_EQUAL_UINT16(0u, j.give_ups);
+        nvm_job_result(&j, false, t);
+
+        TEST_ASSERT_EQUAL_UINT16(1u, j.give_ups);
+        TEST_ASSERT_EQUAL_UINT8(1u, j.pending); // RAM still differs from flash
+        const uint32_t probes[4] = {NVM_RETRY_TICKS, NVM_RETRY_SLOW_TICKS, 3600000u * MS, 0x90000000u};
+        for (int k = 0; k < 4; k++)
+            TEST_ASSERT_FALSE(nvm_job_due(&j, t + probes[k], settle, max_delay));
+    }
+}
+
+// A change re-arms a job that gave up, with the whole back-off again; a success clears the failure
+// count, so the next failure is retried after NVM_RETRY_TICKS again. give_ups counts every give-up
+// and is never cleared.
+static void test_change_rearms_and_success_resets_the_back_off(void)
+{
+    const uint32_t t0 = 0x10000000u;
+    nvm_job j;
+    memset(&j, 0, sizeof(j));
+    uint32_t t = t0;
+
+    for (int round = 1; round <= 2; round++)
+    {
+        nvm_job_changed(&j, t);
+        TEST_ASSERT_TRUE(nvm_job_due(&j, t, 0u, 0u)); // at once, as a first change
+        for (uint32_t f = 0; f < NVM_RETRY_MAX_FAILS; f++)
+        {
+            nvm_job_result(&j, false, t);
+            t += (f == 0u) ? NVM_RETRY_TICKS : NVM_RETRY_SLOW_TICKS;
+        }
+        TEST_ASSERT_FALSE(nvm_job_due(&j, t, 0u, 0u));
+        TEST_ASSERT_EQUAL_UINT16((uint16_t)round, j.give_ups);
+        t += 60000u * MS;
+    }
+
+    // Two failures, then the 5 s retry succeeds.
+    nvm_job_changed(&j, t);
+    nvm_job_result(&j, false, t);
+    t += NVM_RETRY_TICKS;
+    nvm_job_result(&j, false, t);
+    t += NVM_RETRY_SLOW_TICKS;
+    TEST_ASSERT_TRUE(nvm_job_due(&j, t, 0u, 0u));
+    nvm_job_result(&j, true, t);
+    TEST_ASSERT_EQUAL_UINT8(0u, j.pending);
+    TEST_ASSERT_EQUAL_UINT8(0u, j.fails);
+    TEST_ASSERT_EQUAL_UINT16(2u, j.give_ups);
+
+    // The next change fails once: back to the 500 ms retry, not the 5 s one.
+    t += 1000u * MS;
+    nvm_job_changed(&j, t);
+    nvm_job_result(&j, false, t);
+    TEST_ASSERT_TRUE(nvm_job_due(&j, t + NVM_RETRY_TICKS, 0u, 0u));
+}
+
+// A filament change after a failed write is debounced like any other: a burst for the slot still
+// ends in one record 500 ms after its last change, even when the unsaved change before the failure
+// is more than NVM_FIL_MAX_DELAY_TICKS old.
+static void test_burst_after_a_failed_write_is_still_one_write(void)
+{
+    const uint32_t t0 = 0x10000000u;
+    nvm_job j;
+    memset(&j, 0, sizeof(j));
+
+    nvm_job_changed(&j, t0);
+    uint32_t t = t0 + NVM_FIL_SETTLE_TICKS;
+    TEST_ASSERT_TRUE(fil_due(&j, t));
+    nvm_job_result(&j, false, t);
+    t += NVM_RETRY_TICKS;
+    TEST_ASSERT_TRUE(fil_due(&j, t));
+    nvm_job_result(&j, false, t);
+
+    // Next retry would be at t + 5 s; the burst comes first, 6.2 s after the first change.
+    const uint32_t b0 = t0 + 6200u * MS;
+    nvm_job_changed(&j, b0);
+    TEST_ASSERT_FALSE(fil_due(&j, b0));
+    nvm_job_changed(&j, b0 + 100u * MS);
+    TEST_ASSERT_FALSE(fil_due(&j, b0 + 100u * MS));
+    nvm_job_changed(&j, b0 + 350u * MS);
+    TEST_ASSERT_FALSE(fil_due(&j, b0 + 350u * MS));
+    TEST_ASSERT_FALSE(fil_due(&j, b0 + 850u * MS - 1u));
+    TEST_ASSERT_TRUE(fil_due(&j, b0 + 850u * MS));
+}
+
 // ---- main-loop scenarios ----
 
 // The audit scenario: the printer's on_use sets the loaded channel, the BMCU starts its reply in
@@ -514,6 +631,37 @@ static void test_failing_slot_backs_off_and_does_not_block_others(void)
     TEST_ASSERT_EQUAL_INT(1, (int)fil_job[0].pending);
 }
 
+// The loaded-channel state and one slot fail on every write for an hour on a quiet bus: three
+// attempts each (Flash_saves.cpp erases at most twice per loaded-channel attempt and once per
+// filament attempt), not one every 500 ms. The other slots are written as usual, and a new
+// load/unload re-arms the state job.
+static void test_failing_jobs_stop_after_three_attempts_in_an_hour(void)
+{
+    fail_state = true;
+    fail_fil[2] = true;
+    nvm_job_changed(&state_job, tick);
+    nvm_job_changed(&fil_job[2], tick);
+    run_for(1000u * MS, 1u * MS);
+    nvm_job_changed(&fil_job[0], tick);
+
+    for (int s = 0; s < 3600; s++) // an hour does not fit in one uint32_t tick span
+        run_for(1000u * MS, 1u * MS);
+    TEST_ASSERT_EQUAL_INT(3, writes_state);
+    TEST_ASSERT_EQUAL_INT(3, writes_fil[2]);
+    TEST_ASSERT_EQUAL_INT(1, writes_fil[0]);
+    TEST_ASSERT_EQUAL_UINT8(0u, fil_job[0].pending);
+    TEST_ASSERT_EQUAL_UINT16(1u, state_job.give_ups);
+    TEST_ASSERT_EQUAL_UINT16(1u, fil_job[2].give_ups);
+    TEST_ASSERT_EQUAL_UINT16(0u, fil_job[0].give_ups);
+
+    fail_state = false;
+    nvm_job_changed(&state_job, tick);
+    run_for(10u * MS, 1u * MS);
+    TEST_ASSERT_EQUAL_INT(4, writes_state);
+    TEST_ASSERT_EQUAL_UINT8(0u, state_job.pending);
+    TEST_ASSERT_EQUAL_INT(3, writes_fil[2]);
+}
+
 // A new change after a failed write is scheduled by the normal rule, not held back by the retry
 // delay: a load/unload right after a failed STA write goes into the next quiet window.
 static void test_new_change_after_a_failed_write_is_not_delayed(void)
@@ -594,12 +742,16 @@ int main(void)
     RUN_TEST(test_filament_settles_500ms_after_the_last_change);
     RUN_TEST(test_filament_that_keeps_changing_is_written_after_5s);
     RUN_TEST(test_failed_write_waits_before_retrying);
+    RUN_TEST(test_failing_write_backs_off_then_gives_up);
+    RUN_TEST(test_change_rearms_and_success_resets_the_back_off);
+    RUN_TEST(test_burst_after_a_failed_write_is_still_one_write);
     RUN_TEST(test_state_write_waits_for_reply_end_plus_1ms);
     RUN_TEST(test_filament_burst_ends_in_one_write_in_a_quiet_window);
     RUN_TEST(test_busy_bus_falls_back_after_max_wait);
     RUN_TEST(test_each_job_waits_for_its_own_window);
     RUN_TEST(test_one_job_per_pass_state_first);
     RUN_TEST(test_failing_slot_backs_off_and_does_not_block_others);
+    RUN_TEST(test_failing_jobs_stop_after_three_attempts_in_an_hour);
     RUN_TEST(test_new_change_after_a_failed_write_is_not_delayed);
     RUN_TEST(test_long_reply_is_never_overlapped);
     RUN_TEST(test_long_reply_with_expired_wait_is_never_overlapped);
