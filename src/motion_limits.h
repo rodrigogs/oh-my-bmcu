@@ -1,7 +1,8 @@
 #pragma once
-// Limits for the motor states that otherwise end only on a sensor event (Motion_control.cpp): the
-// unload pull back, the redetect push after it, and the DM autoload Stage-2 push/retract stages.
-// Hardware-free, so the decisions are tested on the host (test/test_motion_limits).
+// Limits for the motor states that otherwise end only on a sensor event or a printer command
+// (Motion_control.cpp): the unload pull back, the redetect push after it, the DM autoload Stage-2
+// push/retract stages and the send (load). Hardware-free, so the decisions are tested on the host
+// (test/test_motion_limits).
 //
 // Without limits, a held filament or an emptied channel kept the motor at 900-1000 PWM for good.
 // While a channel is in pull back or redetect, motor_motion_switch does not run, so the printer's
@@ -62,7 +63,7 @@ typedef struct
 {
     uint64_t last_ms;   // time of the previous check (start, then each check)
     uint32_t run_ms;    // time the state has been driven, gaps excluded
-    uint32_t max_ms;    // time budget
+    uint32_t max_ms;    // time budget, 0 = none
     uint32_t stall_ms;  // how long the gear has been held at high PWM without moving
     uint32_t start_cnt; // gear position (AS5600 counts) at the start
     uint32_t stall_cnt; // gear position when the current stall window started
@@ -100,7 +101,8 @@ static inline float ml_cnt_to_m(uint32_t cnt)
 }
 
 // Gear travel |pos_cnt - start_cnt| in m. Every distance a motor state decides on (pull back
-// target, send length cap, DM Stage-2 countdown) comes from here, never from filament[].meters.
+// target, DM Stage-2 countdown) comes from here or from the guard's count (redetect and send
+// caps), never from filament[].meters.
 static inline float ml_travel_m(uint32_t pos_cnt, uint32_t start_cnt)
 {
     return ml_cnt_to_m(ml_cnt_dist(pos_cnt, start_cnt));
@@ -149,7 +151,7 @@ static inline ml_result motion_guard_check(motion_guard *g, uint64_t now_ms, uin
 
     if ((g->max_cnt > 0u) && (ml_cnt_dist(pos_cnt, g->start_cnt) >= g->max_cnt)) return ML_DIST;
     if (g->stall_ms >= ML_STALL_MS) return ML_STALL;
-    if (g->run_ms >= g->max_ms) return ML_TIME;
+    if ((g->max_ms > 0u) && (g->run_ms >= g->max_ms)) return ML_TIME;
     return ML_OK;
 }
 
@@ -196,6 +198,27 @@ static inline ml_result ml_redetect_check(motion_guard *g, uint64_t now_ms, uint
 static inline void ml_dm_s2_start(motion_guard *g, uint64_t now_ms, uint32_t pos_cnt, float s2_len_m)
 {
     motion_guard_start(g, now_ms, pos_cnt, ml_time_budget_ms(s2_len_m), 0u);
+}
+
+// ---- Send (filament_motion_send) ----
+// The printer's load: it commands send_out until its tool head sees the filament. The send feeds at
+// 60 mm/s (speed PID, P 2, I 20, 500 PWM floor, clamped at 1000) until the tip at the extruder has
+// pushed the buffer to MC_LOAD_S1_FAST_PCT (85 % on A1), then holds it (hold_load, with the on_use
+// anti-stall), and brakes at MC_LOAD_S1_HARD_STOP_PCT (95 %). A gear that does not turn (a tangle
+// on the spool) moves no filament, so the buffer never reaches either: the PID sat at 1000 PWM for
+// as long as the printer kept sending send_out. The stall check stops it: about 0.7 s to 800 PWM,
+// then ML_STALL_MS. A normal load never trips it: the gear moves while it feeds and while it
+// pushes the buffer up. The hold drives 800 PWM or more only with the buffer below 83.7 % (A1),
+// under the 85 % it latched at, or in the anti-stall's 850 PWM kick, which rests 0.5 s after 0.8 s
+// without motion, so a buffer that stops short of 90 % is not a stall.
+// No time budget: how long the printer sends is its own decision, and its load timeout reports a
+// send that stopped. ML_SEND_MAX_M of gear travel is upstream's cap (a gear that turns without
+// feeding, e.g. slipping on the filament).
+#define ML_SEND_MAX_M 10.0f
+
+static inline void ml_send_start(motion_guard *g, uint64_t now_ms, uint32_t pos_cnt)
+{
+    motion_guard_start(g, now_ms, pos_cnt, 0u, ml_m_to_cnt(ML_SEND_MAX_M));
 }
 
 // ---- Unfinished unload (status LED) ----

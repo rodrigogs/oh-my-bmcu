@@ -836,8 +836,8 @@ public:
     uint64_t on_use_hi_gate_t0_ms = 0ull;
 
     uint64_t send_start_ms = 0;
-    uint32_t send_start_cnt = 0u; // as5600_count at the start of the send
-    uint8_t  send_len_abort = 0;
+    motion_guard send_guard = {}; // the send's distance and stall limits (motion_limits.h)
+    uint8_t  send_len_abort = 0;  // 1 = send stopped by a limit, until the motion changes
 
     uint64_t pull_start_ms = 0;
 
@@ -884,7 +884,7 @@ public:
             send_start_ms = time_now;
             send_stop_latch = false;
             send_len_abort = 0;
-            send_start_cnt = as5600_count[CHx];
+            ml_send_start(&send_guard, time_now, as5600_count[CHx]);
         }
 
         if (_motion == filament_motion_enum::filament_motion_pull) {
@@ -897,7 +897,6 @@ public:
             send_start_ms = 0;
             send_stop_latch = false;
             send_len_abort = 0;
-            send_start_cnt = 0u;
         }
 
         if (prev == filament_motion_enum::filament_motion_pull &&
@@ -1739,12 +1738,10 @@ public:
                 {
                     const float pct = MC_PULL_pct_f[CHx];
 
-                    if (!send_len_abort)
-                    {
-                        constexpr float SEND_MAX_M = 10.0f;
-                        const float moved_m = ml_travel_m(as5600_count[CHx], send_start_cnt);
-                        if (moved_m >= SEND_MAX_M) send_len_abort = 1;
-                    }
+                    // ML_SEND_MAX_M of gear travel, or a stalled gear (x_prev: PWM of the last pass).
+                    if (!send_len_abort &&
+                        ml_is_limit(motion_guard_check(&send_guard, now_ms, as5600_count[CHx], x_prev[CHx])))
+                        send_len_abort = 1;
 
                     if (send_len_abort)
                     {
