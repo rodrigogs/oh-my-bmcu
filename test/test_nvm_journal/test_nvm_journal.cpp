@@ -9,6 +9,7 @@
 
 #include "Flash_saves.h"
 #include "nvm_journal.h"
+#include "nvm_records.h"
 
 // Journal geometry of Flash_saves.cpp (nvm_journal.h). Filament info: one 256-byte page per slot, 6
 // records of 10 words (MAGIC_FIL, 32-byte info, CRC). Loaded channel: 32 records of 2 words per page.
@@ -42,23 +43,27 @@ static bool sta_needs_erase(uint32_t slot)
     return nvm_sta_needs_erase(page, slot);
 }
 
-// ---- adapted from Flash_saves.cpp: the layouts of a filament-info and a loaded-channel record ----
-// A complete journal record in filament slot `slot`. The helper only asks whether words are erased,
-// so the CRC word is a stand-in.
+// Journal records as Flash_saves.cpp packs them (nvm_records.h). A filament record in slot `slot`,
+// its info filled from `tag`: the helper only asks whether words are erased, so the CRC is a
+// stand-in.
+static uint32_t crc_stand_in(const void *, uint32_t)
+{
+    return 0x5A5A5A5Au;
+}
+
 static void fil_record(uint32_t slot, uint32_t tag)
 {
-    uint32_t *p = page + slot * FIL_WORDS;
-    p[0] = MAGIC_FIL;
-    for (uint32_t w = 1u; w < FIL_WORDS - 1u; w++) p[w] = tag * 0x01010101u + w;
-    p[FIL_WORDS - 1u] = 0x5A5A0000u | tag;
+    uint32_t info_words[sizeof(Flash_FilamentInfo) / 4u];
+    for (uint32_t w = 0u; w < sizeof(info_words) / 4u; w++) info_words[w] = tag * 0x01010101u + w + 1u;
+    Flash_FilamentInfo info;
+    memcpy(&info, info_words, sizeof(info));
+    nvm_fil_pack(page + slot * FIL_WORDS, &info, crc_stand_in);
 }
 
 // A loaded-channel record: 0xA5 tag, sequence number, channel, then w0 ^ MAGIC_STA.
 static void sta_record(uint32_t slot, uint16_t seq, uint8_t ch)
 {
-    const uint32_t w0 = (0xA5u << 24) | ((uint32_t)seq << 8) | ch;
-    page[slot * STA_WORDS] = w0;
-    page[slot * STA_WORDS + 1u] = w0 ^ MAGIC_STA;
+    nvm_sta_pack(page + slot * STA_WORDS, seq, ch);
 }
 
 static void test_words_erased_checks_exactly_count_words(void)

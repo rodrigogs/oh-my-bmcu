@@ -2,6 +2,7 @@
 #include "mc_pull_cal_range.h"
 #include "hal/irq_wch.h"
 #include "nvm_journal.h"
+#include "nvm_records.h"
 #include <string.h>
 
 #include "ch32v20x_rcc.h"
@@ -22,11 +23,6 @@ static uint32_t crc32_hw_words(const void* data, uint32_t bytes)
 static inline uint32_t ams_fil_page(uint8_t filament_idx)
 {
     return FLASH_NVM_AMS_ADDR + (uint32_t)filament_idx * FLASH_NVM256_PAGE_SIZE;
-}
-
-static inline bool flash_word_is_blank(uint32_t v)
-{
-    return v == NVM_ERASED_WORD || v == 0xFFFFFFFFu;
 }
 
 static bool flash_range_is_erased(uint32_t base_addr, uint32_t bytes)
@@ -128,7 +124,7 @@ static bool nvm256_read(uint32_t page_addr, uint32_t magic, uint16_t ver,
     const uint8_t* b = (const uint8_t*)page_addr;
 
     const uint32_t stored = *(const uint32_t*)(b + NVM256_CRC_OFF);
-    if (flash_word_is_blank(stored)) return false;
+    if (nvm_word_is_blank(stored)) return false;
 
     const uint32_t crc = crc32_hw_words(b, NVM256_CRC_OFF);
     if (crc != stored) return false;
@@ -159,73 +155,20 @@ static inline uint32_t fil_page_addr(uint8_t filament_idx)
     return ams_fil_page(filament_idx);
 }
 
-static inline void fil_slot_pack(uint32_t w[FIL_SLOT_WORDS], const Flash_FilamentInfo* info)
-{
-    w[0] = MAGIC_FIL;
-    memcpy(&w[1], info, sizeof(*info));
-    w[FIL_SLOT_WORDS - 1u] = crc32_hw_words(w, (FIL_SLOT_WORDS - 1u) * 4u);
-}
-
-static inline bool fil_slot_valid(const uint32_t* p, Flash_FilamentInfo* out)
-{
-    if (p[0] != MAGIC_FIL) return false;
-    if (crc32_hw_words(p, (FIL_SLOT_WORDS - 1u) * 4u) != p[FIL_SLOT_WORDS - 1u]) return false;
-    if (out) memcpy(out, &p[1], sizeof(*out));
-    return true;
-}
-
-static bool fil_scan_page(uint32_t base, Flash_FilamentInfo* last, uint32_t* first_empty)
-{
-    bool found = false;
-
-    if (first_empty) *first_empty = FIL_SLOTS_PER_PAGE;
-
-    for (uint32_t s = 0u; s < FIL_SLOTS_PER_PAGE; s++)
-    {
-        const uint32_t* p = (const uint32_t*)(base + s * FIL_SLOT_BYTES);
-
-        if (flash_word_is_blank(p[0]))
-        {
-            if (first_empty && *first_empty == FIL_SLOTS_PER_PAGE)
-                *first_empty = s;
-            continue;
-        }
-
-        Flash_FilamentInfo tmp;
-        if (fil_slot_valid(p, &tmp))
-        {
-            if (last) *last = tmp;
-            found = true;
-        }
-    }
-
-    return found;
-}
-
 static uint8_t g_fil_have[4] = {0u, 0u, 0u, 0u};
 static uint8_t g_fil_first_empty[4] = {0u, 0u, 0u, 0u};
 static Flash_FilamentInfo g_fil_last[4];
 
 static void fil_cache_load_one(uint8_t filament_idx)
 {
-    Flash_FilamentInfo last;
-    uint32_t first_empty = FIL_SLOTS_PER_PAGE;
-    const uint32_t base = fil_page_addr(filament_idx);
+    uint32_t next_slot = 0u;
+    const bool have = nvm_fil_load((const uint32_t*)fil_page_addr(filament_idx), &g_fil_last[filament_idx],
+                                   &next_slot, crc32_hw_words);
 
-    if (fil_scan_page(base, &last, &first_empty))
-    {
-        g_fil_have[filament_idx] = 1u;
-        g_fil_first_empty[filament_idx] = (uint8_t)first_empty;
-        memcpy(&g_fil_last[filament_idx], &last, sizeof(last));
-        return;
-    }
-
-    g_fil_have[filament_idx] = 0u;
-    g_fil_first_empty[filament_idx] = 0u;
-    memset(&g_fil_last[filament_idx], 0, sizeof(g_fil_last[filament_idx]));
+    g_fil_have[filament_idx] = have ? 1u : 0u;
+    g_fil_first_empty[filament_idx] = (uint8_t)next_slot;
 }
 
-static constexpr uint32_t STA_TAG = 0xA5u;
 static constexpr uint32_t STA_PAGE_FIRST = 6u;
 static constexpr uint32_t STA_PAGE_COUNT = 10u;
 static constexpr uint32_t STA_SLOT_BYTES = 8u;
@@ -233,6 +176,7 @@ static constexpr uint32_t STA_SLOTS_PER_PAGE = (FLASH_NVM256_PAGE_SIZE / STA_SLO
 static constexpr uint32_t STA_TOTAL_SLOTS = (STA_PAGE_COUNT * STA_SLOTS_PER_PAGE);
 static_assert(STA_SLOT_BYTES == NVM_STA_SLOT_WORDS * 4u && STA_SLOTS_PER_PAGE == NVM_STA_SLOTS_PER_PAGE,
               "nvm_journal.h loaded-channel geometry out of date");
+static_assert(STA_SLOTS_PER_PAGE * STA_SLOT_BYTES == FLASH_NVM256_PAGE_SIZE, "STA slots must fill the pages");
 
 static uint16_t g_sta_seq = 0u;
 static uint16_t g_sta_slot = 0u;
@@ -316,7 +260,7 @@ bool Flash_AMS_filament_write(uint8_t filament_idx, const Flash_FilamentInfo* in
     }
 
     alignas(4) uint32_t w[FIL_SLOT_WORDS];
-    fil_slot_pack(w, info);
+    nvm_fil_pack(w, info, crc32_hw_words);
 
     if (!flash_prog_words(base + first_empty * FIL_SLOT_BYTES, w, FIL_SLOT_WORDS))
         return false;
@@ -353,49 +297,17 @@ bool Flash_AMS_state_read(uint8_t* loaded_ch)
 {
     if (!loaded_ch) return false;
 
-    uint8_t best_ch = 0xFFu;
-    uint16_t best_seq = 0u;
-    uint32_t best_slot = 0u;
-    uint8_t have = 0u;
+    // The log pages are contiguous and full of slots, so slot n is at sta_page_addr(0) + n * 8.
+    uint8_t ch = 0xFFu;
+    uint32_t next_slot = 0u;
+    const bool have = nvm_sta_scan((const uint32_t*)sta_page_addr(0u), STA_TOTAL_SLOTS, &ch, &g_sta_seq,
+                                   &next_slot);
 
-    for (uint32_t slot = 0u; slot < STA_TOTAL_SLOTS; slot++)
-    {
-        const uint32_t a = sta_slot_addr(slot);
-        const uint32_t w0 = *(const volatile uint32_t*)(a + 0u);
-        const uint32_t w1 = *(const volatile uint32_t*)(a + 4u);
+    g_sta_slot = (uint16_t)next_slot;
+    g_sta_have_saved = have ? 1u : 0u;
+    g_sta_saved_loaded = ch;
 
-        if (flash_word_is_blank(w0) && flash_word_is_blank(w1)) continue;
-        if ((w0 >> 24) != STA_TAG) continue;
-        if ((w0 ^ w1) != MAGIC_STA) continue;
-
-        const uint16_t seq = (uint16_t)((w0 >> 8) & 0xFFFFu);
-        const uint8_t ch = (uint8_t)(w0 & 0xFFu);
-
-        if (!have || (int16_t)(seq - best_seq) > 0)
-        {
-            have = 1u;
-            best_seq = seq;
-            best_ch = ch;
-            best_slot = slot;
-        }
-    }
-
-    if (have)
-    {
-        g_sta_seq = (uint16_t)(best_seq + 1u);
-        g_sta_slot = (uint16_t)((best_slot + 1u) % STA_TOTAL_SLOTS);
-        g_sta_have_saved = 1u;
-        g_sta_saved_loaded = best_ch;
-    }
-    else
-    {
-        g_sta_seq = 0u;
-        g_sta_slot = 0u;
-        g_sta_have_saved = 0u;
-        g_sta_saved_loaded = 0xFFu;
-    }
-
-    *loaded_ch = best_ch;
+    *loaded_ch = ch;
     return true;
 }
 
@@ -405,11 +317,10 @@ bool Flash_AMS_state_write(uint8_t loaded_ch)
         return true;
 
     const uint16_t seq = g_sta_seq;
-    const uint32_t w0 = ((uint32_t)STA_TAG << 24) | ((uint32_t)seq << 8) | (uint32_t)loaded_ch;
-    const uint32_t w1 = w0 ^ MAGIC_STA;
     const uint32_t slot = (uint32_t)g_sta_slot;
     const uint32_t addr = sta_slot_addr(slot);
-    const uint32_t buf[2] = { w0, w1 };
+    uint32_t buf[NVM_STA_SLOT_WORDS];
+    nvm_sta_pack(buf, seq, loaded_ch);
     const uint32_t page_i = slot / STA_SLOTS_PER_PAGE;
     const uint32_t page = sta_page_addr(page_i);
 
