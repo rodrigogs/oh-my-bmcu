@@ -13,3 +13,6 @@ const float* ADC_DMA_get_value(void);
 void  ADC_DMA_filter_reset(void);
 bool  ADC_DMA_ready(void);
 void  ADC_DMA_wait_full(void);
+
+// True once an ADC calibration wait in ADC_DMA_init gave up.
+bool  ADC_DMA_cal_timed_out(void);

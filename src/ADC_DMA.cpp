@@ -219,15 +219,36 @@ void ADC_DMA_wait_full()
     }
 }
 
+// A calibration bit clears within microseconds; one that stays set must not hang the boot (the
+// watchdog is not running yet). On a timeout the init carries on as after a finished calibration.
+static constexpr uint32_t kCalTimeoutMs = 10u;
+static bool g_adc_cal_timed_out = false;
+bool ADC_DMA_cal_timed_out() { return g_adc_cal_timed_out; }
+
+static inline void adc_cal_wait(ADC_TypeDef* a, FlagStatus (*busy)(ADC_TypeDef*))
+{
+    const uint32_t t0 = time_ticks32();
+    const uint32_t tout = ms_to_ticks32(kCalTimeoutMs);
+
+    while (busy(a))
+    {
+        if ((uint32_t)(time_ticks32() - t0) > tout)
+        {
+            g_adc_cal_timed_out = true;
+            return;
+        }
+    }
+}
+
 static inline void adc_calibrate(ADC_TypeDef* a)
 {
     ADC_Cmd(a, ENABLE);
     ADC_BufferCmd(a, DISABLE);
 
     ADC_ResetCalibration(a);
-    while (ADC_GetResetCalibrationStatus(a)) {}
+    adc_cal_wait(a, ADC_GetResetCalibrationStatus);
     ADC_StartCalibration(a);
-    while (ADC_GetCalibrationStatus(a)) {}
+    adc_cal_wait(a, ADC_GetCalibrationStatus);
 }
 
 void ADC_DMA_init()
