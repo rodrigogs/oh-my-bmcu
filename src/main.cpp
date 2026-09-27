@@ -7,6 +7,7 @@
 #include "ams.h"
 #include "ahub_bus.h"
 #include "bambu_bus_ams.h"
+#include "host_link.h"
 #include "ADC_DMA.h"
 #include "Debug_log.h"
 #include "nvm_save_sched.h"
@@ -271,22 +272,15 @@ int main(void)
         const bambubus_package_type bambubus_stu = bambubus_run();
         bus_port_to_host.send_package();
 
-        if (bambubus_stu == bambubus_package_type::heartbeat)
-            bus_host_device_type = host_device_type_ams;
+        // Only the protocol the host speaks decides; before the first heartbeat the BMCU stays
+        // offline, motors stopped (host_link.h).
+        const bool offline = host_link_offline(
+            &bus_host_device_type,
+            {bambubus_stu == bambubus_package_type::heartbeat, bambubus_stu == bambubus_package_type::error},
+            {ahub_stu == ahubus_package_type::heartbeat, ahub_stu == ahubus_package_type::error});
 
         if (ahub_stu == ahubus_package_type::heartbeat)
-        {
-            bus_host_device_type = host_device_type_ahub;
             boot_restore_drop(&g_boot_restore); // the AHUB host sets the channel states itself
-        }
-
-        // Only the protocol the host speaks decides: the other one never gets a heartbeat and must
-        // not mask a lost link. Before the first heartbeat the BMCU stays offline, motors stopped.
-        bool offline = true;
-        if (bus_host_device_type == host_device_type_ams)
-            offline = (bambubus_stu == bambubus_package_type::error);
-        else if (bus_host_device_type == host_device_type_ahub)
-            offline = (ahub_stu == ahubus_package_type::error);
 
         int error = 0;
 

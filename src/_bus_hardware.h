@@ -1,5 +1,6 @@
 #pragma once
 #include "crc_bus.h"
+#include "host_link.h"
 #include <string.h>
 
 enum class _bus_data_type : uint8_t
@@ -315,7 +316,4 @@ public:
 extern _bus_port_deal bus_port_to_host;
 extern void bus_init();
 
-#define host_device_type_none 0x0000
-#define host_device_type_ahub 0x0001
-#define host_device_type_ams 0x0700
-extern uint16_t bus_host_device_type;
+extern uint16_t bus_host_device_type; // host_link.h
