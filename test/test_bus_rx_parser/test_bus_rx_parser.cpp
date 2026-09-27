@@ -8,10 +8,9 @@
 #include <unity.h>
 
 #include "_bus_hardware.h"
+#include "bus_rx_frames.h"
 #include "crc_bus.h"
 
-// One 9E1 byte at 1.25 Mbaud in 18 MHz SysTick ticks (158.4).
-static const uint32_t BYTE_TICKS = 158u;
 static const uint32_t FRAME_GAP_TICKS = 400u * 18u; // 400 us of silence between frames
 
 static _bus_port_deal port;
@@ -42,21 +41,6 @@ void setUp(void)
 }
 
 void tearDown(void) {}
-
-// Short-header frame: 3D, flags (bit 7 set), total length, CRC8, payload, CRC16 (little endian).
-static int make_short(uint8_t *out, uint8_t flags, const uint8_t *payload, int n)
-{
-    const int len = 4 + n + 2;
-    out[0] = 0x3D;
-    out[1] = flags;
-    out[2] = (uint8_t)len;
-    out[3] = bus_crc8(out, 3);
-    memcpy(out + 4, payload, (size_t)n);
-    const uint16_t crc = bus_crc16(out, (uint32_t)(len - 2));
-    out[len - 2] = (uint8_t)(crc & 0xFFu);
-    out[len - 1] = (uint8_t)(crc >> 8);
-    return len;
-}
 
 // Payload bytes chosen so that neither they nor the CRC16 look like a 0x3D/0x33 header byte, which
 // keeps the tests deterministic when the parser hunts for a header inside a broken frame.
