@@ -44,8 +44,10 @@ test may still pick a configuration; a test's own '#ifndef X' does not exempt a 
 unconditionally. Not found this way (mark such copies): a copy under another name, a constant in a
 namespace or an enum, a declaration whose name is not on the line of its 'const', a const
 initialised with braces or parentheses instead of '=', and a second declarator
-('const int a = 1, B = 2;'). Run from the repository root; exits non-zero on a drifted
-or malformed copy or a changed anchored region.
+('const int a = 1, B = 2;'). Also checked: every `void test_*(void)` (optionally 'static')
+defined in a test/ file is passed to a RUN_TEST() in that same file, so a case written but
+never wired in is reported instead of silently never running. Run from the repository root;
+exits non-zero on a drifted or malformed copy or a changed anchored region.
 """
 
 import argparse
@@ -62,6 +64,8 @@ AT_COMMIT = re.compile(r"^// ---- (\S+) at this commit:.*$", re.M)
 ADAPTED = re.compile(r"^// ---- adapted from (\S+?):.*$", re.M)
 ANCHOR = re.compile(r"^// ---- anchor: (.*) ----$", re.M)
 ANCHOR_SPEC = re.compile(r"^(?P<symbol>[A-Za-z_]\w*)(?: from /(?P<start>.+?)/)?(?: to /(?P<end>.+?)/)?$")
+TEST_DEF = re.compile(r"^(?:static\s+)?void\s+(test_\w+)\s*\(\s*void\s*\)\s*$", re.M)
+RUN_TEST_CALL = re.compile(r"\bRUN_TEST\s*\(\s*(test_\w+)\s*\)")
 
 # What follows a symbol's name where it is defined: a function's body after its parameters, a type's
 # keyword before it, a file-scope variable's size, initialiser or ';' after it.
@@ -304,6 +308,15 @@ def main():
             if name in src_constants:
                 errors.append("%s:%d: defines %s, which %s also defines: include its header or copy it "
                               "in a verbatim block" % (rel, line, name, src_constants[name]))
+
+        code = blank(text)
+        defined = {}
+        for m in TEST_DEF.finditer(code):
+            defined.setdefault(m.group(1), text.count("\n", 0, m.start()) + 1)
+        run = set(RUN_TEST_CALL.findall(code))
+        for name, line in sorted(defined.items(), key=lambda x: x[1]):
+            if name not in run:
+                errors.append("%s:%d: %s is never passed to RUN_TEST in this file" % (rel, line, name))
 
     # The anchored regions, hashed and compared with the lock (or written to it).
     regions = {}  # (src/file, spec): (first, last, sha256)
