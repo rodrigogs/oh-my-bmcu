@@ -178,10 +178,14 @@ void ahubus_slave_get_package_query(uint8_t *buf)
         break;
 
     case ahubus_query_type::filament_info:
-        memcpy(data_ptr + 4,   ams[query_adr].filament[0].bambubus_filament_id, 44);
-        memcpy(data_ptr + 48,  ams[query_adr].filament[1].bambubus_filament_id, 44);
-        memcpy(data_ptr + 92,  ams[query_adr].filament[2].bambubus_filament_id, 44);
-        memcpy(data_ptr + 136, ams[query_adr].filament[3].bambubus_filament_id, 44);
+        // 44 bytes per channel: bambubus_filament_id through xhub_unique_id of the packed _filament.
+        static_assert(__builtin_offsetof(_filament, xhub_unique_id) + sizeof(uint64_t) -
+                      __builtin_offsetof(_filament, bambubus_filament_id) == 44,
+                      "filament_info copies 44 bytes of _filament");
+        memcpy(data_ptr + 4,   ams[query_adr].filament[0].bambubus_filament_id, 44); // cppcheck-suppress bufferAccessOutOfBounds
+        memcpy(data_ptr + 48,  ams[query_adr].filament[1].bambubus_filament_id, 44); // cppcheck-suppress bufferAccessOutOfBounds
+        memcpy(data_ptr + 92,  ams[query_adr].filament[2].bambubus_filament_id, 44); // cppcheck-suppress bufferAccessOutOfBounds
+        memcpy(data_ptr + 136, ams[query_adr].filament[3].bambubus_filament_id, 44); // cppcheck-suppress bufferAccessOutOfBounds
         out[2] = 44;
         out[7] = 0x01;
         break;

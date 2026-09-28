@@ -137,6 +137,8 @@ void *_sbrk(ptrdiff_t incr)
     extern char _heap_end[];
     static char *curbrk = _end;
 
+    // _end and _heap_end are linker-script bounds of the same RAM region.
+    // cppcheck-suppress comparePointers
     if ((curbrk + incr < _end) || (curbrk + incr > _heap_end))
         return (void *)(-1);
 

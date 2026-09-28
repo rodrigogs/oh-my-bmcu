@@ -28,7 +28,10 @@ public:
     uint8_t send_data_buf[1280] __attribute__((aligned(4)));
 
 private:
+    // The only instance (bus_port_to_host) is a global, so the buffers start zeroed.
+    // cppcheck-suppress uninitMemberVarPrivate
     uint8_t tx_dma_buf[1280] __attribute__((aligned(4)));
+    // cppcheck-suppress uninitMemberVarPrivate
     uint8_t recv_data_buf[2][1280] __attribute__((aligned(4)));
     uint8_t tx_build_sel = 0;
     int _index = 0;
@@ -40,6 +43,7 @@ private:
     int drop_bytes = 0;
     volatile uint32_t rx_last_tick = 0;
     volatile uint32_t tx_end_tick = 0;
+    // cppcheck-suppress uninitMemberVarPrivate ; set by init() before any tx_start()
     void (*port_send_datas)(uint8_t *data, uint16_t len); // starts the TX; only tx_start() calls it
 
     // Drop the frame (or heartbeat skip) in progress. Also runs in the main loop at TX start, so the
