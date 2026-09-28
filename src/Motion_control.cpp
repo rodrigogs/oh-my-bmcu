@@ -369,6 +369,12 @@ static constexpr float MC_PULL_PIDP_PCT = 25.0f;
 static constexpr int MC_PULL_DEADBAND_PCT_LOW  = 30;
 static constexpr int MC_PULL_DEADBAND_PCT_HIGH = 70;
 
+// Lowest PWM of the hold controls (idle, on_use, before_on_use): the idle push's stall level.
+static constexpr float MC_HOLD_PWM_MIN = 420.0f;
+static_assert(ML_IDLE_STALL_PWM == MC_HOLD_PWM_MIN, "motion_limits.h: the idle stall level must be the hold floor");
+static_assert((int)ML_IDLE_EDGE_PCT == MC_PULL_DEADBAND_PCT_LOW - 2,
+              "motion_limits.h: the idle push's edge band is the 2 % under the deadband");
+
 // ================ LOAD CONTROL ======================
 #if BMCU_SOFT_LOAD
     // Stage1
@@ -842,6 +848,8 @@ public:
 
     uint64_t pull_start_ms = 0;
 
+    ml_idle_push_t idle_push = {}; // the idle control's push limits (motion_limits.h)
+
     bool send_stop_latch = false;
 
     MOTOR_PID PID_speed    = MOTOR_PID(2, 20, 0);
@@ -871,6 +879,7 @@ public:
 
         const filament_motion_enum prev = motion;
         motion = _motion;
+        ml_idle_push_reset(&idle_push);
 
         if ((_motion != filament_motion_enum::filament_motion_pressure_ctrl_on_use) &&
             g_on_use_low_latch[CHx] && !g_on_use_jam_latch[CHx])
@@ -1163,6 +1172,8 @@ public:
 
         if (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle)
         {
+            bool idle_pid_push = false; // the PID below pushes with filament at the switches
+
         #if BMCU_DM_TWO_MICROSWITCH
                     // --- DM autoload (Stage1 + Stage2) ---
                     if (filament_channel_inserted[CHx] && (dm_loaded[CHx] == 0u))
@@ -1494,6 +1505,7 @@ public:
             {
                 if (!filament_channel_inserted[CHx] || !had_on_use)
                 {
+                    ml_idle_push_reset(&idle_push);
                     PID_pressure.clear();
                     pwm_zeroed = 1;
                     x_prev[CHx] = 0.0f;
@@ -1556,12 +1568,28 @@ public:
                 {
                     const float pct = MC_PULL_pct_f[CHx];
                     x = dir * PID_pressure.caculate(pct - 50.0f, time_E);
+                    idle_pid_push = (x * dir) < 0.0f;
                 }
                 else
                 {
                     x = 0.0f;
                     PID_pressure.clear();
                 }
+            }
+
+            // A push that stalls or outlasts its budget (motion_limits.h; x_prev: PWM of the last pass)
+            // brakes the channel until the buffer is back at 30 % or the channel leaves this control or
+            // its filament the switches; red unless it stopped at the deadband's edge (28-29 %).
+            const ml_idle_push_act idle_act =
+                ml_idle_push_pass(&idle_push, idle_pid_push, MC_PULL_pct[CHx], now_ms, as5600_count[CHx], x_prev[CHx]);
+            if (idle_act != ML_IDLE_PUSH_RUN)
+            {
+                if (idle_act == ML_IDLE_PUSH_FAULT) MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
+                PID_pressure.clear();
+                pwm_zeroed = 1;
+                x_prev[CHx] = 0.0f;
+                Motion_control_set_PWM(CHx, 0);
+                return;
             }
         }
         else if (motion == filament_motion_enum::filament_motion_redetect) // wyjście do braku filamentu -> ponowne podanie
@@ -1868,7 +1896,7 @@ public:
 
         float pwm0 =
             pb_mode ? 0.0f :
-            (hold_mode ? 420.0f : pwm_zero);
+            (hold_mode ? MC_HOLD_PWM_MIN : pwm_zero);
 
         if (pull_mode)
         {

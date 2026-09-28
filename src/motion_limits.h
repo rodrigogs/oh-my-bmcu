@@ -1,7 +1,8 @@
 #pragma once
 // Limits for the motor states that otherwise end only on a sensor event or a printer command
 // (Motion_control.cpp): the unload pull back, the redetect push after it, the DM autoload Stage-2
-// push/retract stages, the send (load) and the buffer-lift auto-unload (auto_unload.h).
+// push/retract stages, the send (load), the buffer-lift auto-unload (auto_unload.h) and the idle
+// control's push.
 // Hardware-free, so the decisions are tested on the host (test/test_motion_limits,
 // test/test_auto_unload).
 //
@@ -123,8 +124,10 @@ static inline void motion_guard_start(motion_guard *g, uint64_t now_ms, uint32_t
 }
 
 // One check per main-loop pass while the state runs. pwm is the PWM the channel is driven with
-// (sign ignored), pos_cnt the gear position in AS5600 counts. Returns ML_OK or a limit.
-static inline ml_result motion_guard_check(motion_guard *g, uint64_t now_ms, uint32_t pos_cnt, float pwm)
+// (sign ignored), pos_cnt the gear position in AS5600 counts, stall_pwm the lowest PWM at which a
+// gear that does not move is stalled. Returns ML_OK or a limit.
+static inline ml_result motion_guard_check_at(motion_guard *g, uint64_t now_ms, uint32_t pos_cnt, float pwm,
+                                              float stall_pwm)
 {
     uint64_t dt64 = now_ms - g->last_ms;
     g->last_ms = now_ms;
@@ -139,7 +142,7 @@ static inline ml_result motion_guard_check(motion_guard *g, uint64_t now_ms, uin
 
     g->run_ms = (g->run_ms > UINT32_MAX - dt) ? UINT32_MAX : (g->run_ms + dt);
 
-    if ((ml_absf(pwm) < ML_STALL_PWM) || (ml_cnt_dist(pos_cnt, g->stall_cnt) >= ML_STALL_MOVE_CNT))
+    if ((ml_absf(pwm) < stall_pwm) || (ml_cnt_dist(pos_cnt, g->stall_cnt) >= ML_STALL_MOVE_CNT))
     {
         // Low PWM or the gear moved: a new window starts here.
         g->stall_ms  = 0u;
@@ -154,6 +157,12 @@ static inline ml_result motion_guard_check(motion_guard *g, uint64_t now_ms, uin
     if (g->stall_ms >= ML_STALL_MS) return ML_STALL;
     if ((g->max_ms > 0u) && (g->run_ms >= g->max_ms)) return ML_TIME;
     return ML_OK;
+}
+
+// The check with the stall level of every open-loop or speed-controlled move, ML_STALL_PWM.
+static inline ml_result motion_guard_check(motion_guard *g, uint64_t now_ms, uint32_t pos_cnt, float pwm)
+{
+    return motion_guard_check_at(g, now_ms, pos_cnt, pwm, ML_STALL_PWM);
 }
 
 // ---- Pull back (filament_pulling_back) ----
@@ -236,6 +245,76 @@ static inline void ml_send_start(motion_guard *g, uint64_t now_ms, uint32_t pos_
 static inline void ml_auto_unload_start(motion_guard *g, uint64_t now_ms, uint32_t pos_cnt)
 {
     motion_guard_start(g, now_ms, pos_cnt, 0u, 0u);
+}
+
+// ---- Idle control push (filament_motion_pressure_ctrl_idle) ----
+// A channel with filament at the switches that the printer is not using runs the idle control: with
+// the buffer below 30 % (MC_PULL_DEADBAND_PCT_LOW) its pressure PID (P 25) pushes towards 50 %, at
+// 512 PWM at the deadband's edge up to its 800 PWM clamp at 18 %, until the buffer is back at 30 %.
+// It is not on_use_like, so neither the on_use anti-stall nor the 20 s push limit applies: a filament
+// held tight (a tangle on the spool, the end fixed to an empty spool's core), or a buffer that reads
+// low, had it push for good. A normal push only takes up the slack the buffer shows (after the
+// BMCU's pull back, or a pull by the printer) and ends back at 30 %: the printer draws no filament
+// from an idle channel. Each push (from the first pass that pushes to the first that does not) gets
+// a guard: the stall check at ML_IDLE_STALL_PWM, the 420 PWM hold floor, so it sees every push the
+// idle control makes, and ML_IDLE_PUSH_MAX_MS of push time, 120 mm at ML_V_MIN_MM_S. Retracts
+// (above 70 %) are not guarded: they pull filament back to the spool, and a hand that holds the
+// buffer up (the jam-latch release, the auto-unload's lift) is what stalls them.
+// A limit hit with the rounded buffer at ML_IDLE_EDGE_PCT or above (28-29 %, the PID's last 512-562
+// PWM, where a gear under heavy drag may stop short of its breakaway, as the on_use anti-stall leaves
+// a gear within 2 % of its target) only brakes: the channel is held as if in the deadband, with no
+// fault shown. Deeper, it brakes with the status LED red.
+#define ML_IDLE_STALL_PWM   420.0f
+#define ML_IDLE_PUSH_MAX_MS 10000u
+#define ML_IDLE_EDGE_PCT    28u
+
+typedef enum
+{
+    ML_IDLE_PUSH_RUN = 0, // drive as the PID asks
+    ML_IDLE_PUSH_BRAKE,   // brake, no fault shown: a limit at the deadband's edge
+    ML_IDLE_PUSH_FAULT,   // brake, status LED red
+} ml_idle_push_act;
+
+typedef struct
+{
+    motion_guard guard;   // the current push, started on its first pass
+    uint8_t      pushing; // a push is under way
+    uint8_t      fault;   // ML_IDLE_PUSH_BRAKE or _FAULT: a limit stopped it, held until the push ends
+} ml_idle_push_t;
+
+static inline void ml_idle_push_reset(ml_idle_push_t *s)
+{
+    s->pushing = 0u;
+    s->fault   = ML_IDLE_PUSH_RUN;
+}
+
+// One pass of the idle control with filament at the switches. push: its PID pushes on this pass;
+// pct: the rounded buffer reading (MC_PULL_pct); pwm: the PWM applied since the previous pass
+// (x_prev). From the pass a limit is hit the channel is braked for as long as the control still
+// pushes. Any pass on which it does not (the buffer back in the deadband, or above it) ends the push
+// and clears the limit; ml_idle_push_reset() does when the channel leaves the idle control or its
+// filament the switches. An edge brake also ends when the buffer falls below ML_IDLE_EDGE_PCT (more
+// filament drawn): a new push, with the higher PWM, its whole budget and a new stall window.
+static inline ml_idle_push_act ml_idle_push_pass(ml_idle_push_t *s, bool push, uint8_t pct, uint64_t now_ms,
+                                                 uint32_t pos_cnt, float pwm)
+{
+    if (!push)
+    {
+        ml_idle_push_reset(s);
+        return ML_IDLE_PUSH_RUN;
+    }
+    if ((s->fault == ML_IDLE_PUSH_BRAKE) && (pct < ML_IDLE_EDGE_PCT)) ml_idle_push_reset(s);
+    if (s->fault != ML_IDLE_PUSH_RUN) return (ml_idle_push_act)s->fault;
+    if (!s->pushing)
+    {
+        s->pushing = 1u;
+        motion_guard_start(&s->guard, now_ms, pos_cnt, ML_IDLE_PUSH_MAX_MS, 0u);
+        return ML_IDLE_PUSH_RUN;
+    }
+    if (!ml_is_limit(motion_guard_check_at(&s->guard, now_ms, pos_cnt, pwm, ML_IDLE_STALL_PWM)))
+        return ML_IDLE_PUSH_RUN;
+    s->fault = (pct >= ML_IDLE_EDGE_PCT) ? ML_IDLE_PUSH_BRAKE : ML_IDLE_PUSH_FAULT;
+    return (ml_idle_push_act)s->fault;
 }
 
 // ---- Unfinished unload (status LED) ----
