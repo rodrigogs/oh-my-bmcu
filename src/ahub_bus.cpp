@@ -277,7 +277,7 @@ const ahubus_package_set_head ahubus_host_package_set_init = {
     .command = 0x03,
 };
 
-void ahubus_slave_get_package_set(uint8_t *buf)
+void ahubus_slave_get_package_set(uint8_t *buf, int len)
 {
     if (bus_port_to_host.send_data_len != 0) return;
 
@@ -301,6 +301,7 @@ void ahubus_slave_get_package_set(uint8_t *buf)
     {
     case ahubus_set_type::filament_info:
     {
+        if (!ahub_set_data_fits(len, AHUB_SET_FILAMENT_INFO_LEN)) return;
         const uint8_t filament_channel = data_ptr[48];
         if (filament_channel >= 4) return;
         memcpy(&(ams[set_adr].filament[filament_channel].bambubus_filament_id), data_ptr + 4, 44);
@@ -312,6 +313,7 @@ void ahubus_slave_get_package_set(uint8_t *buf)
     }
     case ahubus_set_type::dryer_stu:
     {
+        if (!ahub_set_data_fits(len, AHUB_SET_DRYER_STU_LEN)) return;
         const uint8_t dryer_channel = data_ptr[8];
         if (dryer_channel >= 4) return;
         memcpy(&(ams[set_adr].filament[dryer_channel].dryer_power), data_ptr + 4, 4);
@@ -320,6 +322,7 @@ void ahubus_slave_get_package_set(uint8_t *buf)
     case ahubus_set_type::all_filament_stu:
     {
         const uint8_t data_struct_count = buf[7];
+        if (!ahub_set_data_fits(len, data_struct_count * AHUB_SET_FILAMENT_STU_LEN)) return;
         uint8_t *data_struct_ptr = data_ptr + 4;
 
         for (uint8_t i = 0; i < data_struct_count; i++)
@@ -328,7 +331,7 @@ void ahubus_slave_get_package_set(uint8_t *buf)
 #ifdef xMCU
             ams_adr = (uint8_t)(ams_adr >> 4);
 #endif
-            if (ams_adr >= ams_max_number) { data_struct_ptr += 6; continue; }
+            if (ams_adr >= ams_max_number) { data_struct_ptr += AHUB_SET_FILAMENT_STU_LEN; continue; }
 
             ams[ams_adr].now_filament_num = ahub_now_filament_num(data_struct_ptr[1]);
             ams[ams_adr].filament[0].motion = (_filament_motion)(data_struct_ptr[2] & 0x7Fu);
@@ -336,7 +339,7 @@ void ahubus_slave_get_package_set(uint8_t *buf)
             ams[ams_adr].filament[2].motion = (_filament_motion)(data_struct_ptr[4] & 0x7Fu);
             ams[ams_adr].filament[3].motion = (_filament_motion)(data_struct_ptr[5] & 0x7Fu);
 
-            data_struct_ptr += 6;
+            data_struct_ptr += AHUB_SET_FILAMENT_STU_LEN;
         }
         break;
     }
@@ -390,7 +393,7 @@ ahubus_package_type ahubus_run()
                 break;
 
             case ahubus_package_type::set:
-                ahubus_slave_get_package_set(buf);
+                ahubus_slave_get_package_set(buf, rx_len);
                 break;
 
             default:
