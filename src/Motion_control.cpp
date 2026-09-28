@@ -2501,6 +2501,19 @@ static inline void stu_apply_baseline(int error, uint64_t now_ms)
 }
 
 
+// Stops and brakes channel i at once, into the state run()'s stop branch leaves: PWM 0, PIDs
+// cleared, pwm_zeroed set and x_prev 0, whatever the motion was (set_motion(stop) alone does none
+// of that when the channel is already stopped, e.g. under a manual empty pull).
+static void motor_brake_now(uint8_t i, uint64_t now_ms)
+{
+    MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, now_ms);
+    MOTOR_CONTROL[i].PID_speed.clear();
+    MOTOR_CONTROL[i].PID_pressure.clear();
+    MOTOR_CONTROL[i].pwm_zeroed = 1;
+    _MOTOR_CONTROL::x_prev[i] = 0.0f;
+    Motion_control_set_PWM(i, 0);
+}
+
 static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
 {
 #if BMCU_DM_TWO_MICROSWITCH
@@ -2633,15 +2646,17 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
     }
 
     // Stale ADC stream: no channel drives on frozen buffer and switch readings. Every motor is
-    // stopped and braked as for a bad AS5600, a running auto-unload ends, and every status LED
+    // braked as for a bad AS5600 (motor_brake_now), a running auto-unload ends, and every status LED
     // blinks blue (250 ms on, 250 ms off) with the buffer LED off, until a new half-buffer comes.
+    // The pull back and redetect guards run before this block and read x_prev: from the second stale
+    // pass on it is 0 (their set_motion from stop and this brake both zero it), so a stale stream is
+    // no stall; their time budgets still run.
     if (g_adc_stale)
     {
         const uint8_t blue = (((time_now / 250ull) & 1ull) == 0ull) ? 0xFFu : 0x00u;
         for (uint8_t i = 0; i < kChCount; i++)
         {
-            MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
-            Motion_control_set_PWM(i, 0);
+            motor_brake_now(i, time_now);
             auto_unload_reset(&g_auto_unload[i]);
             MC_STU_RGB_set(i, 0x00u, 0x00u, blue);
             MC_PULL_ONLINE_RGB_set(i, 0x00u, 0x00u, 0x00u);
@@ -2653,8 +2668,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
     {
         if (!AS5600_is_good(i))
         {
-            MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
-            Motion_control_set_PWM(i, 0);
+            motor_brake_now(i, time_now);
             continue;
         }
 

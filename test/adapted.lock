@@ -29,12 +29,16 @@ b7c6bed67ec10062ee4993e54c9b6cd0c7c84a81651922ef668af1101edb9f46 src/Motion_cont
 46e07b21720f51de67a3c3d407856e12462f0f26e926cd9fbc69fd3f1aba2b7a src/Motion_control.cpp PULL_V_END
 10e054bda6a2228fb0aa62850919ec4b6067c0bbe77a6de96afb229881c0fccd src/Motion_control.cpp PULL_V_FAST
 b65e4431665c037750a4b8af0268d0e7aebd1b440b79f8ed6ba25b03484bd69d src/Motion_control.cpp _MOTOR_CONTROL from /MOTOR_PID PID_speed/ to /MOTOR_PID PID_speed/
+e704802b698acfe1a4856a18779c111d3418a9fd27ef77047c73e725979b3bec src/Motion_control.cpp _MOTOR_CONTROL from /const bool keep_pwm =/ to /x_prev\[CHx\] = 0\.0f;/
+98824caf8d335c2c38648968f24a2915aad75dbebdb5e0e08839a4a554054ad8 src/Motion_control.cpp _MOTOR_CONTROL from /if \(motion == _motion\) return;/ to /if \(motion == _motion\) return;/
 ea31a5d8d7d66115dd0083912b16edb78ad9992ee68cca628edf7893943da8d8 src/Motion_control.cpp dm_key_to_state
+a637c3b50dc788c63e73b3bfec9a62b2dee78d188c6630cb01520c3022debf9f src/Motion_control.cpp motor_brake_now
+ea19e35e38dc8b9f841c036448e3dbed2eedc0edbc9803087fe348ca5a96c6a7 src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /g_pull_speed_set\[i\] = -v;/ to /filament_motion_pull, 100/
 64352cbff9ef6928765fc8b27d9a5a135fa5f52ae3f4c18c9e0abc143c07fcfe src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /remain = target - d/ to /= -v;/
 c87c1d4eaea60b9f6263ee2c3b995ce5d083f1f782eb10e0139d71fe40a9917e src/Motion_control.cpp motor_motion_run from /MC_PULL_ONLINE_RGB_set\(i, r, g, b,/ to /MC_PULL_ONLINE_RGB_set\(i, r, g, b,/
 43e170b59fe173e0f57550d72c9b95ba9073378bee5ac52bb7e8b5009b104177 src/Motion_control.cpp motor_motion_run from /au_in_t au;/ to /MOTOR_CONTROL\[i\]\.run\(/
 1c217e58930485c789b94b6ad68ee432e58012a5b2ae6bc862abee936398b31f src/Motion_control.cpp motor_motion_run from /filament_now_position_enum pos =/ to /as5600_count\[ch\]\);/
-5600de8036ffc610b04b26687b279dadeb72b56125995bf04e0e7c376f3dd67b src/Motion_control.cpp motor_motion_run from /if \(g_adc_stale\)/ to /return;/
+986f5a31f8eb56bc75bd9b17f44f87fa5eaf57d458ebe76c56ea8df8a9d3f63c src/Motion_control.cpp motor_motion_run from /if \(g_adc_stale\)/ to /return;/
 cab4bc8959a7f1d8822cbcd2b4c717ff8442dd54ff23273a3ea5e733473df736 src/Motion_control.cpp motor_motion_run from /stu_apply_baseline\(/ to /motor_motion_switch\(/
 5a56b1160f47308a3fc421856749fa2ada17113d0b218fa8de7a0de457b81ca5 src/Motion_control.cpp motor_motion_switch
 1b19e7e2bbcd1dad6960508df2b8545d83e378464661049cf1d015a5939548c5 src/Motion_control.cpp run from /case DM_AUTO_S2_PUSH:/ to /dm_auto_remain_m\[CHx\] = r;/

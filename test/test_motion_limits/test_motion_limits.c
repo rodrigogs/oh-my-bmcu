@@ -456,6 +456,51 @@ static void test_bus_offline_gap_is_not_counted(void)
     TEST_ASSERT_EQUAL_UINT32(4917u, t_done);
 }
 
+// ---- adapted from Motion_control.cpp: a pull back pass while the ADC stream is stale ----
+// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /g_pull_speed_set\[i\] = -v;/ to /filament_motion_pull, 100/ ----
+// ---- anchor: _MOTOR_CONTROL from /if \(motion == _motion\) return;/ to /if \(motion == _motion\) return;/ ----
+// ---- anchor: _MOTOR_CONTROL from /const bool keep_pwm =/ to /x_prev\[CHx\] = 0\.0f;/ ----
+// ---- anchor: motor_brake_now ----
+// ---- anchor: motor_motion_run from /if \(g_adc_stale\)/ to /return;/ ----
+// motor_motion_filamnet_pull_back_to_online_key checks the pull back with x_prev, then sets the
+// pull, which zeroes x_prev when it changes the motion (set_motion, keep_pwm false); then the stale
+// block brakes the channel through motor_brake_now, which sets stop and zeroes x_prev too.
+static bool s_pulling;  // MOTOR_CONTROL[i].motion == filament_motion_pull
+
+static ml_result stale_pull_back_pass(float *x_prev)
+{
+    const ml_result r = ml_pull_back_check(&g, now, s_cnt, *x_prev, SOLO_RETRACT_M, 0.0f, 1u);
+    if (!s_pulling) *x_prev = 0.0f;  // set_motion(pull): a change of motion only after a brake
+    *x_prev   = 0.0f;                // motor_brake_now: stop, x_prev 0
+    s_pulling = false;
+    return r;
+}
+
+static void test_stale_adc_during_a_pull_back_is_not_a_stall(void)
+{
+    // A pull back at 1000 PWM, then the ADC stream is stale for 1.5 s: every pass brakes the motor
+    // and the gear stands still. The guard reads the last pull PWM on the first stale pass and PWM 0
+    // from the second on (set_motion from stop and the brake both zero x_prev), so the stall window
+    // restarts on every pass; the time budget still runs.
+    ml_pull_back_start(&g, now, s_cnt, SOLO_RETRACT_M);
+    s_pulling = true;
+    float x_prev = 1000.0f;
+    for (uint32_t t = 1; t <= 1500u; t++)
+    {
+        now++;
+        TEST_ASSERT_EQUAL(ML_OK, stale_pull_back_pass(&x_prev));
+    }
+    TEST_ASSERT_EQUAL_UINT32(1500u, g.run_ms);
+
+    // Why the zeroing matters, not a state of the firmware: if a braked channel kept the last pull
+    // PWM in x_prev, the same frozen count would end the pull back as ML_STALL, ML_STALL_MS after the
+    // stream went stale.
+    setUp();
+    ml_pull_back_start(&g, now, s_cnt, SOLO_RETRACT_M);
+    TEST_ASSERT_EQUAL_UINT32(ML_STALL_MS, run_move_then_block(check_pull, 0.0f, 0u, 1000.0f));
+    TEST_ASSERT_EQUAL(ML_STALL, s_end);
+}
+
 static void test_budget_is_not_cut_by_32bit_ms(void)
 {
     // Uptime past 2^32 ms: differences are 64-bit, nothing wraps.
@@ -1195,6 +1240,7 @@ int main(void)
     RUN_TEST(test_pull_at_5000m_odometer_is_not_a_false_stall);
     RUN_TEST(test_pull_end_does_not_depend_on_the_odometer);
     RUN_TEST(test_bus_offline_gap_is_not_counted);
+    RUN_TEST(test_stale_adc_during_a_pull_back_is_not_a_stall);
     RUN_TEST(test_budget_is_not_cut_by_32bit_ms);
     RUN_TEST(test_redetect_on_empty_channel_stops_after_retract_length);
     RUN_TEST(test_redetect_reinserted_filament_ends_as_before);
