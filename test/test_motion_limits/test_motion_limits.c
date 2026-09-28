@@ -896,6 +896,51 @@ static void test_normal_a1_load_is_not_limited(void)
     }
 }
 
+static void test_a1_hold_at_800_pwm_or_more_with_jitter_is_a_stall(void)
+{
+    // Documents what the send guard does with the one hold the case above leaves out. After the
+    // latch at 85 %, hold_load pushes at 800 PWM or more only with the buffer below 83.7 % (A1: 480
+    // PWM just under 89.7 %, + 53.6 PWM a point, 1000 PWM from 80 % down). A buffer that falls there
+    // and stays, the gear still, means the gear cannot keep up with the buffer: a fault, not a normal
+    // load. With +-1 count of jitter the anti-stall never counts (stall_s resets on every pass that
+    // reads 1 count, 5.75 mm/s), so neither its kick nor its rest comes and the push holds its PWM.
+    // The guard counts net travel, 1 count here, and stops the send ML_STALL_MS after the last full
+    // 1 mm of the feed before (at 60 mm/s up to 17 ms before the hold). Just above 83.7 % (796 PWM)
+    // it does not, as at the latch point.
+    static const float pwm_stall[] = {1000.0f, 892.8f, 801.6f}; // buffer at 80 %, 82 %, 83.7 %
+    for (uint32_t i = 0u; i < sizeof(pwm_stall) / sizeof(pwm_stall[0]); i++)
+    {
+        setUp();
+        gear_reset(FEED_CNT0, 1.2345f);
+        ml_send_start(&g, now, s_cnt);
+        TEST_ASSERT_EQUAL_UINT32(0u, run_send(60.0f, 1000.0f, 2000u));
+        const uint32_t hold_cnt = s_cnt;
+        uint32_t t_done = 0u;
+        for (uint32_t t = 1; t <= 60000u && !t_done; t++)
+        {
+            now++;
+            const uint32_t p = ((t & 1u) != 0u) ? (hold_cnt + 1u) : hold_cnt;
+            const ml_result r = check_send(p, pwm_stall[i]);
+            if (r != ML_OK)
+            {
+                TEST_ASSERT_EQUAL(ML_STALL, r);
+                t_done = t;
+            }
+        }
+        TEST_ASSERT_TRUE((t_done > ML_STALL_MS - 18u) && (t_done <= ML_STALL_MS));
+    }
+
+    setUp();
+    ml_send_start(&g, now, s_cnt);
+    const uint32_t hold_cnt = s_cnt;
+    for (uint32_t t = 1; t <= 60000u; t++)
+    {
+        now++;
+        const uint32_t p = ((t & 1u) != 0u) ? (hold_cnt + 1u) : hold_cnt;
+        TEST_ASSERT_EQUAL(ML_OK, check_send(p, 796.3f)); // buffer at 83.8 %
+    }
+}
+
 // ---- Idle control push (filament_motion_pressure_ctrl_idle) ----
 
 // ---- adapted from Motion_control.cpp: the rounded buffer reading MC_PULL_pct ----
@@ -1299,6 +1344,7 @@ int main(void)
     RUN_TEST(test_blocked_send_stops_1s_after_reaching_800_pwm);
     RUN_TEST(test_send_that_feeds_then_blocks_stops_1s_after_the_block);
     RUN_TEST(test_normal_a1_load_is_not_limited);
+    RUN_TEST(test_a1_hold_at_800_pwm_or_more_with_jitter_is_a_stall);
     RUN_TEST(test_idle_push_stall_level_is_the_hold_floor);
     RUN_TEST(test_blocked_idle_push_stops_1s_after_it_starts);
     RUN_TEST(test_idle_push_that_moves_but_never_ends_stops_at_its_budget);
