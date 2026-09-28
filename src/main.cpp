@@ -222,7 +222,7 @@ int main(void)
     time_hw_init();
 
     const uint32_t reset_flags = watchdog_reset_flags_take();
-    blackbox_boot(reset_flags); // phase BOOT; before the watchdog and before anything that can trap
+    blackbox_boot(reset_flags); // phase BOOT; right after the clock setup: a trap from here on is recorded
 
     __enable_irq();
 

@@ -26,7 +26,9 @@ uint32_t watchdog_reset_flags_take(void);
 // ===== fault record (blackbox.h) =====
 // Turns the backup registers on (PWR and BKP clocks, PWR_CTLR.DBP), decodes the record of the run
 // that just ended into g_blackbox_last and writes this run's, from this boot's RCC_RSTSCKR. main
-// calls it first, before watchdog_start, so that failsafe_stop can record a trap from then on.
+// calls it right after the clock and SysTick setup and the reset-flag read (SystemInit,
+// SystemCoreClockUpdate, time_hw_init, watchdog_reset_flags_take), well before watchdog_start, so
+// that failsafe_stop records a trap from then on; a trap before it leaves no record.
 void blackbox_boot(uint32_t rstsckr);
 
 extern blackbox_t g_blackbox_last;      // the run before this boot (also for a debugger)
