@@ -1,4 +1,5 @@
 #include "ADC_DMA.h"
+#include "adc_stream.h"
 #include "hal/time_hw.h"
 #include "ch32v20x_adc.h"
 #include "ch32v20x_dma.h"
@@ -25,6 +26,7 @@ static uint8_t  g_blocks_filled = 0;
 static float            g_v[2][kCh] __attribute__((aligned(4)));
 static volatile uint8_t g_v_rd = 0;
 static volatile uint8_t g_acc_dirty = 0;
+static uint64_t         g_half_ticks = 0u; // time_ticks64() of the last processed half (adc_stream.h)
 
 static constexpr float kScale32  = 3.3f / (8190.0f *  32.0f);
 static constexpr float kScale64  = 3.3f / (8190.0f *  64.0f);
@@ -53,7 +55,8 @@ void ADC_DMA_gpio_analog()
     GPIO_Init(GPIOA, &gpio);
 }
 
-static inline void filter_reset()
+// The averaging ring only: the readings keep their last values until the next half is processed.
+static inline void ring_reset()
 {
     g_ring_idx = 0;
     g_blocks_filled = 0;
@@ -65,6 +68,13 @@ static inline void filter_reset()
         for (uint32_t ch = 0; ch < kCh; ch++)
             g_ring_sum[b][ch] = 0;
 
+    g_acc_dirty = 0;
+}
+
+static inline void filter_reset()
+{
+    ring_reset();
+
     for (uint32_t ch = 0; ch < kCh; ch++)
     {
         g_v[0][ch] = 0.0f;
@@ -72,7 +82,6 @@ static inline void filter_reset()
     }
 
     g_v_rd = 0;
-    g_acc_dirty = 0;
 }
 
 static inline __attribute__((always_inline)) uint32_t adc_pair_sum(uint32_t w)
@@ -128,7 +137,10 @@ static inline void process_half_update_filter(const uint32_t* p_half)
 
     adc_dma_compiler_barrier();
     g_acc_dirty = 1u;
+    g_half_ticks = time_ticks64();
 }
+
+static void adc_dma_start();
 
 void ADC_DMA_poll()
 {
@@ -136,11 +148,13 @@ void ADC_DMA_poll()
     {
         const uint32_t flags = DMA1->INTFR;
 
+        // A transfer error disables the channel, so no half would come again. Restart the DMA and
+        // both ADCs from the start of the buffer (each word on its channel again); until the first
+        // new half the readings keep their last values and ADC_DMA_age_ticks() goes on growing.
         if (flags & DMA1_FLAG_TE1)
         {
-            DMA1->INTFCR = (DMA1_FLAG_TE1 | DMA1_FLAG_HT1 | DMA1_FLAG_TC1);
-            adc_dma_barrier();
-            filter_reset();
+            adc_dma_start();
+            ring_reset();
             continue;
         }
 
@@ -205,6 +219,11 @@ bool ADC_DMA_ready()
     return (g_blocks_filled >= kNBlocks);
 }
 
+uint64_t ADC_DMA_age_ticks()
+{
+    return adc_stream_age_ticks(time_ticks64(), g_half_ticks);
+}
+
 void ADC_DMA_wait_full()
 {
     const uint32_t t0 = time_ticks32();
@@ -251,27 +270,10 @@ static inline void adc_calibrate(ADC_TypeDef* a)
     adc_cal_wait(a, ADC_GetCalibrationStatus);
 }
 
-void ADC_DMA_init()
+// DMA1 channel 1 and both ADCs from reset: calibrated, converting, the DMA at the start of the
+// buffer, all its flags clear. At boot (ADC_DMA_init) and after a transfer error (ADC_DMA_poll).
+static void adc_dma_start()
 {
-    if (g_adc_dma_inited)
-    {
-        ADC_DMA_gpio_analog();
-        ADC_DMA_filter_reset();
-        ADC_DMA_wait_full();
-        return;
-    }
-
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC2, ENABLE);
-    RCC_ADCCLKConfig(RCC_PCLK2_Div8);
-
-    ADC_DMA_gpio_analog();
-
-    for (uint32_t i = 0; i < kBufLen; i++) g_dma_buf[i] = 0xFFFFFFFFu;
-    filter_reset();
-
     DMA_DeInit(DMA1_Channel1);
     DMA_Cmd(DMA1_Channel1, DISABLE);
 
@@ -336,6 +338,30 @@ void ADC_DMA_init()
 
     ADC_SoftwareStartConvCmd(ADC2, ENABLE);
     ADC_SoftwareStartConvCmd(ADC1, ENABLE);
+}
+
+void ADC_DMA_init()
+{
+    if (g_adc_dma_inited)
+    {
+        ADC_DMA_gpio_analog();
+        ADC_DMA_filter_reset();
+        ADC_DMA_wait_full();
+        return;
+    }
+
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1, ENABLE);
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC2, ENABLE);
+    RCC_ADCCLKConfig(RCC_PCLK2_Div8);
+
+    ADC_DMA_gpio_analog();
+
+    for (uint32_t i = 0; i < kBufLen; i++) g_dma_buf[i] = 0xFFFFFFFFu;
+    filter_reset();
+
+    adc_dma_start();
 
     uint32_t t0 = time_ticks32();
     const uint32_t warm = ms_to_ticks32(350u);
