@@ -4,7 +4,9 @@
 // Normal 95 mm SOLO unloads, long retracts and a redetect ended by re-inserted filament must end
 // exactly when they did before. A pull stopped by a limit must leave the unload fault (red LED).
 // The send (load) stops on a stalled gear or after 10 m as before, with no time budget, and a
-// normal A1 load is never stopped.
+// normal A1 load is never stopped. The idle control's push brakes on a stalled gear at any PWM it
+// pushes with, or after 10 s, until it stops pushing, red unless it stopped at the deadband's edge;
+// a push that takes up the buffer's slack never.
 //
 // Each test drives the decision functions in 1 ms main-loop passes, the way Motion_control.cpp
 // calls them. The simulated gear gives both of the firmware's position sources: the AS5600 count
@@ -832,6 +834,276 @@ static void test_normal_a1_load_is_not_limited(void)
     }
 }
 
+// ---- Idle control push (filament_motion_pressure_ctrl_idle) ----
+
+// ---- adapted from Motion_control.cpp: the rounded buffer reading MC_PULL_pct ----
+static uint8_t idle_pct(float pct_f)
+{
+    int pct = (int)(pct_f + 0.5f);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return (uint8_t)pct;
+}
+
+// ---- adapted from Motion_control.cpp: the idle control's push with filament at the switches ----
+// With the rounded buffer reading below MC_PULL_DEADBAND_PCT_LOW (30 %, MC_PULL_stu -1) the pressure
+// PID (P MC_PULL_PIDP_PCT 25, no I or D) drives towards 50 %, raised to the 420 PWM hold floor and
+// clamped at the idle control's 800 PWM. Returns the push PWM (its magnitude), 0 when it does not push.
+static float idle_push_pwm(float pct_f)
+{
+    if (idle_pct(pct_f) >= 30u) return 0.0f;
+    float x = 25.0f * (50.0f - pct_f);
+    if (x < 420.0f) x = 420.0f;
+    if (x > 800.0f) x = 800.0f;
+    return x;
+}
+
+static ml_idle_push_t ip;
+static float ip_pwm;              // PWM applied since the previous pass (x_prev): 0 when braked or not pushing
+static ml_idle_push_act ip_act;   // what the last pass did
+
+static void idle_reset(void)
+{
+    ml_idle_push_reset(&ip);
+    ip_pwm = 0.0f;
+    ip_act = ML_IDLE_PUSH_RUN;
+}
+
+// One 1 ms pass of the idle control with filament at the switches, with the gear at pos_cnt: run()
+// decides with the buffer at pct_f. Returns true when it brakes (ip_act: with or without the red).
+static bool idle_pass_at(float pct_f, uint32_t pos_cnt)
+{
+    now++;
+    const float cmd = idle_push_pwm(pct_f);
+    ip_act = ml_idle_push_pass(&ip, cmd > 0.0f, idle_pct(pct_f), now, pos_cnt, ip_pwm);
+    ip_pwm = (ip_act != ML_IDLE_PUSH_RUN) ? 0.0f : cmd;
+    return ip_act != ML_IDLE_PUSH_RUN;
+}
+
+// The same, after the gear moved v_mm_s (feeding) since the previous pass.
+static bool idle_pass(float pct_f, float v_mm_s)
+{
+    gear_step(v_mm_s);
+    return idle_pass_at(pct_f, s_cnt);
+}
+
+// passes idle passes at pct_f and v_mm_s; returns the first one that brakes, 0 if none does.
+static uint32_t run_idle(float pct_f, float v_mm_s, uint32_t passes)
+{
+    for (uint32_t t = 1; t <= passes; t++)
+        if (idle_pass(pct_f, v_mm_s)) return t;
+    return 0u;
+}
+
+// The same with the gear held (+-1 count of jitter around where it is).
+static uint32_t run_idle_held(float pct_f, uint32_t passes)
+{
+    const uint32_t start = s_cnt;
+    for (uint32_t t = 1; t <= passes; t++)
+        if (idle_pass_at(pct_f, ((t & 1u) != 0u) ? (start + 1u) : (start - 1u))) return t;
+    return 0u;
+}
+
+static void test_idle_push_stall_level_is_the_hold_floor(void)
+{
+    // The idle control pushes at 512.5 PWM at the edge of its deadband (29.49 %, which rounds to 29)
+    // and reaches its 800 PWM clamp at 18 %. ML_STALL_PWM (800) would only see a buffer at or below
+    // 18 %; the idle stall level is the 420 PWM hold floor, under every push it makes.
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, idle_push_pwm(29.5f));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 512.75f, idle_push_pwm(29.49f));
+    TEST_ASSERT_EQUAL_FLOAT(800.0f, idle_push_pwm(18.0f));
+    TEST_ASSERT_TRUE(idle_push_pwm(18.1f) < ML_STALL_PWM);
+    TEST_ASSERT_EQUAL_FLOAT(420.0f, ML_IDLE_STALL_PWM);
+    TEST_ASSERT_TRUE(idle_push_pwm(29.49f) >= ML_IDLE_STALL_PWM);
+    TEST_ASSERT_EQUAL_UINT32(10000u, ML_IDLE_PUSH_MAX_MS);
+    // The edge band: rounded 28 and 29 %, 512.5-562.5 PWM; from 27.49 % (rounded 27) the red.
+    TEST_ASSERT_EQUAL_UINT8(28u, ML_IDLE_EDGE_PCT);
+    TEST_ASSERT_EQUAL_UINT8(28u, idle_pct(27.5f));
+    TEST_ASSERT_EQUAL_UINT8(27u, idle_pct(27.49f));
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 562.5f, idle_push_pwm(27.5f));
+}
+
+static void test_blocked_idle_push_stops_1s_after_it_starts(void)
+{
+    // A parked channel whose filament is held tight (a tangle on the spool, the filament end fixed
+    // to an empty spool's core): the buffer stays below 30 % and the gear does not turn (+-1 count
+    // of jitter). Before, the idle control pushed for good, at 512-800 PWM depending on the buffer.
+    // Now it brakes ML_STALL_MS after the first push pass, at the edge of the deadband as at 0 %:
+    // with the red below 28 %, without it at 28-29 %.
+    const float levels[] = {29.4f, 27.5f, 27.49f, 25.0f, 18.0f, 0.0f};
+    const ml_idle_push_act acts[] = {ML_IDLE_PUSH_BRAKE, ML_IDLE_PUSH_BRAKE, ML_IDLE_PUSH_FAULT,
+                                     ML_IDLE_PUSH_FAULT, ML_IDLE_PUSH_FAULT, ML_IDLE_PUSH_FAULT};
+    for (uint32_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++)
+    {
+        setUp();
+        idle_reset();
+        TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle_held(levels[i], 60000u));
+        TEST_ASSERT_EQUAL_INT(acts[i], ip_act);
+    }
+
+    // 40.8 mm at 60 mm/s (the buffer does not rise: the filament goes on into the tube), then the
+    // spool catches: ML_STALL_MS after the gear's last full 1 mm. The window restarts about every 17
+    // passes at 60 mm/s; with the push's guard started after the first pass's step, it last
+    // restarted 16 passes before the block.
+    setUp();
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(0u, run_idle(20.0f, 60.0f, 680u));
+    TEST_ASSERT_EQUAL_UINT32(ML_STALL_MS - 16u, run_idle(20.0f, 0.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+}
+
+static void test_idle_push_that_moves_but_never_ends_stops_at_its_budget(void)
+{
+    // The gear turns but the buffer never comes back to 30 %: it reads low (a sensor or calibration
+    // fault), or the gear slips on the filament, or the filament goes on into the printer's path
+    // without pushing the buffer up. At 60 mm/s that is 600 mm in 10 s; before, it never ended.
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_IDLE_PUSH_MAX_MS, run_idle(20.0f, 60.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+    // A creeping gear (2 mm/s at the 800 PWM clamp: no stall) as well.
+    setUp();
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_IDLE_PUSH_MAX_MS, run_idle(10.0f, 2.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+    // A buffer that rests just under 30 % (its reading centred on 1.65 V, not on the calibrated
+    // rest) with free filament fed slowly at 512-537 PWM: braked after 10 s too, without the red.
+    setUp();
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_IDLE_PUSH_MAX_MS, run_idle(29.0f, 1.5f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_BRAKE, ip_act);
+}
+
+static void test_normal_idle_pushes_are_not_limited(void)
+{
+    // Every normal push ends when the buffer is back at 30 %: it only takes up the slack the buffer
+    // shows, while the printer does not draw filament from an idle channel.
+    // - After the BMCU's pull back (the printer's unload, a channel switch), also one stopped by a
+    //   stall with the filament still held in the tool head: the buffer at its low end, the push
+    //   feeds until it is back at 30 %. Modelled as 1 % of buffer a mm (a 100 mm buffer, far more
+    //   than the BMCU's), at 12 mm/s (ML_V_MIN_MM_S, heavy drag) from 0 %: 30 mm, 2.5 s.
+    idle_reset();
+    float pct = 0.0f;
+    uint32_t t = 0u;
+    while (idle_push_pwm(pct) > 0.0f)
+    {
+        TEST_ASSERT_FALSE(idle_pass(pct, 12.0f));
+        pct += 0.012f;
+        t++;
+    }
+    TEST_ASSERT_UINT32_WITHIN(2u, 2458u, t);
+    TEST_ASSERT_FALSE(idle_pass(pct, 12.0f));  // in the deadband: no push, no limit
+
+    // - The same at 1.5 mm/s (1 mm every 667 ms, no stall) for 9.9 s, just inside the budget.
+    setUp();
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(0u, run_idle(10.0f, 1.5f, ML_IDLE_PUSH_MAX_MS - 100u));
+    TEST_ASSERT_EQUAL_UINT32(0u, run_idle(40.0f, 0.0f, 1u));
+
+    // - The printer draws filament through a parked or idle channel (its end-of-print moves, a
+    //   filament the printer pulled): the push follows in bursts, each ending back at 30 %. 300 ms
+    //   pushing at 29 % with the gear feeding, 200 ms in the deadband, for 10 min.
+    setUp();
+    idle_reset();
+    for (uint32_t i = 0; i < 1200u; i++)
+    {
+        TEST_ASSERT_EQUAL_UINT32(0u, run_idle(29.0f, 20.0f, 300u));
+        TEST_ASSERT_EQUAL_UINT32(0u, run_idle(31.0f, 0.0f, 200u));
+    }
+
+    // - A hand that presses the buffer down (the DM buffer gesture: below 10 % for at most 2 s)
+    //   while the gear still feeds, then lets it go back to the middle.
+    setUp();
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(0u, run_idle(5.0f, 30.0f, 2000u));
+    TEST_ASSERT_EQUAL_UINT32(0u, run_idle(50.0f, 0.0f, 100u));
+}
+
+static void test_idle_push_that_stops_at_the_deadband_edge_shows_no_fault(void)
+{
+    // The slack after a pull back taken up as above, but the gear stops at 28 %, short of the
+    // deadband: spool drag and the gearbox need more than the PID's 550 PWM there, with the tension
+    // downstream almost gone. Braked 1 s later (the current this guard is for), with no red: the
+    // channel is held as if in the deadband, for as long as the buffer stays there.
+    idle_reset();
+    float pct = 0.0f;
+    while (pct < 28.0f)
+    {
+        TEST_ASSERT_FALSE(idle_pass(pct, 12.0f));
+        pct += 0.012f;
+    }
+    // The stall window last restarted within the gear's last 1 mm (84 passes at 12 mm/s).
+    const uint32_t t_brake = run_idle_held(pct, 60000u);
+    TEST_ASSERT_TRUE((t_brake > ML_STALL_MS - 84u) && (t_brake <= ML_STALL_MS));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_BRAKE, ip_act);
+    for (uint32_t i = 0; i < 60000u; i++)
+    {
+        TEST_ASSERT_TRUE(idle_pass_at((i & 1u) ? 27.5f : 29.49f, s_cnt));
+        TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_BRAKE, ip_act);
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, ip_pwm);
+    }
+
+    // The buffer back in the deadband clears it, as the red.
+    TEST_ASSERT_FALSE(idle_pass(30.0f, 0.0f));
+    TEST_ASSERT_EQUAL_UINT8(0u, ip.fault);
+
+    // Braked at the edge, then more filament is drawn (the buffer falls to 20 %): a new push at the
+    // higher PWM, not held by the edge brake, with its whole budget. A gear that then turns takes up
+    // the slack; one that is still held is braked again 1 s after the new push starts, with the red.
+    setUp();
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle_held(28.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_BRAKE, ip_act);
+    TEST_ASSERT_EQUAL_UINT32(0u, run_idle(20.0f, 30.0f, ML_IDLE_PUSH_MAX_MS));
+    TEST_ASSERT_EQUAL_FLOAT(idle_push_pwm(20.0f), ip_pwm);
+    TEST_ASSERT_FALSE(idle_pass(30.0f, 0.0f));
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle_held(28.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_BRAKE, ip_act);
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle_held(20.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+
+    // The red is not lowered to the edge brake by a buffer that rises into the band: it holds until
+    // the push ends.
+    TEST_ASSERT_TRUE(idle_pass_at(29.0f, s_cnt));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+    TEST_ASSERT_FALSE(idle_pass(29.5f, 0.0f));
+}
+
+static void test_idle_push_fault_holds_until_the_control_stops_pushing(void)
+{
+    // Stalled: braked (0 PWM) and red on every pass while the buffer stays below 30 %, for as long
+    // as that lasts, and the gear is still not moving.
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle(20.0f, 0.0f, 60000u));
+    for (uint32_t i = 0; i < 60000u; i++)
+    {
+        TEST_ASSERT_TRUE(idle_pass((i & 1u) ? 20.0f : 29.4f, 0.0f));
+        TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, ip_pwm);
+    }
+
+    // The buffer back in the deadband (the spool freed, the filament fed or the buffer let go): the
+    // fault clears on that pass, and the next push starts over with the whole budget and window.
+    TEST_ASSERT_FALSE(idle_pass(30.0f, 0.0f));
+    TEST_ASSERT_EQUAL_UINT32(0u, run_idle(20.0f, 60.0f, ML_IDLE_PUSH_MAX_MS));
+    TEST_ASSERT_EQUAL_UINT32(1u, run_idle(20.0f, 60.0f, 1u));
+
+    // Above 70 % the idle control retracts: not a push, so that clears it as well.
+    TEST_ASSERT_TRUE(idle_pass(20.0f, 0.0f));
+    TEST_ASSERT_FALSE(idle_pass(75.0f, 0.0f));
+    TEST_ASSERT_FALSE(idle_pass(20.0f, 0.0f));
+
+    // No filament at the switches (the idle control's key-0 branches, which do not push through it)
+    // or the printer moving the channel (set_motion): ml_idle_push_reset. The next push starts over.
+    setUp();
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle(20.0f, 0.0f, 60000u));
+    ml_idle_push_reset(&ip);
+    ip_pwm = 0.0f;
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle(20.0f, 0.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_RUN, ml_idle_push_pass(&ip, false, 50u, now + 1u, s_cnt, 0.0f));
+    TEST_ASSERT_EQUAL_UINT8(0u, ip.fault);
+}
+
 // ---- Unfinished unload fault (status LED) ----
 
 static void test_only_a_limit_is_an_unload_fault(void)
@@ -917,6 +1189,12 @@ int main(void)
     RUN_TEST(test_blocked_send_stops_1s_after_reaching_800_pwm);
     RUN_TEST(test_send_that_feeds_then_blocks_stops_1s_after_the_block);
     RUN_TEST(test_normal_a1_load_is_not_limited);
+    RUN_TEST(test_idle_push_stall_level_is_the_hold_floor);
+    RUN_TEST(test_blocked_idle_push_stops_1s_after_it_starts);
+    RUN_TEST(test_idle_push_that_moves_but_never_ends_stops_at_its_budget);
+    RUN_TEST(test_normal_idle_pushes_are_not_limited);
+    RUN_TEST(test_idle_push_that_stops_at_the_deadband_edge_shows_no_fault);
+    RUN_TEST(test_idle_push_fault_holds_until_the_control_stops_pushing);
     RUN_TEST(test_only_a_limit_is_an_unload_fault);
     RUN_TEST(test_unload_fault_stays_until_filament_out_or_next_move);
     RUN_TEST(test_stalled_pull_sets_the_fault_and_a_good_retry_clears_it);

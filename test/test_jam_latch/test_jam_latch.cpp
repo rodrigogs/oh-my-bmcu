@@ -107,6 +107,8 @@ static jam_ctrl_t bmcu_ctrl(_filament_motion m)
 // ---- adapted from Motion_control.cpp: whether run()'s control may push (idle: MC_PULL_stu -1, below 30%) ----
 // run() on this pass: the on_use control or hold_load runs (and may push), and so does the idle
 // control with the buffer below 30% (MC_PULL_stu -1: its PID pushes towards 50%), unless braked.
+// The idle control's own push limits (ml_idle_push_pass, motion_limits.h) are left out: they brake it
+// only after 1 s without gear motion or 10 s of push, and no push in these cases is longer.
 static bool motor_pushes(jam_ctrl_t c, float pct)
 {
     const bool may_push = (c == JAM_CTRL_ON_USE) || (c == JAM_CTRL_BEFORE_ON_USE) ||
