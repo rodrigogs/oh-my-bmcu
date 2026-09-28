@@ -195,6 +195,8 @@ static jam_event_t pass(_filament_motion m, float pct)
 }
 
 // ---- adapted from Motion_control.cpp: a main-loop pass with the ADC stream stale (g_adc_stale) ----
+// ---- anchor: Motion_control_run ----
+// ---- anchor: motor_motion_run from /if \(g_adc_stale\)/ to /return;/ ----
 // Motion_control_run clears the latches as in pass(), its jam loop only calls jam_latch_skip(), and
 // motor_motion_run stops the channel and resets its auto-unload before anything else drives it.
 // So the BMCU is out of its on_use control from the next pass on, nothing pushes or unloads, and

@@ -61,6 +61,9 @@ static void stream_resume(void)
 
 // One Motion_control_run: MC_PULL_ONLINE_read polls, then the age is read. Returns g_adc_stale.
 // ---- adapted from ADC_DMA.cpp: ADC_DMA_poll stamps each half it processes (g_half_ticks) ----
+// ---- anchor: ADC_DMA_poll ----
+// ---- anchor: process_half_update_filter from /g_half_ticks = time_ticks64\(\);/ to /g_half_ticks = time_ticks64\(\);/ ----
+// ---- anchor: ADC_DMA_age_ticks ----
 static bool pass(void)
 {
     if (s_flag)

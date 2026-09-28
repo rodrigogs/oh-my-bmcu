@@ -41,7 +41,7 @@ static unsigned rgb_update(ws2812_frame_t *s)
 
 // ---- adapted from Motion_control.cpp: the order of the LED writes in one main-loop pass ----
 // ---- anchor: motor_motion_run from /stu_apply_baseline\(/ to /motor_motion_switch\(/ ----
-// ---- anchor: motor_motion_run from /MC_PULL_ONLINE_RGB_set\(/ to /MC_PULL_ONLINE_RGB_set\(/ ----
+// ---- anchor: motor_motion_run from /MC_PULL_ONLINE_RGB_set\(i, r, g, b,/ to /MC_PULL_ONLINE_RGB_set\(i, r, g, b,/ ----
 // One main-loop pass for the active channel strip (LED0 = state, LED1 = online LED):
 // stu_apply_baseline writes the baseline, motor_motion_switch overrides it with the state colour,
 // then the online LED is written.

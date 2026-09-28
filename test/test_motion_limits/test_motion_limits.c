@@ -634,6 +634,11 @@ static void test_dm_s2_countdown_is_120mm_at_any_odometer(void)
 // ---- Send (filament_motion_send) ----
 
 // ---- adapted from Motion_control.cpp: the send's speed PID against a blocked gear, simplified ----
+// ---- anchor: MOTOR_PID ----
+// ---- anchor: _MOTOR_CONTROL from /MOTOR_PID PID_speed/ to /MOTOR_PID PID_speed/ ----
+// ---- anchor: run from /constexpr uint64_t SEND_SOFTSTART_MS/ to /PID_speed\.caculate\(/ ----
+// ---- anchor: run from /const bool pull_mode =/ to /if \(x < \(float\)-PWM_lim\)/ ----
+// ---- anchor: run from /const bool use_ramping =/ to /if \(x > hi\) x = hi;/ ----
 // The send's first stage against a gear that does not turn, in 1 ms passes: the speed command
 // (10 mm/s rising to 60 mm/s over the 300 ms soft start), its speed PID (P 2, I 20, the integral
 // clamped at 1000) with the gear at 0 mm/s, the 500 PWM floor (pwm_zero), the 1000 PWM clamp and the
@@ -849,6 +854,7 @@ static void test_normal_a1_load_is_not_limited(void)
 // ---- Idle control push (filament_motion_pressure_ctrl_idle) ----
 
 // ---- adapted from Motion_control.cpp: the rounded buffer reading MC_PULL_pct ----
+// ---- anchor: MC_PULL_ONLINE_read from /int pct = \(int\)\(pct_f \+ 0\.5f\);/ to /MC_PULL_pct\[i\] = \(uint8_t\)pct;/ ----
 static uint8_t idle_pct(float pct_f)
 {
     int pct = (int)(pct_f + 0.5f);
@@ -858,6 +864,12 @@ static uint8_t idle_pct(float pct_f)
 }
 
 // ---- adapted from Motion_control.cpp: the idle control's push with filament at the switches ----
+// ---- anchor: MC_PULL_ONLINE_read from /MC_PULL_DEADBAND_PCT_HIGH\) MC_PULL_stu/ to /MC_PULL_DEADBAND_PCT_LOW\)/ ----
+// ---- anchor: MC_PULL_DEADBAND_PCT_LOW ----
+// ---- anchor: MC_PULL_PIDP_PCT ----
+// ---- anchor: MC_HOLD_PWM_MIN ----
+// ---- anchor: run from /normalny idle z filamentem/ to /PID_pressure\.clear\(\);/ ----
+// ---- anchor: run from /const bool pull_mode =/ to /if \(x < \(float\)-PWM_lim\)/ ----
 // With the rounded buffer reading below MC_PULL_DEADBAND_PCT_LOW (30 %, MC_PULL_stu -1) the pressure
 // PID (P MC_PULL_PIDP_PCT 25, no I or D) drives towards 50 %, raised to the 420 PWM hold floor and
 // clamped at the idle control's 800 PWM. Returns the push PWM (its magnitude), 0 when it does not push.

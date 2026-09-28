@@ -29,6 +29,8 @@
 #define KS_EXT  2u
 
 // ---- adapted from Motion_control.cpp: AUTO_UNLOAD_PWM_PULL and MANUAL_EMPTY_PULL_PWM (constexpr, C++ only) ----
+// ---- anchor: AUTO_UNLOAD_PWM_PULL ----
+// ---- anchor: MANUAL_EMPTY_PULL_PWM ----
 #define PWM_UNLOAD     850.0f
 #define PWM_EMPTY_PULL 700.0f
 
