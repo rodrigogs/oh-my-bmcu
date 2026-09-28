@@ -24,9 +24,9 @@ static uint8_t g_dbg_inited = 0;
 /* ===== UART3 + DMA TX ===== */
 static void Debug_uart3_dma_init(uint32_t baudrate)
 {
-    GPIO_InitTypeDef  gpio = {0};
-    USART_InitTypeDef us   = {0};
-    NVIC_InitTypeDef  nv   = {0};
+    GPIO_InitTypeDef  gpio = {};
+    USART_InitTypeDef us   = {};
+    NVIC_InitTypeDef  nv   = {};
 
     RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART3, ENABLE);
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE);

@@ -156,7 +156,7 @@ void AS5600_soft_IIC_many::init_iic()
         gpio_hi(port_SCL[i], pin_SCL[i]);
         gpio_hi(port_SDA[i], pin_SDA[i]);
 
-        GPIO_InitTypeDef gi = {0};
+        GPIO_InitTypeDef gi = {};
         gi.GPIO_Speed = GPIO_Speed_50MHz;
 
         gi.GPIO_Mode = GPIO_Mode_Out_PP;

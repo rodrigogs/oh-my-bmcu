@@ -47,7 +47,7 @@ static inline __attribute__((always_inline)) void adc_dma_compiler_barrier()
 void ADC_DMA_gpio_analog()
 {
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
-    GPIO_InitTypeDef gpio = {0};
+    GPIO_InitTypeDef gpio = {};
     gpio.GPIO_Mode  = GPIO_Mode_AIN;
     gpio.GPIO_Speed = GPIO_Speed_50MHz;
     gpio.GPIO_Pin   = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2 | GPIO_Pin_3 |
@@ -279,7 +279,7 @@ static void adc_dma_start()
 
     constexpr uint32_t RDATAR_ADDRESS = 0x4001244Cu;
 
-    DMA_InitTypeDef dma = {0};
+    DMA_InitTypeDef dma = {};
     dma.DMA_PeripheralBaseAddr = RDATAR_ADDRESS;
     dma.DMA_MemoryBaseAddr     = (uint32_t)g_dma_buf;
     dma.DMA_DIR                = DMA_DIR_PeripheralSRC;
@@ -301,7 +301,7 @@ static void adc_dma_start()
     ADC_DeInit(ADC1);
     ADC_DeInit(ADC2);
 
-    ADC_InitTypeDef a1 = {0};
+    ADC_InitTypeDef a1 = {};
     a1.ADC_Mode               = ADC_Mode_RegSimult;
     a1.ADC_ScanConvMode       = ENABLE;
     a1.ADC_ContinuousConvMode = ENABLE;
@@ -312,7 +312,7 @@ static void adc_dma_start()
     a1.ADC_Pga                = ADC_Pga_1;
     ADC_Init(ADC1, &a1);
 
-    ADC_InitTypeDef a2 = {0};
+    ADC_InitTypeDef a2 = {};
     a2.ADC_Mode               = ADC_Mode_Independent;
     a2.ADC_ScanConvMode       = ENABLE;
     a2.ADC_ContinuousConvMode = ENABLE;

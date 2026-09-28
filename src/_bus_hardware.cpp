@@ -33,9 +33,9 @@ void bus_init()
 
 void bus_uart1_init()
 {
-    GPIO_InitTypeDef GPIO_InitStructure = {0};
-    USART_InitTypeDef USART_InitStructure = {0};
-    NVIC_InitTypeDef NVIC_InitStructure = {0};
+    GPIO_InitTypeDef GPIO_InitStructure = {};
+    USART_InitTypeDef USART_InitStructure = {};
+    NVIC_InitTypeDef NVIC_InitStructure = {};
 
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);

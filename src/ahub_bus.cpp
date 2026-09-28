@@ -117,7 +117,13 @@ struct ahubus_package_query_head
 const ahubus_package_query_head ahubus_host_package_query_init = {
     .magic_byte = 0x33,
     .flag = 0x80,
+    .length = 0,
+    .crc8 = 0,
     .command = 0x02,
+    .query_type = (ahubus_query_type)0,
+    .query_adr = 0,
+    .data_struct_count = 0,
+    .data = {},
 };
 
 static inline __attribute__((always_inline)) void ahub_pack_filament_stu8(uint8_t* dst, const _filament* f)
@@ -275,7 +281,13 @@ struct ahubus_package_set_head
 const ahubus_package_set_head ahubus_host_package_set_init = {
     .magic_byte = 0x33,
     .flag = 0x80,
+    .length = 0,
+    .crc8 = 0,
     .command = 0x03,
+    .set_type = 0,
+    .set_adr = 0,
+    .data_struct_count = 0,
+    .data = {},
 };
 
 void ahubus_slave_get_package_set(uint8_t *buf, int len)

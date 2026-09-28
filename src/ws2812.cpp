@@ -67,7 +67,7 @@ void WS2812_class::init(uint8_t _num, GPIO_TypeDef* _port, uint16_t _pin)
 
     enable_gpio_clock(port);
 
-    GPIO_InitTypeDef gi = {0};
+    GPIO_InitTypeDef gi = {};
     gi.GPIO_Speed = GPIO_Speed_50MHz;
     gi.GPIO_Mode  = GPIO_Mode_Out_PP;
     gi.GPIO_Pin   = pin;
