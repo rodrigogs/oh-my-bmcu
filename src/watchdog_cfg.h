@@ -148,10 +148,17 @@ static inline WDG_CONSTEXPR wdg_reset_cause wdg_reset_cause_decode(uint32_t rsts
 }
 
 // After a watchdog reset the SYS LED flashes magenta WDG_BOOT_FLASHES times, WDG_BOOT_FLASH_MS on
-// and WDG_BOOT_FLASH_MS off, before the boot goes on (main.cpp): 420 ms, under the 0.5 s allowed.
+// and WDG_BOOT_FLASH_MS off, before the boot goes on (main.cpp): 420 ms. If the run before ended in
+// a trap (blackbox.h), one blue flash of WDG_BOOT_FLASH_MS follows, then the LED turns red: 490 ms.
+// Both under the 0.5 s allowed.
 #define WDG_BOOT_FLASHES 3u
 #define WDG_BOOT_FLASH_MS 70u
 #define WDG_BOOT_FLASH_MAX_MS 500u
+
+static inline WDG_CONSTEXPR uint32_t wdg_boot_flash_ms(bool trap)
+{
+    return 2u * WDG_BOOT_FLASHES * WDG_BOOT_FLASH_MS + (trap ? WDG_BOOT_FLASH_MS : 0u);
+}
 
 // ===== fail-safe =====
 // Timer compare the trap handler writes to both channels of every motor: what

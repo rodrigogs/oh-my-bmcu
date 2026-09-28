@@ -2,6 +2,7 @@
 
 #include "ch32v20x_gpio.h"
 #include "ch32v20x_rcc.h"
+#include <stddef.h>
 
 static_assert(WDG_RSTF_PIN == RCC_PINRSTF && WDG_RSTF_POR == RCC_PORRSTF && WDG_RSTF_SFT == RCC_SFTRSTF &&
                   WDG_RSTF_IWDG == RCC_IWDGRSTF && WDG_RSTF_WWDG == RCC_WWDGRSTF && WDG_RSTF_LPWR == RCC_LPWRRSTF,
@@ -29,18 +30,37 @@ void watchdog_start(void)
     g_watchdog_on = 1u;   // from now on watchdog_feed() writes the reload key
 }
 
-wdg_reset_cause watchdog_reset_cause_take(void)
+uint32_t watchdog_reset_flags_take(void)
 {
     const uint32_t f = RCC->RSTSCKR;
     RCC->RSTSCKR |= RCC_RMVF; // as RCC_ClearFlag()
-    return wdg_reset_cause_decode(f);
+    return f;
+}
+
+// ===== fault record =====
+static_assert(offsetof(BKP_TypeDef, DATAR1) == 4u && offsetof(BKP_TypeDef, DATAR10) == 4u + 4u * (BLACKBOX_WORDS - 1u),
+              "blackbox_bkp() does not address BKP_DATAR1-10");
+
+blackbox_t g_blackbox_last;
+blackbox_pass_t g_blackbox_pass;
+
+void blackbox_boot(uint32_t rstsckr)
+{
+    // CH32FV2x_V3xRM 4.2: the PWR and BKP clocks, then DBP to allow writes. Nothing turns them off.
+    RCC->APB1PCENR |= RCC_PWREN | RCC_BKPEN; // as RCC_APB1PeriphClockCmd
+    PWR->CTLR |= PWR_CTLR_DBP;               // as PWR_BackupAccessCmd
+
+    uint16_t w[BLACKBOX_WORDS];
+    for (uint32_t i = 0u; i < BLACKBOX_WORDS; i++) w[i] = *blackbox_bkp(i);
+    blackbox_boot_words(w, rstsckr, &g_blackbox_last);
+    for (uint32_t i = 0u; i < BLACKBOX_WORDS; i++) *blackbox_bkp(i) = w[i];
 }
 
 // ===== fail-safe trap handlers =====
 // Without them a trap ran the SDK's weak default, an endless loop: TIM2/3/4 kept driving the motors
 // at their last PWM, and a trap during a reply left DE high, the transceiver driving the bus, until
-// the printer was power-cycled. Now the handler stops everything, then the IWDG resets the chip, so
-// the next boot shows the watchdog flash (main.cpp).
+// the printer was power-cycled. Now the handler stops everything, records the trap (blackbox.h),
+// then the IWDG resets the chip, so the next boot shows the watchdog and trap flashes (main.cpp).
 //
 // HardFault takes the fault exceptions (illegal instruction, misaligned or faulting load/store or
 // fetch). NMI (only the HSE clock-security system, unused with HSI) and the breakpoint exception
@@ -77,6 +97,20 @@ static inline __attribute__((always_inline)) void failsafe_stop(void)
 
     // DE = RX, as the TC interrupt does after a reply: the transceiver stops driving the bus.
     GPIOA->BCR = GPIO_Pin_12;
+
+    // The fault record, after the stop: mepc and mcause, their check last, so a reset between the
+    // writes reads as no trap. The phase and the longest pass stay as the run left them. Before
+    // blackbox_boot (startup code, SystemInit) the writes are ignored: DBP is still 0.
+    uint32_t mepc, mcause;
+    __asm volatile("csrr %0, mepc" : "=r"(mepc));
+    __asm volatile("csrr %0, mcause" : "=r"(mcause));
+    const uint16_t pc_lo = (uint16_t)mepc;
+    const uint16_t pc_hi = (uint16_t)(mepc >> 16);
+    const uint16_t code = blackbox_mcause_code(mcause);
+    *blackbox_bkp(BLACKBOX_W_MEPC_LO) = pc_lo;
+    *blackbox_bkp(BLACKBOX_W_MEPC_HI) = pc_hi;
+    *blackbox_bkp(BLACKBOX_W_MCAUSE) = code;
+    *blackbox_bkp(BLACKBOX_W_TRAP_CHECK) = blackbox_trap_check(pc_lo, pc_hi, code);
 
     for (;;)
         __asm volatile("" ::: "memory");

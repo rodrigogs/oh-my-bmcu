@@ -188,8 +188,11 @@ static void ams_nvm_save_run()
 }
 
 // After a watchdog reset (a hang, or a trap: watchdog.cpp) the SYS LED flashes magenta before the
-// boot goes on as usual (WDG_BOOT_FLASHES x WDG_BOOT_FLASH_MS on and off, 420 ms).
-static void show_watchdog_reset()
+// boot goes on as usual (WDG_BOOT_FLASHES x WDG_BOOT_FLASH_MS on and off, 420 ms), and after a trap
+// blue once more (490 ms; blackbox.h). The SYS LED is otherwise red, white-ish or off, never blue.
+static_assert(wdg_boot_flash_ms(true) <= WDG_BOOT_FLASH_MAX_MS, "boot flash too long");
+
+static void show_watchdog_reset(bool trap)
 {
     for (uint32_t k = 0u; k < WDG_BOOT_FLASHES; k++)
     {
@@ -197,6 +200,13 @@ static void show_watchdog_reset()
         RGB_update();
         delay(WDG_BOOT_FLASH_MS);
         SYS_RGB.set_RGB(0x00, 0x00, 0x00, 0);
+        RGB_update();
+        delay(WDG_BOOT_FLASH_MS);
+    }
+
+    if (trap)
+    {
+        SYS_RGB.set_RGB(0x00, 0x00, 0x10, 0);
         RGB_update();
         delay(WDG_BOOT_FLASH_MS);
     }
@@ -211,7 +221,8 @@ int main(void)
     SystemCoreClockUpdate();
     time_hw_init();
 
-    const wdg_reset_cause reset_cause = watchdog_reset_cause_take();
+    const uint32_t reset_flags = watchdog_reset_flags_take();
+    blackbox_boot(reset_flags); // phase BOOT; before the watchdog and before anything that can trap
 
     __enable_irq();
 
@@ -230,7 +241,8 @@ int main(void)
     RGB_update();
     delay(50);
 
-    if (reset_cause == WDG_RESET_IWDG) show_watchdog_reset();
+    const blackbox_flash boot_flash = blackbox_boot_flash(&g_blackbox_last, reset_flags);
+    if (boot_flash != BLACKBOX_FLASH_NONE) show_watchdog_reset(boot_flash == BLACKBOX_FLASH_TRAP);
 
     DEBUG_init();
     ams_init();
@@ -239,7 +251,9 @@ int main(void)
     ADC_DMA_init();
     ADC_DMA_wait_full();
 
+    blackbox_phase_set(BLACKBOX_PHASE_CALIBRATION);
     MC_PULL_calibration_boot();
+    blackbox_phase_set(BLACKBOX_PHASE_NVM_READ);
 
     // Not earlier: the first-boot calibration waits up to 30 s per step (watchdog_cfg.h lists what
     // feeds it from here on).
@@ -258,18 +272,25 @@ int main(void)
         }
     }
 
+    blackbox_phase_set(BLACKBOX_PHASE_MOTION_INIT);
     Motion_control_init();
+    blackbox_phase_set(BLACKBOX_PHASE_BUS_INIT);
     bambubus_init();
     bus_init();
 
     DEBUG("START\n");
 
+    blackbox_pass_begin(&g_blackbox_pass, time_ticks32());
     while (1)
     {
         watchdog_feed();
+        blackbox_pass_mark(time_ticks32());
 
+        blackbox_phase_set(BLACKBOX_PHASE_AHUB);
         const ahubus_package_type   ahub_stu     = ahubus_run();
+        blackbox_phase_set(BLACKBOX_PHASE_BAMBUBUS);
         const bambubus_package_type bambubus_stu = bambubus_run();
+        blackbox_phase_set(BLACKBOX_PHASE_SEND);
         bus_port_to_host.send_package();
 
         // Only the protocol the host speaks decides; before the first heartbeat the BMCU stays
@@ -290,6 +311,7 @@ int main(void)
                 SYS_RGB.set_RGB(0x38, 0x35, 0x32, 0);
 
             // Only while the host link is up, as before: pending writes wait out an offline spell.
+            blackbox_phase_set(BLACKBOX_PHASE_NVM);
             ams_nvm_save_run();
         }
         else
@@ -298,7 +320,9 @@ int main(void)
             SYS_RGB.set_RGB(0x10, 0x00, 0x00, 0);
         }
 
+        blackbox_phase_set(BLACKBOX_PHASE_MOTION);
         Motion_control_run(error);
+        blackbox_phase_set(BLACKBOX_PHASE_RGB);
         RGB_update();
     }
 }
