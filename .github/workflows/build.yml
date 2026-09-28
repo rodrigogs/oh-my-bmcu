@@ -17,6 +17,9 @@ env:
   UPSTREAM_V10_5: fbff4e3
   # Fail the A1 build if the image grows past 56 KiB (upload limit is 60 KiB, NVM lives above it).
   IMAGE_BUDGET_BYTES: "57344"
+  # Fail the A1 build if free RAM (between _ebss and the stack, see the linker script) drops
+  # below 4 KiB. Measured 6,528 B on a1_solo_autoload_rgboff; RAM is 20480 B total.
+  RAM_HEADROOM_FLOOR_BYTES: "4096"
 
 jobs:
   a1:
@@ -56,18 +59,34 @@ jobs:
       - name: Check size and record hash
         run: |
           echo "- toolchain-riscv-linux: \`$(git -C ~/.platformio/packages/toolchain-riscv rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
+          sizebin=$(ls ~/.platformio/packages/toolchain-riscv/bin/*-size | head -1)
+          nm=$(ls ~/.platformio/packages/toolchain-riscv/bin/*-nm | head -1)
           for e in $ENVS; do
             bin=.pio/build/$e/firmware.bin
+            elf=.pio/build/$e/firmware.elf
             size=$(stat -c %s "$bin")
             sha=$(sha256sum "$bin" | cut -d' ' -f1)
-            echo "$e: sha256 ${sha}  size ${size}"
+            # .data+.bss is the RAM the linker map already commits; the remaining headroom is
+            # between _ebss (end of .bss) and _heap_end (the stack's fixed 2 KiB reservation,
+            # see the ldscript's .stack section), so it is real free RAM, not just "20480 minus
+            # .data+.bss" -- the stack is reserved regardless of how much heap/bss is used.
+            ram_used=$("$sizebin" --format=sysv "$elf" | awk '$1 == ".data" || $1 == ".bss" {sum += $2} END {print sum}')
+            ebss_hex=$("$nm" "$elf" | awk '$3 == "_ebss" {print $1}')
+            heap_end_hex=$("$nm" "$elf" | awk '$3 == "_heap_end" {print $1}')
+            ram_headroom=$(( 16#$heap_end_hex - 16#$ebss_hex ))
+            echo "$e: sha256 ${sha}  size ${size}  ram_used ${ram_used}  ram_headroom ${ram_headroom}"
             {
               echo "### $e"
               echo "- size: ${size} bytes (budget ${IMAGE_BUDGET_BYTES})"
               echo "- sha256: \`${sha}\`"
+              echo "- RAM: .data+.bss ${ram_used} bytes, headroom ${ram_headroom} bytes (floor ${RAM_HEADROOM_FLOOR_BYTES})"
             } >> "$GITHUB_STEP_SUMMARY"
             if [ "$size" -gt "$IMAGE_BUDGET_BYTES" ]; then
               echo "::error::$e firmware.bin is ${size} bytes, over the ${IMAGE_BUDGET_BYTES}-byte budget"
+              exit 1
+            fi
+            if [ "$ram_headroom" -lt "$RAM_HEADROOM_FLOOR_BYTES" ]; then
+              echo "::error::$e RAM headroom is ${ram_headroom} bytes, below the ${RAM_HEADROOM_FLOOR_BYTES}-byte floor"
               exit 1
             fi
           done
