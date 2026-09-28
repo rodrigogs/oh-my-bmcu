@@ -1795,7 +1795,10 @@ static void test_an_adaptive_key_and_buffer_pattern_bounds_a_blocked_gear(void)
     blocked_at_lever();
     forced_ks = KS_EXT;
     forced_pct = 50.0f;
-    while (!((dm_auto_state[0] == DM_AUTO_S1_PUSH) && (now - dm_auto_t0_ms[0] >= DM_AUTO_S1_TIMEOUT_MS))) blocked_pass();
+    for (int n = 0; (n < 10000) && !((dm_auto_state[0] == DM_AUTO_S1_PUSH) && (now - dm_auto_t0_ms[0] >= DM_AUTO_S1_TIMEOUT_MS)); n++)
+        blocked_pass();
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S1_PUSH, dm_auto_state[0]);
+    TEST_ASSERT_TRUE(now - dm_auto_t0_ms[0] >= DM_AUTO_S1_TIMEOUT_MS);
     forced_ks = KS_BOTH;
     for (int n = 0; n < 60000; n++)
     {
@@ -1987,7 +1990,8 @@ static void test_an_auto_unload_counts_for_the_run_as_time_not_as_drive(void)
     TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S2_PUSH, dm_auto_state[0]);
     const uint32_t d0 = drive_ms;
     forced_ks = KS_EXT;
-    while (drive_ms - d0 < 500u) blocked_pass();
+    for (int n = 0; (n < 5000) && (drive_ms - d0 < 500u); n++) blocked_pass();
+    TEST_ASSERT_EQUAL_UINT32(500u, drive_ms - d0);
     TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S1_PUSH, dm_auto_state[0]);
     gesture(20u);
     blocked_pass();
@@ -1996,7 +2000,8 @@ static void test_an_auto_unload_counts_for_the_run_as_time_not_as_drive(void)
     const uint32_t stall0 = dm_s2_guard[0].stall_ms;
     const uint32_t run0 = dm_s2_guard[0].run_ms;
     TEST_ASSERT_EQUAL_UINT32(520u, stall0);
-    while (au_ms < ML_STALL_MS) blocked_pass();
+    for (uint32_t n = 0u; (n < 2u * ML_STALL_MS) && (au_ms < ML_STALL_MS); n++) blocked_pass();
+    TEST_ASSERT_EQUAL_UINT32(ML_STALL_MS, au_ms);
     TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
     TEST_ASSERT_EQUAL_UINT32(stall0, dm_s2_guard[0].stall_ms);
@@ -2103,12 +2108,13 @@ static void test_a_long_auto_unload_runs_the_stage_budget_out(void)
     blocked_pass();
     TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     const uint64_t au_t0 = now - 1u;
-    while (!dm_fail_latch[0] && g_auto_unload[0].active) blocked_pass();
+    for (uint32_t n = 0u; (n < AUTO_UNLOAD_MAX_MS) && !dm_fail_latch[0] && g_auto_unload[0].active; n++) blocked_pass();
     TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
     TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT64(abort_t + STAGE_FAIL_MAX_MS - 1u, fail_t0);
     check_blocked_failed();
-    while (g_auto_unload[0].active) blocked_pass();
+    for (uint32_t n = 0u; (n < AUTO_UNLOAD_MAX_MS) && g_auto_unload[0].active; n++) blocked_pass();
+    TEST_ASSERT_EQUAL_UINT8(0u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT64(au_t0 + AUTO_UNLOAD_MAX_MS, au_last + 1u);
     TEST_ASSERT_EQUAL_UINT32((uint32_t)AUTO_UNLOAD_MAX_MS, au_ms);
     TEST_ASSERT_EQUAL_UINT32(0u, au_limits);
@@ -2139,7 +2145,8 @@ static void test_an_auto_unload_while_the_printer_has_the_channel_is_not_counted
     pass();
     TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     printer_idle = false;
-    while (g_auto_unload[0].active) pass();
+    for (uint32_t n = 0u; (n < AUTO_UNLOAD_MAX_MS) && g_auto_unload[0].active; n++) pass();
+    TEST_ASSERT_EQUAL_UINT8(0u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT32(ML_STALL_MS + 1u, au_ms);
     TEST_ASSERT_EQUAL_UINT32(1u, au_limits);
     TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
@@ -2300,7 +2307,8 @@ static void test_stage1_can_push_past_the_run_only_on_a_misread_key(void)
     // 'external only' for 300 ms: after the 100 ms debounce Stage-1 pushes 12 mm more, and the next
     // 'both' ends the run, loaded, 131 mm from where it began.
     insert_and_start_stage2();
-    while (dm_auto_remain_m[0] > 0.001f) pass();
+    for (int n = 0; (n < 10000) && (dm_auto_remain_m[0] > 0.001f); n++) pass();
+    TEST_ASSERT_TRUE(dm_auto_remain_m[0] <= 0.001f);
     forced_ks = KS_EXT;
     run_for(300u);
     forced_ks = -1;
