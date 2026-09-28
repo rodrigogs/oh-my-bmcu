@@ -61,6 +61,12 @@ static bool pushing;       // run() let the channel's control push on the last p
 static int jammed_pushes;  // passes on which it did with the jam latch set
 static auto_unload_t g_auto_unload[1]; // the channel's auto-unload (motor_motion_run)
 static int unload_passes;  // passes on which the auto-unload drove the channel
+static uint32_t gear_cnt;  // as5600_count[ch]: the gear turns (10 counts, 58 mm/s, a pass) while it retracts
+static bool unloaded;      // the auto-unload drove the last pass
+
+// ---- Motion_control.cpp at this commit: the auto-unload's strength, verbatim ----
+static constexpr float    AUTO_UNLOAD_PWM_PULL       = 850.0f;
+// ---- end of the Motion_control.cpp copy ----
 
 void setUp(void)
 {
@@ -76,6 +82,8 @@ void setUp(void)
     jammed_pushes = 0;
     memset(g_auto_unload, 0, sizeof(g_auto_unload));
     unload_passes = 0;
+    gear_cnt = 0u;
+    unloaded = false;
 }
 
 void tearDown(void) {}
@@ -120,7 +128,9 @@ static void jam_loop_hold(const uint8_t *g_on_use_jam_latch, jam_event_t ev)
 // For a channel whose AS5600 reads are good, with the link up and the ADC stream fresh
 // (adc_stream.h): auto_unload_pass() with the motor state motor_motion_switch has just set
 // (idle_ctrl: the idle control), and the key 'both' while filament is at the switch. A pass it
-// drives does not run run().
+// drives does not run run(). Its stall check reads the PWM of the last pass (x_prev) only on the
+// passes after the auto-unload started, which all follow one it drove, so the PWM that run() drove
+// is left out (0); the gear turns, so it never trips here.
 static au_drive_t au_pass(bool idle_ctrl, float pct)
 {
     au_in_t au;
@@ -130,7 +140,12 @@ static au_drive_t au_pass(bool idle_ctrl, float pct)
     au.pct       = pct;
     au.ks        = filament ? 1u : 0u;
     au.now_ms    = now;
-    return auto_unload_pass(&g_auto_unload[0], &au);
+    au.pos_cnt   = gear_cnt;
+    au.pwm       = unloaded ? AUTO_UNLOAD_PWM_PULL : 0.0f;
+    const au_drive_t drive = auto_unload_pass(&g_auto_unload[0], &au);
+    unloaded = (drive == AU_DRIVE_UNLOAD);
+    if (unloaded) gear_cnt += 10u;
+    return drive;
 }
 
 // ---- adapted from Motion_control.cpp: Motion_control_run's latch clear, jam_latch_pass() call and motor order ----

@@ -658,11 +658,14 @@ static constexpr float    MANUAL_EMPTY_PULL_PWM      = 700.0f;
 // link up, the AS5600 read and the ADC stream fresh (adc_stream.h): auto_unload_pass() decides
 // whether the auto-unload (a retract at AUTO_UNLOAD_PWM_PULL, then the Stage-2 guard's pass
 // dm_s2_auto_unload_pass) or the manual empty pull (a retract at 700 PWM) drives the channel, or,
-// for AU_DRIVE_NONE, run() with the DM block.
-// printer_idle stands for the channel's MOTOR_CONTROL motion being the idle control.
+// for AU_DRIVE_NONE, run() with the DM block. An auto-unload its stall check stopped sets the
+// unload fault. printer_idle stands for the channel's MOTOR_CONTROL motion being the idle control,
+// x_prev for the PWM the last pass drove.
 static bool printer_idle;   // the printer commands idle: the channel runs its idle control
 
 static auto_unload_t g_auto_unload[4];
+static float   x_prev[4];          // _MOTOR_CONTROL::x_prev
+static uint8_t pb_unload_fault[4]; // the unload fault (red blink)
 
 static au_drive_t au_pass(uint8_t i, uint64_t time_now)
 {
@@ -673,7 +676,10 @@ static au_drive_t au_pass(uint8_t i, uint64_t time_now)
         au.pct       = MC_PULL_pct_f[i];
         au.ks        = MC_ONLINE_key_stu[i];
         au.now_ms    = time_now;
+        au.pos_cnt   = as5600_count[i];
+        au.pwm       = x_prev[i];
         const au_drive_t drive = auto_unload_pass(&g_auto_unload[i], &au);
+        if (g_auto_unload[i].limit) pb_unload_fault[i] = 1u;
 
         if (drive == AU_DRIVE_UNLOAD) dm_s2_auto_unload_pass(i, printer_idle, time_now);
         return drive;
@@ -730,6 +736,9 @@ static uint32_t none_run;   // passes in a row the key has read 'none'
 // over. A shorter 'none' is an excursion of the key like the others.
 static bool key_out(void) { return none_run > DM_REARM_AWAY_MS; }
 
+static uint32_t au_limits;  // auto-unloads the stall check stopped
+static bool idle_prev;      // printer_idle on the last pass
+
 static uint8_t key_from_tip(void)
 {
     if (tip_mm >= 0.0) return KS_BOTH;
@@ -769,6 +778,9 @@ static void noise(int ks, uint32_t period_ms, uint32_t len_ms)
 // moves for 1 ms at what it drives (the retracts at 850 or 700 PWM a little slower than at 900).
 static void pass(void)
 {
+    // The printer changing the channel's motion zeroes x_prev (set_motion).
+    if (printer_idle != idle_prev) x_prev[0] = 0.0f;
+    idle_prev = printer_idle;
     MC_ONLINE_key_stu[0] = key_now();
     none_run = (MC_ONLINE_key_stu[0] == KS_NONE) ? none_run + 1u : 0u;
     const float pct = buffer_pct();
@@ -781,13 +793,21 @@ static void pass(void)
     const uint8_t st_mid = dm_auto_state[0];
     const uint8_t run_stage = dm_s2_run[0].stage;
 
-// ---- adapted from Motion_control.cpp: stu_apply_baseline's DM colour and the auto-unload's purple ----
-    // The status LED's baseline (stu_apply_baseline): red for a failed channel, else off; what drives
-    // the channel sets its colour after it (the auto-unload's is purple).
+// ---- adapted from Motion_control.cpp: stu_apply_baseline's DM colour, the unload fault's blink and the auto-unload's purple ----
+    // The status LED's baseline (stu_apply_baseline): red for a failed channel, else off; then the
+    // unload fault's red blink (1 s on, 1 s off) while it is kept; what drives the channel sets its
+    // colour after it (the auto-unload's is purple).
     led_r = dm_fail_latch[0] ? 0xFFu : 0x00u;
     led_g = 0x00u;
+    {
+        const filament_now_position_enum p = filament_now_position[0];
+        const bool busy = (p != filament_idle) && (p != filament_redetect);
+        pb_unload_fault[0] = ml_unload_fault_kept(pb_unload_fault[0] != 0u, MC_ONLINE_key_stu[0], busy) ? 1u : 0u;
+        if (pb_unload_fault[0]) led_r = (((now / 1000ull) & 1ull) != 0ull) ? 0xFFu : 0x00u;
+    }
     const uint8_t au_was = g_auto_unload[0].active;
     const au_drive_t au = au_pass(0u, now);
+    if (g_auto_unload[0].limit) au_limits++;
     float x = 0.0f;
     if (au == AU_DRIVE_UNLOAD)
     {
@@ -867,6 +887,7 @@ static void pass(void)
         retracted_mm += d;
     }
     if (run_live && (run_gear0 - gear_mm > run_fwd_max)) run_fwd_max = run_gear0 - gear_mm;
+    x_prev[0] = (au == AU_DRIVE_UNLOAD) ? AUTO_UNLOAD_PWM_PULL : (au == AU_DRIVE_EMPTY_PULL) ? MANUAL_EMPTY_PULL_PWM : x;
     now++;
 }
 
@@ -914,9 +935,10 @@ void setUp(void)
     runs = 0u;
     run_gear0 = run_fwd_max = 0.0;
     run_live = false;
-    au_ms = au_starts = 0u;
+    au_ms = au_starts = au_limits = 0u;
     au_last = 0u;
     none_run = 0u;
+    idle_prev = true;
     led_r = led_g = 0u;
     for (uint8_t ch = 0u; ch < 4u; ch++) auto_unload_reset(&g_auto_unload[ch]);
 
@@ -928,6 +950,8 @@ void setUp(void)
         MC_PULL_pct_f[ch] = 50.0f;
         as5600_count[ch] = 0u;
         dm_loaded_drop_cnt[ch] = 0u;
+        x_prev[ch] = 0.0f;
+        pb_unload_fault[ch] = 0u;
     }
     memset(dm_s2_guard, 0, sizeof(dm_s2_guard));
     ams[0].init();
@@ -1646,7 +1670,8 @@ static void both_blips(uint32_t ms, uint32_t len_lo, uint32_t len_hi, uint32_t e
 static void check_blocked_failed(void)
 {
     TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
-    // Red, unless an auto-unload still retracts: its purple wins while it does.
+    // Red, unless an auto-unload still retracts: its purple wins while it does. The DM block's red
+    // also wins over the unload fault's blink that an auto-unload stopped by its stall check leaves.
     TEST_ASSERT_EQUAL_UINT8(g_auto_unload[0].active ? 0xA0u : 0xFFu, led_r);
     TEST_ASSERT_EQUAL_UINT8(g_auto_unload[0].active ? 0x2Du : 0x00u, led_g);
     TEST_ASSERT_TRUE(fail_t0 != 0u);
@@ -1936,10 +1961,12 @@ static void test_an_auto_unload_counts_for_the_run_as_time_not_as_drive(void)
 {
     // The gear does not turn, the tip rests at the lever, the buffer at 50%: Stage-1 for 1 s, 'both'
     // for one pass (the run starts), then 'external only', and Stage-1 pushes inside the run. After
-    // 500 ms of that push a gesture: 20 ms at 85%, and the auto-unload retracts for 1.5 s. Its passes
-    // go to the run's guard as passes that drive nothing: the stage's budget counts them, and the
-    // stall window neither grows (no fail during the auto-unload) nor restarts: once it has ended,
-    // Stage-1 pushes on until the run's 1000th pass that drives, which trips the window.
+    // 500 ms of that push a gesture: 20 ms at 85%, and the auto-unload retracts until its own stall
+    // check stops it, ML_STALL_MS in (before the 1.5 s after the key left 'both'), with the unload
+    // fault. Its passes go to the run's guard as passes that drive nothing: the stage's budget counts
+    // them, and the run's stall window neither grows (no fail during the auto-unload) nor restarts:
+    // once it has ended, Stage-1 pushes on until the run's 1000th pass that drives, which trips the
+    // window.
     blocked_at_lever();
     forced_pct = 50.0f;
     forced_ks = KS_EXT;
@@ -1958,15 +1985,18 @@ static void test_an_auto_unload_counts_for_the_run_as_time_not_as_drive(void)
     const uint32_t stall0 = dm_s2_guard[0].stall_ms;
     const uint32_t run0 = dm_s2_guard[0].run_ms;
     TEST_ASSERT_EQUAL_UINT32(520u, stall0);
-    while (au_ms < (uint32_t)AUTO_UNLOAD_EMPTY_MS) blocked_pass();
+    while (au_ms < ML_STALL_MS) blocked_pass();
     TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
     TEST_ASSERT_EQUAL_UINT32(stall0, dm_s2_guard[0].stall_ms);
-    TEST_ASSERT_EQUAL_UINT32(run0 + (uint32_t)AUTO_UNLOAD_EMPTY_MS - 1u, dm_s2_guard[0].run_ms);
+    TEST_ASSERT_EQUAL_UINT32(run0 + ML_STALL_MS - 1u, dm_s2_guard[0].run_ms);
     TEST_ASSERT_EQUAL_UINT32(520u, drive_ms - d0);
+    TEST_ASSERT_EQUAL_UINT32(0u, au_limits);
     // It ends on the next pass, on which run() runs again and Stage-1 pushes.
     blocked_pass();
     TEST_ASSERT_EQUAL_UINT8(0u, g_auto_unload[0].active);
+    TEST_ASSERT_EQUAL_UINT32(1u, au_limits);
+    TEST_ASSERT_EQUAL_UINT8(1u, pb_unload_fault[0]);
     TEST_ASSERT_EQUAL_UINT32(stall0 + 1u, dm_s2_guard[0].stall_ms);
     TEST_ASSERT_EQUAL_UINT32(521u, drive_ms - d0);
     for (int n = 0; (n < 5000) && !dm_fail_latch[0]; n++) blocked_pass();
@@ -1982,7 +2012,7 @@ static void test_auto_unload_gestures_and_key_blips_bound_a_blocked_gear(void)
     // Stage-1 up to the pass before its timeout, then 'both' for one pass (the run starts), then
     // 'external only', and Stage-1 pushes inside the run. Each time the run's stall window has
     // counted 800 ms since it (re)started, a gesture (20 ms at 85%) starts an auto-unload, which
-    // retracts until 1.5 s after the key left 'both'. Every 3 s, when no auto-unload runs, 'both' for
+    // retracts until its stall check stops it, ML_STALL_MS in. Every 3 s, when no auto-unload runs, 'both' for
     // one pass, which restarts Stage-1's 5 s. With the auto-unload's passes a gap for the run's guard,
     // each gesture restarted the stall window and kept its time out of the budget: this got 16 094 ms
     // of push, 13 gestures, and failed 31.5 s after the run began. Now they count as time: one
@@ -2029,20 +2059,23 @@ static void test_auto_unload_gestures_and_key_blips_bound_a_blocked_gear(void)
     TEST_ASSERT_EQUAL_UINT32(BLOCKED_PUSH_MAX_MS, drive_ms);
     TEST_ASSERT_EQUAL_UINT32(1u, gestures);
     TEST_ASSERT_EQUAL_UINT32(1u, au_starts);
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)AUTO_UNLOAD_EMPTY_MS, au_ms);
+    TEST_ASSERT_EQUAL_UINT32(ML_STALL_MS, au_ms);
+    TEST_ASSERT_EQUAL_UINT32(1u, au_limits);
 }
 
 static void test_a_long_auto_unload_runs_the_stage_budget_out(void)
 {
-    // The gear does not turn and the tip is 1 mm past the inner switch ('both'), the buffer at 50%:
-    // the run starts from IDLE and pushes for 300 ms. A gesture: 10 ms at 85%, where the push aborts
-    // and the retract after it drives, then 50%, and the auto-unload retracts. The key stays at 'both',
-    // so it goes on for its 15 s. The retract stage's budget counts the auto-unload's passes and runs
-    // out 12 s after the pass before the abort, during the auto-unload: failed, and the autoload drives
+    // The gear does not turn for the autoload and the tip is 1 mm past the inner switch ('both'), the
+    // buffer at 50%: the run starts from IDLE and pushes for 300 ms. A gesture: 10 ms at 85%, where
+    // the push aborts and the retract after it drives, then 50%, and the auto-unload retracts. Its
+    // gear turns but the key stays at 'both' (forced: filament that slips in the gear, say), so it
+    // goes on for its 15 s. The retract stage's budget counts the auto-unload's passes and runs out
+    // 12 s after the pass before the abort, during the auto-unload: failed, and the autoload drives
     // nothing more.
     // The auto-unload retracts for its 15 s (the person's), then the LED shows red. With the
     // auto-unload's passes left out, the stage lived on through them and pushed another second after
-    // them.
+    // them. (A gear that does not turn for the auto-unload either stops it ML_STALL_MS in:
+    // test_an_auto_unload_counts_for_the_run_as_time_not_as_drive.)
     v_mm_s = 0.0;
     tip_mm = 1.0;
     forced_pct = 50.0f;
@@ -2054,6 +2087,8 @@ static void test_a_long_auto_unload_runs_the_stage_budget_out(void)
     TEST_ASSERT_EQUAL_INT(1, aborts);
     const uint64_t abort_t = stage_t0;
     TEST_ASSERT_EQUAL_UINT32(309u, drive_ms);
+    forced_ks = KS_BOTH;
+    v_mm_s = 60.0;
     blocked_pass();
     TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     const uint64_t au_t0 = now - 1u;
@@ -2065,6 +2100,7 @@ static void test_a_long_auto_unload_runs_the_stage_budget_out(void)
     while (g_auto_unload[0].active) blocked_pass();
     TEST_ASSERT_EQUAL_UINT64(au_t0 + AUTO_UNLOAD_MAX_MS, au_last + 1u);
     TEST_ASSERT_EQUAL_UINT32((uint32_t)AUTO_UNLOAD_MAX_MS, au_ms);
+    TEST_ASSERT_EQUAL_UINT32(0u, au_limits);
     check_blocked_failed();
     for (int n = 0; n < 20000; n++) blocked_pass();
     TEST_ASSERT_EQUAL_UINT32(309u, drive_ms);
@@ -2073,11 +2109,13 @@ static void test_a_long_auto_unload_runs_the_stage_budget_out(void)
 
 static void test_an_auto_unload_while_the_printer_has_the_channel_is_not_counted(void)
 {
-    // As test_a_long_auto_unload_runs_the_stage_budget_out, but the printer takes the channel out of
-    // the idle control once the auto-unload runs, and leaves it in idle again when it has ended. The
-    // DM block would not have run on those passes either, so the run's guard is left alone, as for
-    // any time the printer has the channel: no fail while the printer has it (the LED would show the
-    // autoload's red during the printer's move). Back in idle, the time away was a gap: the run goes
+    // As test_a_long_auto_unload_runs_the_stage_budget_out, with the gear blocked for the auto-unload
+    // too, but the printer takes the channel out of the idle control once the auto-unload runs, and
+    // leaves it in idle again when it has ended. The DM block would not have run on those passes
+    // either, so the run's guard is left alone, as for any time the printer has the channel: no fail
+    // while the printer has it (the LED would show the autoload's red during the printer's move). The
+    // auto-unload's stall check stops it ML_STALL_MS + 1 in (the printer's change of motion zeroed
+    // x_prev once, which restarted its window). Back in idle, the time away was a gap: the run goes
     // on, with a new stall window, and fails 1 s of drive later. (Not a blocked_pass() scenario: the
     // printer takes the channel.)
     v_mm_s = 0.0;
@@ -2091,7 +2129,8 @@ static void test_an_auto_unload_while_the_printer_has_the_channel_is_not_counted
     TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     printer_idle = false;
     while (g_auto_unload[0].active) pass();
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)AUTO_UNLOAD_MAX_MS, au_ms);
+    TEST_ASSERT_EQUAL_UINT32(ML_STALL_MS + 1u, au_ms);
+    TEST_ASSERT_EQUAL_UINT32(1u, au_limits);
     TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
     printer_idle = true;
     const uint32_t d0 = drive_ms;

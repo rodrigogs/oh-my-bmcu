@@ -1,8 +1,9 @@
 #pragma once
 // Limits for the motor states that otherwise end only on a sensor event or a printer command
 // (Motion_control.cpp): the unload pull back, the redetect push after it, the DM autoload Stage-2
-// push/retract stages and the send (load). Hardware-free, so the decisions are tested on the host
-// (test/test_motion_limits).
+// push/retract stages, the send (load) and the buffer-lift auto-unload (auto_unload.h).
+// Hardware-free, so the decisions are tested on the host (test/test_motion_limits,
+// test/test_auto_unload).
 //
 // Without limits, a held filament or an emptied channel kept the motor at 900-1000 PWM for good.
 // While a channel is in pull back or redetect, motor_motion_switch does not run, so the printer's
@@ -221,12 +222,29 @@ static inline void ml_send_start(motion_guard *g, uint64_t now_ms, uint32_t pos_
     motion_guard_start(g, now_ms, pos_cnt, 0u, ml_m_to_cnt(ML_SEND_MAX_M));
 }
 
+// ---- Auto-unload (auto_unload.h) ----
+// The buffer-lift gesture's retract, open loop at 850 PWM (AUTO_UNLOAD_PWM_PULL in Motion_control.cpp)
+// from its first pass. It ends on its own when the buffer drops below 35% (the filament pulled
+// tight), 1.5 s after the key left 'both' (unloaded) or after 15 s. A gear that does not turn
+// (filament caught ahead of the gear or behind it) moves the filament neither out of the switches
+// nor tight, so it retracted for the whole 15 s. The stall check stops it ML_STALL_MS after the gear
+// stopped. A normal auto-unload never trips it: the gear moves the filament while it retracts, and
+// once the tail has left the gear it spins free.
+// No time budget (the 15 s end stays its own) and no distance limit: the gesture pulls the filament
+// from wherever it is parked out past the switches, which can be the whole tube to the printer, far
+// more than the retract length.
+static inline void ml_auto_unload_start(motion_guard *g, uint64_t now_ms, uint32_t pos_cnt)
+{
+    motion_guard_start(g, now_ms, pos_cnt, 0u, 0u);
+}
+
 // ---- Unfinished unload (status LED) ----
 // A pull back stopped by a limit did not finish the unload, but the printer is still told it did:
 // the bus has no reply for it, and no printer-facing byte changes. The channel's status LED blinks
 // red instead (Motion_control.cpp). The fault is set by the pull's end (ml_is_limit), and it stays
 // until no switch sees filament (the user pulled it out) or the printer starts another move on the
-// channel (load, print or unload: channel_busy). The redetect and idle after the pull keep it.
+// channel (load, print or unload: channel_busy). The redetect and idle after the pull keep it. An
+// auto-unload stopped by its stall check sets the same fault: the filament is still in the BMCU.
 static inline bool ml_unload_fault_kept(bool fault, uint8_t ks, bool channel_busy)
 {
     return fault && (ks != 0u) && !channel_busy;

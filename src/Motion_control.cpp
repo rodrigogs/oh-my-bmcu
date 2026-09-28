@@ -360,6 +360,7 @@ static constexpr float    AUTO_UNLOAD_PWM_PULL       = 850.0f;
 static constexpr float    MANUAL_EMPTY_PULL_PWM      = 700.0f;
 
 static auto_unload_t g_auto_unload[4] = {};
+static_assert(AUTO_UNLOAD_PWM_PULL >= ML_STALL_PWM, "the auto-unload's PWM must be covered by the stall check");
 
 bool filament_channel_inserted[4]       = {false, false, false, false}; // czy kanał fizycznie wpięty
 
@@ -2197,8 +2198,8 @@ static uint32_t filament_pull_back_cnt[4]; // as5600_count at the start of the p
 // started when the channel enters each of them.
 static motion_guard pb_guard[4];
 
-// 1 = the channel's last pull back was stopped by a limit, so its unload did not finish; the status
-// LED blinks red while ml_unload_fault_kept holds (motor_motion_run).
+// 1 = the channel's last pull back, or its last auto-unload, was stopped by a limit, so its unload
+// did not finish; the status LED blinks red while ml_unload_fault_kept holds (motor_motion_run).
 static uint8_t pb_unload_fault[4] = {0u, 0u, 0u, 0u};
 
 static float filament_pull_back_target[4] = {
@@ -2586,8 +2587,9 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
     }
 
-    // Unload stopped by a limit: the printer is told it finished, so the status LED blinks red (1 s on,
-    // 1 s off) until the filament leaves the switches or the printer starts another move on the channel.
+    // Unload stopped by a limit (a pull back, which the printer is told finished, or an auto-unload):
+    // the status LED blinks red (1 s on, 1 s off) until the filament leaves the switches or the
+    // printer starts another move on the channel.
     // The DM autoload and auto-unload colours below, and the AS5600 fault red, still win.
     for (uint8_t i = 0; i < kChCount; i++)
     {
@@ -2626,6 +2628,8 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
         }
 
         // Auto-unload / manual empty pull (auto_unload.h): neither drives while offline (error != 0).
+        // An auto-unload stopped by its stall check (x_prev: PWM of the last pass) blinks the unload
+        // fault, as a stalled pull back does.
         au_in_t au;
         au.online    = (error == 0);
         au.inserted  = filament_channel_inserted[i];
@@ -2633,7 +2637,10 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
         au.pct       = MC_PULL_pct_f[i];
         au.ks        = MC_ONLINE_key_stu[i];
         au.now_ms    = time_now;
+        au.pos_cnt   = as5600_count[i];
+        au.pwm       = _MOTOR_CONTROL::x_prev[i];
         const au_drive_t drive = auto_unload_pass(&g_auto_unload[i], &au);
+        if (g_auto_unload[i].limit) pb_unload_fault[i] = 1u;
 
         if (drive == AU_DRIVE_UNLOAD)
         {

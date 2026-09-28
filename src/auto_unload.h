@@ -10,10 +10,13 @@
 //   into the neutral band (45-55%) within AUTO_UNLOAD_ARM_MS starts a retract at 850 PWM. It ends
 //   when the buffer falls below AUTO_UNLOAD_ABORT_PCT, when the key has been away from 'both' (no
 //   filament at a non-DM channel's switch) for AUTO_UNLOAD_EMPTY_MS, or after AUTO_UNLOAD_MAX_MS;
-//   another one then needs a new lift.
+//   another one then needs a new lift. A gear that does not turn reached only the 15 s: now the
+//   stall check of motion_limits.h (ml_auto_unload_start) also ends it, ML_STALL_MS after the gear
+//   stopped, and flags the pass (limit) for the unload fault LED.
 // - Manual empty pull (upstream V10.4, "retraction when the buffer is pulled up manually, even when
 //   there is no filament inside"): no filament at the switches and the buffer above
-//   AUTO_UNLOAD_EMPTY_PULL_PCT: a retract at 700 PWM for as long as the buffer reads above it.
+//   AUTO_UNLOAD_EMPTY_PULL_PCT: a retract at 700 PWM for as long as the buffer reads above it. It
+//   has no stall check: 700 PWM is under ML_STALL_PWM, and the hand that holds the buffer up ends it.
 //
 // Offline (motor_motion_run's error != 0: from boot until the first heartbeat, and after a lost
 // link) motor_motion_run stops every channel, but an auto-unload that was already running kept its
@@ -62,6 +65,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "motion_limits.h"
+
 #define AUTO_UNLOAD_START_PCT      80.0f
 #define AUTO_UNLOAD_NEUTRAL_LO_PCT 45.0f
 #define AUTO_UNLOAD_NEUTRAL_HI_PCT 55.0f
@@ -80,6 +85,8 @@ typedef struct
     uint64_t arm_t0_ms;
     uint64_t active_t0_ms;
     uint64_t empty_t0_ms;   // first pass with the key away from 'both' while active (0 = none)
+    uint8_t  limit;         // 1 on the pass a limit of guard ended the auto-unload, else 0
+    motion_guard guard;     // the auto-unload's stall limit (motion_limits.h), started with it
 } auto_unload_t;
 
 // wait_low is left as it is: only the buffer ends the hold-off (auto_unload_pass()).
@@ -91,6 +98,7 @@ static inline void auto_unload_reset(auto_unload_t *s)
     s->arm_t0_ms    = 0u;
     s->active_t0_ms = 0u;
     s->empty_t0_ms  = 0u;
+    s->limit        = 0u;
 }
 
 // The channel's jam latch is set, or was released on this pass (Motion_control_run): a lift that
@@ -118,12 +126,15 @@ typedef struct
     float    pct;        // MC_PULL_pct_f[ch]
     uint8_t  ks;         // MC_ONLINE_key_stu[ch]
     uint64_t now_ms;
+    uint32_t pos_cnt;    // as5600_count[ch]
+    float    pwm;        // the PWM the channel was driven with since the previous pass (x_prev)
 } au_in_t;
 
 // One main-loop pass for one channel: updates its state and returns what motor_motion_run drives.
 static inline au_drive_t auto_unload_pass(auto_unload_t *s, const au_in_t *in)
 {
     if (in->pct < AUTO_UNLOAD_NEUTRAL_HI_PCT) s->wait_low = 0u;
+    s->limit = 0u;
 
     if (!in->online || !in->inserted || (!s->active && !in->idle_ctrl))
     {
@@ -158,6 +169,7 @@ static inline au_drive_t auto_unload_pass(auto_unload_t *s, const au_in_t *in)
                     s->active_t0_ms = time_now;
                     s->empty_t0_ms  = 0u;
                     s->blocked      = 1u;
+                    ml_auto_unload_start(&s->guard, time_now, in->pos_cnt);
                 }
 
                 s->arm       = 0u;
@@ -172,38 +184,40 @@ static inline au_drive_t auto_unload_pass(auto_unload_t *s, const au_in_t *in)
 
         if (s->active)
         {
+            bool end = false;
+
             if (pct < AUTO_UNLOAD_ABORT_PCT)
+            {
+                end = true;
+            }
+            else if (ks == 1u)
+            {
+                s->empty_t0_ms = 0u;
+                end = (time_now - s->active_t0_ms) >= AUTO_UNLOAD_MAX_MS;
+            }
+            else if (s->empty_t0_ms == 0u)
+            {
+                s->empty_t0_ms = time_now;
+            }
+            else
+            {
+                end = (time_now - s->empty_t0_ms) >= AUTO_UNLOAD_EMPTY_MS;
+            }
+
+            // Its own ends first, then the stall check (in->pwm: the PWM of the previous pass, so the
+            // pass that started it adds no time).
+            if (!end && ml_is_limit(motion_guard_check(&s->guard, time_now, in->pos_cnt, in->pwm)))
+            {
+                end = true;
+                s->limit = 1u;
+            }
+
+            if (end)
             {
                 s->active       = 0u;
                 s->active_t0_ms = 0u;
                 s->empty_t0_ms  = 0u;
                 s->blocked      = 1u;
-            }
-            else if (ks == 1u)
-            {
-                s->empty_t0_ms = 0u;
-
-                if ((time_now - s->active_t0_ms) >= AUTO_UNLOAD_MAX_MS)
-                {
-                    s->active       = 0u;
-                    s->active_t0_ms = 0u;
-                    s->empty_t0_ms  = 0u;
-                    s->blocked      = 1u;
-                }
-            }
-            else
-            {
-                if (s->empty_t0_ms == 0u)
-                {
-                    s->empty_t0_ms = time_now;
-                }
-                else if ((time_now - s->empty_t0_ms) >= AUTO_UNLOAD_EMPTY_MS)
-                {
-                    s->active       = 0u;
-                    s->active_t0_ms = 0u;
-                    s->empty_t0_ms  = 0u;
-                    s->blocked      = 1u;
-                }
             }
         }
     }
