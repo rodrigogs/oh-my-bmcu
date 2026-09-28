@@ -197,9 +197,10 @@ static jam_event_t pass(_filament_motion m, float pct)
 // ---- adapted from Motion_control.cpp: a main-loop pass with the ADC stream stale (g_adc_stale) ----
 // ---- anchor: Motion_control_run ----
 // ---- anchor: motor_motion_run from /if \(g_adc_stale\)/ to /return;/ ----
-// Motion_control_run clears the latches as in pass(), its jam loop only calls jam_latch_skip(), and
-// motor_motion_run brakes the channel (motor_brake_now) and resets its auto-unload before anything
-// else drives it.
+// Motion_control_run clears the latches as in pass(), its jam loop only calls jam_latch_skip(),
+// motor_motion_switch skips its send_out release (jam_latch_send_out_release() is false while
+// stale), and motor_motion_run brakes the channel (motor_brake_now) and resets its auto-unload
+// before anything else drives it.
 // So the BMCU is out of its on_use control from the next pass on, nothing pushes or unloads, and
 // no trip, release or hold happens.
 static void stale_passes(uint32_t ms)
@@ -1166,6 +1167,19 @@ static void test_a_stale_pass_ends_a_running_auto_unload(void)
     TEST_ASSERT_EQUAL_INT(n, unload_passes);
 }
 
+static void test_send_out_release_needs_a_fresh_reading_above_85(void)
+{
+    // motor_motion_switch's send_out release: above JAM_RELEASE_AWAY_PCT on a fresh reading only.
+    TEST_ASSERT_TRUE(jam_latch_send_out_release(85.1f, false));
+    TEST_ASSERT_TRUE(jam_latch_send_out_release(100.0f, false));
+    TEST_ASSERT_FALSE(jam_latch_send_out_release(JAM_RELEASE_AWAY_PCT, false));
+    TEST_ASSERT_FALSE(jam_latch_send_out_release(84.9f, false));
+    TEST_ASSERT_FALSE(jam_latch_send_out_release(30.0f, false));
+    // The stream froze with the buffer held up: the latch and its 0xF06F stay.
+    TEST_ASSERT_FALSE(jam_latch_send_out_release(85.1f, true));
+    TEST_ASSERT_FALSE(jam_latch_send_out_release(100.0f, true));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1219,5 +1233,6 @@ int main(void)
     RUN_TEST(test_stale_passes_do_not_count_toward_the_release);
     RUN_TEST(test_stale_passes_keep_what_the_release_has_seen);
     RUN_TEST(test_a_stale_pass_ends_a_running_auto_unload);
+    RUN_TEST(test_send_out_release_needs_a_fresh_reading_above_85);
     return UNITY_END();
 }

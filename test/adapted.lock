@@ -40,7 +40,7 @@ c87c1d4eaea60b9f6263ee2c3b995ce5d083f1f782eb10e0139d71fe40a9917e src/Motion_cont
 1c217e58930485c789b94b6ad68ee432e58012a5b2ae6bc862abee936398b31f src/Motion_control.cpp motor_motion_run from /filament_now_position_enum pos =/ to /as5600_count\[ch\]\);/
 986f5a31f8eb56bc75bd9b17f44f87fa5eaf57d458ebe76c56ea8df8a9d3f63c src/Motion_control.cpp motor_motion_run from /if \(g_adc_stale\)/ to /return;/
 cab4bc8959a7f1d8822cbcd2b4c717ff8442dd54ff23273a3ea5e733473df736 src/Motion_control.cpp motor_motion_run from /stu_apply_baseline\(/ to /motor_motion_switch\(/
-5a56b1160f47308a3fc421856749fa2ada17113d0b218fa8de7a0de457b81ca5 src/Motion_control.cpp motor_motion_switch
+58205d02b842135c584f182ff02ca6f0ae6b5331731cd38203992776ac5f7b87 src/Motion_control.cpp motor_motion_switch
 1b19e7e2bbcd1dad6960508df2b8545d83e378464661049cf1d015a5939548c5 src/Motion_control.cpp run from /case DM_AUTO_S2_PUSH:/ to /dm_auto_remain_m\[CHx\] = r;/
 30e52c0b34e3d24a0dc1fcc588464183c5cb8b5813d29da6f1b82685d76d491f src/Motion_control.cpp run from /const bool pull_mode =/ to /if \(x < \(float\)-PWM_lim\)/
 62fd2c09fd0da7a239b2981172aade87b1cd8e688467bd3decac10ab84cbd46c src/Motion_control.cpp run from /const bool use_ramping =/ to /if \(x > hi\) x = hi;/

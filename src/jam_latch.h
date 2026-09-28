@@ -98,9 +98,10 @@ static inline bool jam_trip_update(jam_trip_t *t, float pct, uint32_t now_ms)
 //   - in any other state (send_out, pull-back, idle, another channel active):
 //     JAM_RELEASE_AWAY_PCT.
 // send_out alone does not release it: a latched send_out still waits (upstream's >85% lift in
-// send_out also still releases at once), so a reload the printer starts by itself does not drive
-// the motor into a tangle nobody has cleared. After a release, a tangle that is still there drains
-// the buffer below JAM_TRIP_PCT again and latches again JAM_TRIP_MS later: the print still pauses.
+// send_out also still releases at once on a fresh reading: jam_latch_send_out_release()), so a
+// reload the printer starts by itself does not drive the motor into a tangle nobody has cleared.
+// After a release, a tangle that is still there drains the buffer below JAM_TRIP_PCT again and
+// latches again JAM_TRIP_MS later: the print still pauses.
 
 // 1 s: about 200 ADC windows (4.8 ms), so a noisy reading or a bounce of the buffer cannot release
 // it, while a person holding the buffer up does it easily.
@@ -252,6 +253,17 @@ static inline void jam_latch_skip(jam_latch_t *s)
     jam_trip_reset(&s->trip);
     s->release.full = 0u;
     s->release.full_since_ms = 0u;
+}
+
+// Upstream's release in send_out: motor_motion_switch clears both latches and the 20 s count at
+// once, on the first pass of send_out for the latched active channel whose buffer reads above
+// JAM_RELEASE_AWAY_PCT (a person lifting it to resume a load). Like jam_latch_skip(), never on a
+// stale pass: a frozen reading can be arbitrarily old, and a release on it would drop the 0xF06F
+// and let send_out drive into a tangle nobody cleared once the stream is back. A fresh reading
+// above the level still releases on the first fresh pass.
+static inline bool jam_latch_send_out_release(float pct, bool stale)
+{
+    return !stale && (pct > JAM_RELEASE_AWAY_PCT);
 }
 
 // ---- 20 s full-force push limit ----

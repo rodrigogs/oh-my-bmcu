@@ -2366,7 +2366,7 @@ static void motor_motion_switch(uint64_t time_now)
             {
                 if (g_on_use_jam_latch[num])
                 {
-                    if (MC_PULL_pct_f[num] > 85.0f)
+                    if (jam_latch_send_out_release(MC_PULL_pct_f[num], g_adc_stale))
                     {
                         g_on_use_low_latch[num] = 0u;
                         g_on_use_jam_latch[num] = 0u;
