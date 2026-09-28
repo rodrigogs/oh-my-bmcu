@@ -10,7 +10,9 @@
 // job, about 36 ms; any stall up to the watchdog) finds the flags set, and the stamp is fresh again
 // when Motion_control_run reads the age right after the poll. Only a stream that stopped (the
 // conversions, or the DMA channel after a transfer error) leaves the stamp behind, and then
-// ADC_DMA_get_value() keeps returning the last readings.
+// ADC_DMA_get_value() keeps returning the last readings. ADC_DMA_poll restarts it on a transfer
+// error, and Motion_control_run on staleness alone (ADC_DMA_restart_if_stale), once per
+// ADC_STREAM_RESTART_MS until a new half comes.
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -28,4 +30,16 @@ static inline uint64_t adc_stream_age_ticks(uint64_t now_ticks, uint64_t last_ti
 static inline bool adc_stream_stale(uint64_t age_ticks, uint32_t ticks_per_ms)
 {
     return age_ticks > (uint64_t)ADC_STREAM_STALE_MS * ticks_per_ms;
+}
+
+// About 418 halves. Past it, ADC_DMA_restart_if_stale restarts the ADCs and the DMA, and again every
+// ADC_STREAM_RESTART_MS for as long as no new half comes.
+#define ADC_STREAM_RESTART_MS 500u
+
+// True when the readings and the last restart (since_restart_ticks: ticks since it, or since boot)
+// are both older than ADC_STREAM_RESTART_MS. A live stream is never due: a half comes every 1.19 ms.
+static inline bool adc_stream_restart_due(uint64_t age_ticks, uint64_t since_restart_ticks, uint32_t ticks_per_ms)
+{
+    const uint64_t limit = (uint64_t)ADC_STREAM_RESTART_MS * ticks_per_ms;
+    return (age_ticks > limit) && (since_restart_ticks > limit);
 }

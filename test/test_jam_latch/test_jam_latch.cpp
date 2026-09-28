@@ -200,7 +200,8 @@ static jam_event_t pass(_filament_motion m, float pct)
 // Motion_control_run clears the latches as in pass(), its jam loop only calls jam_latch_skip(),
 // motor_motion_switch skips its send_out release (jam_latch_send_out_release() is false while
 // stale), and motor_motion_run brakes the channel (motor_brake_now) and resets its auto-unload
-// before anything else drives it.
+// before anything else drives it. Motion_control_run's restart of the stream every
+// ADC_STREAM_RESTART_MS (ADC_DMA_restart_if_stale) leaves the readings frozen and is left out.
 // So the BMCU is out of its on_use control from the next pass on, nothing pushes or unloads, and
 // no trip, release or hold happens.
 static void stale_passes(uint32_t ms)

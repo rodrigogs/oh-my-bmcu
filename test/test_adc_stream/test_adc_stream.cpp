@@ -4,7 +4,9 @@
 // stall stamps the halves the DMA completed meanwhile. A stream that stopped must read stale
 // ADC_STREAM_STALE_MS after its last half, stay stale for as long as it is stopped (also past the
 // 238.6 s wrap of a 32-bit SysTick difference), and read fresh again from the pass that processes
-// its first new half. A stream that never delivered a half since boot is stale.
+// its first new half. A stream that never delivered a half since boot is stale. A stale stream is
+// restarted (ADC_DMA_restart_if_stale) once its readings are ADC_STREAM_RESTART_MS old, and again
+// every ADC_STREAM_RESTART_MS for as long as it stays stopped; a live one never is.
 //
 // ADC_DMA.cpp needs the CH32 SDK and is not built on the host. The stream is simulated at the
 // firmware's clock: SysTick and ADCCLK both at 18 MHz (144 MHz HCLK / 8), a half every 21504 ticks.
@@ -30,6 +32,9 @@ static bool     s_alive;      // the ADCs convert and the DMA copies
 static uint64_t s_next_half;  // when the DMA completes its next half
 static bool     s_flag;       // HT or TC set, not yet processed
 static uint64_t s_stamp;      // g_half_ticks
+static uint64_t s_restart;    // g_restart_ticks
+static uint32_t s_restarts;   // adc_dma_restart calls
+static bool     s_revives;    // a restart brings the stream back
 
 static void stream_boot(bool alive)
 {
@@ -38,6 +43,9 @@ static void stream_boot(bool alive)
     s_next_half = HALF_TICKS;
     s_flag      = false;
     s_stamp     = 0u;
+    s_restart   = 0u;
+    s_restarts  = 0u;
+    s_revives   = false;
 }
 
 static void stream_advance(uint64_t ticks)
@@ -72,6 +80,31 @@ static bool pass(void)
         s_stamp = s_now;
     }
     return adc_stream_stale(adc_stream_age_ticks(s_now + READ_TICKS, s_stamp), TPMS);
+}
+
+// pass(), then Motion_control_run's restart of a stale stream. A restart starts the DMA at the
+// start of the buffer with its flags clear; if it revives the stream, the first new half comes
+// HALF_TICKS later. Returns g_adc_stale.
+// ---- adapted from Motion_control.cpp: Motion_control_run restarts a stale stream right after the age read ----
+// ---- anchor: Motion_control_run from /g_adc_stale = adc_stream_stale/ to /ADC_DMA_restart_if_stale\(\);/ ----
+// ---- adapted from ADC_DMA.cpp: ADC_DMA_restart_if_stale and adc_dma_restart (g_restart_ticks) ----
+// ---- anchor: ADC_DMA_restart_if_stale ----
+// ---- anchor: adc_dma_restart ----
+static bool pass_restart(void)
+{
+    const bool stale = pass();
+    if (stale)
+    {
+        const uint64_t now = s_now + READ_TICKS;
+        if (adc_stream_restart_due(adc_stream_age_ticks(now, s_stamp), now - s_restart, TPMS))
+        {
+            s_flag    = false;
+            s_restart = now;
+            s_restarts++;
+            if (s_revives) stream_resume();
+        }
+    }
+    return stale;
 }
 
 // ---- Threshold ----
@@ -234,6 +267,120 @@ static void test_a_stream_that_never_delivered_a_half_is_stale(void)
     TEST_ASSERT_FALSE(pass());
 }
 
+// ---- Restart of a stale stream ----
+
+static void test_a_restart_is_due_only_past_500ms_of_age_and_since_the_last(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(500u, ADC_STREAM_RESTART_MS);
+    TEST_ASSERT_TRUE(ADC_STREAM_RESTART_MS > ADC_STREAM_STALE_MS);
+    const uint64_t r = MS(ADC_STREAM_RESTART_MS);
+
+    // A live stream: its age is at most a half (plus a late pass), however long since a restart.
+    TEST_ASSERT_FALSE(adc_stream_restart_due(0u, UINT64_MAX, TPMS));
+    TEST_ASSERT_FALSE(adc_stream_restart_due(HALF_TICKS, UINT64_MAX, TPMS));
+    TEST_ASSERT_FALSE(adc_stream_restart_due(MS(ADC_STREAM_STALE_MS) + 1u, UINT64_MAX, TPMS));
+
+    // Exactly 500 ms is not due; both must be past it.
+    TEST_ASSERT_FALSE(adc_stream_restart_due(r, r, TPMS));
+    TEST_ASSERT_FALSE(adc_stream_restart_due(r + 1u, r, TPMS));
+    TEST_ASSERT_FALSE(adc_stream_restart_due(r, r + 1u, TPMS));
+    TEST_ASSERT_TRUE(adc_stream_restart_due(r + 1u, r + 1u, TPMS));
+    TEST_ASSERT_TRUE(adc_stream_restart_due(UINT64_MAX, UINT64_MAX, TPMS));
+
+    // time_hw_tpms before time_hw_init (1000)
+    TEST_ASSERT_FALSE(adc_stream_restart_due(500000u, 500001u, 1000u));
+    TEST_ASSERT_TRUE(adc_stream_restart_due(500001u, 500001u, 1000u));
+}
+
+static void test_a_live_stream_is_never_restarted(void)
+{
+    static const uint32_t stall_ms[] = {16u, 36u, 100u, 500u, 501u, 1600u, 5000u};
+    stream_boot(true);
+    stream_advance(MS(2400));
+
+    for (uint32_t k = 0u; k < sizeof(stall_ms) / sizeof(stall_ms[0]); k++)
+    {
+        for (uint32_t i = 0u; i < 1000u; i++)
+        {
+            TEST_ASSERT_FALSE(pass_restart());
+            stream_advance(MS(1));
+        }
+        stream_advance(MS(stall_ms[k]));
+        TEST_ASSERT_FALSE(pass_restart());
+        stream_advance(MS(1));
+    }
+    TEST_ASSERT_EQUAL_UINT32(0u, s_restarts);
+}
+
+static void test_a_dead_stream_is_restarted_every_500ms_while_it_stays_dead(void)
+{
+    stream_boot(true);
+    stream_advance(MS(3000));
+    TEST_ASSERT_FALSE(pass_restart());
+    stream_advance(MS(1) / 2u);
+    const uint64_t last_half = s_next_half - HALF_TICKS;
+    stream_stop();
+
+    // The first restart: the first pass more than 500 ms after the last half.
+    while ((s_restarts == 0u) && (s_now < MS(5000)))
+    {
+        stream_advance(MS(1));
+        TEST_ASSERT_TRUE(pass_restart() || (s_now + READ_TICKS <= last_half + MS(ADC_STREAM_STALE_MS + 2u)));
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, s_restarts);
+    TEST_ASSERT_TRUE(s_restart > last_half + MS(ADC_STREAM_RESTART_MS));
+    TEST_ASSERT_TRUE(s_restart <= last_half + MS(ADC_STREAM_RESTART_MS + 2u));
+
+    // Still dead: stale on every pass, the next restart 501 passes later (500 ms is not due), and so on.
+    uint64_t prev = s_restart;
+    uint32_t since = 0u;
+    for (uint32_t i = 0u; i < 5010u; i++)
+    {
+        stream_advance(MS(1));
+        since++;
+        TEST_ASSERT_TRUE(pass_restart());
+        if (s_restart != prev)
+        {
+            TEST_ASSERT_EQUAL_UINT32(ADC_STREAM_RESTART_MS + 1u, since);
+            TEST_ASSERT_EQUAL_UINT64(MS(ADC_STREAM_RESTART_MS + 1u), s_restart - prev);
+            prev  = s_restart;
+            since = 0u;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u + 10u, s_restarts);
+}
+
+static void test_a_restart_that_revives_the_stream_is_the_only_one(void)
+{
+    stream_boot(true);
+    stream_advance(MS(3000));
+    TEST_ASSERT_FALSE(pass_restart());
+    stream_stop();
+    s_revives = true;
+
+    while (s_restarts == 0u)
+    {
+        stream_advance(MS(1));
+        TEST_ASSERT_TRUE(s_now < MS(4000));
+        (void)pass_restart();
+    }
+    // Stale until the first new half, HALF_TICKS after the restart; fresh from then on.
+    const uint64_t first_half = s_next_half;
+    while (s_now + MS(1) / 10u < first_half)
+    {
+        stream_advance(MS(1) / 10u);
+        TEST_ASSERT_TRUE(pass_restart());
+    }
+    stream_advance(first_half - s_now);
+    TEST_ASSERT_FALSE(pass_restart());
+    for (uint32_t i = 0u; i < 3000u; i++)
+    {
+        stream_advance(MS(1));
+        TEST_ASSERT_FALSE(pass_restart());
+    }
+    TEST_ASSERT_EQUAL_UINT32(1u, s_restarts);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -245,5 +392,9 @@ int main(void)
     RUN_TEST(test_a_stopped_stream_stays_stale_past_the_32bit_tick_wrap);
     RUN_TEST(test_the_stream_is_fresh_again_from_its_first_new_half);
     RUN_TEST(test_a_stream_that_never_delivered_a_half_is_stale);
+    RUN_TEST(test_a_restart_is_due_only_past_500ms_of_age_and_since_the_last);
+    RUN_TEST(test_a_live_stream_is_never_restarted);
+    RUN_TEST(test_a_dead_stream_is_restarted_every_500ms_while_it_stays_dead);
+    RUN_TEST(test_a_restart_that_revives_the_stream_is_the_only_one);
     return UNITY_END();
 }

@@ -3,7 +3,9 @@
 #     python3 scripts/check_test_copies.py --relock
 # once the models of every region that changed have been reviewed (scripts/check_test_copies.py).
 6ad1b43efd3c881fafb62c09f7bd58eeecefe8d329dd1ab7b3c0f9678eee024f src/ADC_DMA.cpp ADC_DMA_age_ticks
-4dec74fb45a06f74f9a2acbce434875e6bf233628b41b9f323af78d54fe47129 src/ADC_DMA.cpp ADC_DMA_poll
+41e98652c95bc9eb309e38d319dbacc3c09a6814eca760673737eb8f885a0a94 src/ADC_DMA.cpp ADC_DMA_poll
+b161a4e1883bbc4dd2bc3fb2b3f0a74633c453545229871f3b46ed20e541b125 src/ADC_DMA.cpp ADC_DMA_restart_if_stale
+fec426705bf4978e7a713627d4270df1ba7822f03734b11105d4a4f85bbe4202 src/ADC_DMA.cpp adc_dma_restart
 f453b56d2e5bea60232354119faeb9fbee948e277c14cbec5b6ea6e452ce9602 src/ADC_DMA.cpp kScale128
 ef6e1f934723b5ded050586a1eeba3a6cac4c5fe9c2f22a10eb7aec9267639b0 src/ADC_DMA.cpp process_half_update_filter from /g_half_ticks = time_ticks64\(\);/ to /g_half_ticks = time_ticks64\(\);/
 1a679898380e239be1b3fbeba48f2aa3b8efa3b6c6abd153c17e3b59c5ef2f17 src/Flash_saves.cpp Flash_AMS_filament_write
@@ -23,8 +25,9 @@ b5baee4963d0229e0127233cfec8831e8be159dd618ba279b26c3d51e22183ca src/Motion_cont
 9fa1ae8c31bc19995b0faff6837b2393e178c1e2fc382ab259dd160b71e8891e src/Motion_control.cpp MC_PULL_ONLINE_read from /int pct = \(int\)\(pct_f \+ 0\.5f\);/ to /MC_PULL_pct\[i\] = \(uint8_t\)pct;/
 d0dc7ff77df4aa55e44aa099d4935be5c1576d2dfce8ee13af511a6bc34dd0c8 src/Motion_control.cpp MC_PULL_PIDP_PCT
 d78bd736a34c7ed71ef55d089518bfba8af3f75aaac630475bd6c3df590875a6 src/Motion_control.cpp MOTOR_PID
-1e222d9e74c6ad544917714b6d10f33258eb999e2fa58f7f81f15d091fff6d34 src/Motion_control.cpp Motion_control_run
+a9bc5f8841dd499b1cae5c79a2d0d2d8a783a68af18d3de99dda6058a7cffaea src/Motion_control.cpp Motion_control_run
 d1a84bb843516f9826f4a9e53478b925603a0c8ca532e3e3c26dc40f7840105a src/Motion_control.cpp Motion_control_run from /\.online = true;/ to /\.online = false;/
+a1513a5da83a89023b151044f7e4e35deca4fbe86c9873f001a2d15ee2bbc499 src/Motion_control.cpp Motion_control_run from /g_adc_stale = adc_stream_stale/ to /ADC_DMA_restart_if_stale\(\);/
 b7c6bed67ec10062ee4993e54c9b6cd0c7c84a81651922ef668af1101edb9f46 src/Motion_control.cpp PULL_RAMP_M
 46e07b21720f51de67a3c3d407856e12462f0f26e926cd9fbc69fd3f1aba2b7a src/Motion_control.cpp PULL_V_END
 10e054bda6a2228fb0aa62850919ec4b6067c0bbe77a6de96afb229881c0fccd src/Motion_control.cpp PULL_V_FAST

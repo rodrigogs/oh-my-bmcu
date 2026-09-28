@@ -27,6 +27,7 @@ static float            g_v[2][kCh] __attribute__((aligned(4)));
 static volatile uint8_t g_v_rd = 0;
 static volatile uint8_t g_acc_dirty = 0;
 static uint64_t         g_half_ticks = 0u; // time_ticks64() of the last processed half (adc_stream.h)
+static uint64_t         g_restart_ticks = 0u; // time_ticks64() of the last adc_dma_restart
 
 static constexpr float kScale32  = 3.3f / (8190.0f *  32.0f);
 static constexpr float kScale64  = 3.3f / (8190.0f *  64.0f);
@@ -142,6 +143,15 @@ static inline void process_half_update_filter(const uint32_t* p_half)
 
 static void adc_dma_start();
 
+// The ADCs and the DMA from reset, and the averaging ring; until the first new half the readings
+// keep their last values and ADC_DMA_age_ticks() goes on growing.
+static void adc_dma_restart()
+{
+    adc_dma_start();
+    ring_reset();
+    g_restart_ticks = time_ticks64();
+}
+
 void ADC_DMA_poll()
 {
     for (int guard = 0; guard < 4; guard++)
@@ -149,13 +159,13 @@ void ADC_DMA_poll()
         const uint32_t flags = DMA1->INTFR;
 
         // A transfer error disables the channel, so no half would come again. Restart the DMA and
-        // both ADCs from the start of the buffer (each word on its channel again); until the first
-        // new half the readings keep their last values and ADC_DMA_age_ticks() goes on growing.
+        // both ADCs from the start of the buffer (each word on its channel again). At most once per
+        // poll (WDG_FEED_GAP_MAX_MS): the restart clears every flag and the first new half is 1.19 ms
+        // away, so a transfer error that comes again is restarted by the next poll.
         if (flags & DMA1_FLAG_TE1)
         {
-            adc_dma_start();
-            ring_reset();
-            continue;
+            adc_dma_restart();
+            break;
         }
 
         if (flags & DMA1_FLAG_HT1)
@@ -224,6 +234,14 @@ uint64_t ADC_DMA_age_ticks()
     return adc_stream_age_ticks(time_ticks64(), g_half_ticks);
 }
 
+void ADC_DMA_restart_if_stale()
+{
+    if (!g_adc_dma_inited) return; // the boot init found no data: left as it is
+
+    if (adc_stream_restart_due(ADC_DMA_age_ticks(), time_ticks64() - g_restart_ticks, time_hw_tpms))
+        adc_dma_restart();
+}
+
 void ADC_DMA_wait_full()
 {
     const uint32_t t0 = time_ticks32();
@@ -271,7 +289,8 @@ static inline void adc_calibrate(ADC_TypeDef* a)
 }
 
 // DMA1 channel 1 and both ADCs from reset: calibrated, converting, the DMA at the start of the
-// buffer, all its flags clear. At boot (ADC_DMA_init) and after a transfer error (ADC_DMA_poll).
+// buffer, all its flags clear. At boot (ADC_DMA_init), and through adc_dma_restart after a transfer
+// error (ADC_DMA_poll) or on a stale stream (ADC_DMA_restart_if_stale).
 static void adc_dma_start()
 {
     DMA_DeInit(DMA1_Channel1);

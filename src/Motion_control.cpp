@@ -2648,6 +2648,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
     // Stale ADC stream: no channel drives on frozen buffer and switch readings. Every motor is
     // braked as for a bad AS5600 (motor_brake_now), a running auto-unload ends, and every status LED
     // blinks blue (250 ms on, 250 ms off) with the buffer LED off, until a new half-buffer comes.
+    // Motion_control_run restarts the stream every ADC_STREAM_RESTART_MS (500 ms) meanwhile.
     // The pull back and redetect guards run before this block and read x_prev: from the second stale
     // pass on it is 0 (their set_motion from stop and this brake both zero it), so a stale stream is
     // no stall; their time budgets still run.
@@ -2796,6 +2797,7 @@ void Motion_control_run(int error)
 
     MC_PULL_ONLINE_read(now_ticks);
     g_adc_stale = adc_stream_stale(ADC_DMA_age_ticks(), time_hw_tpms);
+    if (g_adc_stale) ADC_DMA_restart_if_stale();
 
     const uint8_t loaded_ch = ams_state_get_loaded();
     if ((loaded_ch < kChCount) && (MC_ONLINE_key_stu[loaded_ch] == 0u))

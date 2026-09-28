@@ -28,10 +28,13 @@
 #define WDG_TIMEOUT_MS 1000u
 
 // Longest time between two feeds once the watchdog runs (watchdog_start() in main, right after the
-// buffer calibration), with about 2.5x margin over the ~40 ms estimate below. Page/sector erase
-// 16 ms and page program 2 ms are the datasheet's typical values (table 4-17 gives no maximum).
+// buffer calibration), over the longest estimate below: a main-loop pass, about 76 ms. Page/sector
+// erase 16 ms and page program 2 ms are the datasheet's typical values (table 4-17 gives no maximum).
 // - Main-loop pass (fed at its top): under 1 ms. The worst pass runs one NVM job: the loaded-channel
-//   record can take 2 page erases and 2 word programs (Flash_AMS_state_write), about 36 ms.
+//   record can take 2 page erases and 2 word programs (Flash_AMS_state_write), about 36 ms. It can
+//   also run one ADC restart (ADC_DMA_poll on a transfer error, ADC_DMA_restart_if_stale on a stale
+//   stream): adc_dma_start's two calibration waits per ADC take microseconds, up to 4 x 10 ms with a
+//   stuck calibration bit (kCalTimeoutMs). Both in one pass: about 76 ms.
 // - Rest of the boot: Motion_control_init to the loop. ADC_DMA_wait_full (up to 2 s if the ADC
 //   does not fill) feeds in its loop. From its last feed, 16 x 2 ms ADC samples and the AS5600 and
 //   PWM init to the first MOTOR_get_dir feed, or to the loop if no direction test runs: about 40 ms.
