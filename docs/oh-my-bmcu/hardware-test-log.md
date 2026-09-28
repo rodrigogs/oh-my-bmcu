@@ -66,3 +66,38 @@ Notes:
   rejected with HMS `0500-0500-0001-0007` ("MQTT Command verification failed") and changed
   nothing. Slot changes, loads and unloads go through OrcaStudio (signed by the network plugin) or
   the printer screen.
+
+## Run 2: 2026-09-28, image `68c77c6`
+
+The smoke test the [plan](hardware-test-plan.md) asks for before an untested image replaces the
+tested one: everything on `main` from `4933421` to `68c77c6` (the no-printer run: motion stall
+guards, ADC stale stop, DM 'none' debounce, bus frame-length checks, NVM back-off, fault record,
+and the rest listed in the [changelog](CHANGELOG.md)).
+
+- Image: `env:a1_solo_autoload_rgboff` built locally at `68c77c6`, sha256
+  `642dfb208ab8c7b7b2e5486d5a54353e74a617c0963fd90a5cd1967b7dea2857` (52,716 bytes), the same as
+  CI artifact `oh-my-bmcu-a1-68c77c6…-push`.
+- Setup: the printer of Run 1, PLA in slot 1.
+- Flash: BMCU-Flasher CLI (its own virtualenv, pyserial 3.5), `--mode usb --verify-last`, printer
+  unplugged, filament out, BMCU on USB-C (CH340 `1a86:7523`): 942/942 blocks programmed and read
+  back, 12.5 s.
+
+| Section | Step | Result |
+|---|---|---|
+| 0 | sha256 noted; filament out; printer unplugged; BMCU on USB-C | pass |
+| 1 | No magenta or blue flash after the flash | pass (none seen by the user) |
+| 1 | First calibration after the flash | pass: every step confirmed, green blink at the end |
+| 1 | Reconnected with the printer unplugged, then powered on | pass: SYS LED white, the printer shows AMS A; with no filament every unit's buffer LED shows dim amber, upstream's "buffer at the calibrated centre" indicator (49-51 %), not a fault |
+| 1 | SYS LED red until the first heartbeat; direction check | pending (not watched) |
+| 2 | Load of slot 1 (DM AUTOLOAD) | pass: "worked perfectly" (user report) |
+| 2 | Slot 1's type and colour across a printer power cycle | pass (user report; not read back over MQTT this time) |
+| 3 | A test print from slot 1 | pass: the BMCU fed the filament to the extruder (no send abort), the active unit's status LED was steady cyan (on_use) during the print, and the print finished (user report) |
+| 3 | Unload at the end of that print | pass (user report); the length (about 95 mm) was not measured |
+| 2 | Seven filament changes, then a power cycle (journal page erase) | pending |
+| 4, 5, 7, 9, 10 | Tangle, unload limits, DM autoload re-arm, load and idle push limits, ADC readings | pending |
+| 8 | Normal boots and a whole print with no reset (no magenta) | no reset reported; the SYS LED was not watched through the whole print |
+
+User report (2026-09-28): "deu tudo certo" (everything went fine) for the print, its unload and the
+power cycle. The smoke test passed, so this image can replace the Run 1 image in normal use. The
+fault cases of sections 4, 5, 7, 9 and 10, which need the spool or the filament held on purpose,
+are still pending.
