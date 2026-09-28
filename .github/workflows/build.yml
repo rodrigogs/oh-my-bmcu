@@ -159,6 +159,9 @@ jobs:
       - name: build_all_firmwares.sh OUT_DIR guards (stub pio)
         run: bash scripts/test_build_all_firmwares.sh
 
+      - name: Guard scripts themselves (fixtures, dependency-free)
+        run: python3 -m unittest discover -s scripts/tests
+
       - run: pio test -e native
 
       - run: pio test -e native_asan

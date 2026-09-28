@@ -8,6 +8,9 @@
 # macOS
 .DS_Store
 
+# Python bytecode cache (scripts/, scripts/tests/)
+__pycache__/
+
 # build_all_firmwares.sh staging output
 firmwares.new/
 firmwares.new.manifest.txt
