@@ -4,6 +4,24 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// Header of the frames ahub_bus.cpp decodes and builds: 33, flag with bit 7 set, length, CRC8 of
+// bytes 0-2, command. The frame is length * 4 + 12 bytes, all but its last word covered by the CRC32
+// in that word. The RX parser (_bus_hardware.h) also hands over 0x33 frames with flag bit 7 clear,
+// sized from byte 4 with the CRC8 at byte 6, as a BambuBus long header. This firmware knows no AHUB
+// layout of that kind (byte 4 is where the short header has the command), so they are dropped.
+#define AHUB_FLAG_SHORT_HEADER 0x80u
+
+static inline bool ahub_frame_short_header(const uint8_t *buf)
+{
+    return (buf[1] & AHUB_FLAG_SHORT_HEADER) != 0u;
+}
+
+// Words the CRC32 covers in a short-header frame: length + 2, from byte 2 as the RX parser sizes it.
+static inline uint32_t ahub_frame_crc_words(const uint8_t *buf)
+{
+    return (uint32_t)buf[2] + 2u;
+}
+
 // A set request, as the RX parser hands it over (ahubus_package_set_head): 33, flag, length, CRC8,
 // command 03, set_type, set_adr, data_struct_count, then the data from byte 8. The frame is
 // length * 4 + 12 bytes and its last 4 are the CRC32, so the data ends 4 bytes before the frame does.

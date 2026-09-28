@@ -21,8 +21,9 @@ ahubus_package_type ahubus_get_package_type(uint8_t *package_recv_buf)
 {
     if (package_recv_buf == nullptr) return ahubus_package_type::none;
     if (package_recv_buf[0] != 0x33) return ahubus_package_type::none;
+    if (!ahub_frame_short_header(package_recv_buf)) return ahubus_package_type::none;
 
-    const uint32_t words = (uint32_t)package_recv_buf[2] + 2u;
+    const uint32_t words = ahub_frame_crc_words(package_recv_buf);
     const u32_alias *w = (const u32_alias *)package_recv_buf;
 
     CRC->CTLR = 1;
@@ -43,7 +44,7 @@ int ahubus_package_add_crc(uint8_t *buf)
 {
     if (buf == nullptr) return 0;
 
-    const uint32_t words = (uint32_t)buf[2] + 2u;
+    const uint32_t words = ahub_frame_crc_words(buf);
     u32_alias *w = (u32_alias *)buf;
 
     buf[3] = bus_crc8(buf, 3);
