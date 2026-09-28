@@ -25,8 +25,9 @@ jobs:
   a1:
     name: A1 images (a1_solo_autoload_rgboff and the #148 A/B image)
     runs-on: ubuntu-24.04
-    # Flashable images are only published once the host tests and the V10.5 reproduction pass.
-    needs: [unit-tests, reproduce-upstream]
+    # Flashable images are only published once the host tests, the V10.5 reproduction and the
+    # static analysis pass.
+    needs: [unit-tests, reproduce-upstream, static-analysis]
     env:
       ENVS: a1_solo_autoload_rgboff a1_solo_autoload_rgboff_no_boot_restore
     steps:
@@ -161,6 +162,58 @@ jobs:
       - run: pio test -e native
 
       - run: pio test -e native_asan
+
+  static-analysis:
+    name: Static analysis (pio check, cppcheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.12"
+
+      # pio check reads the toolchain's predefined macros, so it needs the same platform install
+      # (and cache) as the a1 job.
+      - name: Resolve toolchain head
+        id: toolchain
+        run: |
+          set -o pipefail
+          sha=$(git ls-remote --exit-code "$TOOLCHAIN_REPO" "refs/heads/$TOOLCHAIN_BRANCH" | cut -f1)
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
+        with:
+          path: ~/.platformio
+          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}-${{ steps.toolchain.outputs.sha }}
+
+      - run: pip install "platformio==${PLATFORMIO_VERSION}"
+
+      # cppcheck over src/ with the A1 env's defines (check_* options in env:base). Gating on
+      # medium and high: the baseline has none left after triage. Low (style) findings are listed
+      # in the step summary but do not fail the job.
+      - name: pio check
+        run: |
+          set -o pipefail
+          pio check -e a1_solo_autoload_rgboff --fail-on-defect=high --fail-on-defect=medium | tee pio-check.txt
+
+      - name: Report the findings
+        if: always()
+        run: |
+          # A header finding is reported once per file that includes it, so count unique lines.
+          defects=$(grep -E '^src/[^ ]+:[0-9]+: \[(low|medium|high):' pio-check.txt | sort -u || true)
+          {
+            echo "### pio check (cppcheck), a1_solo_autoload_rgboff"
+            for s in high medium low; do
+              echo "- ${s}: $(printf '%s\n' "$defects" | grep -c "\[${s}:" || true)"
+            done
+            if [ -n "$defects" ]; then
+              echo '```'
+              printf '%s\n' "$defects"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   reproduce-upstream:
     name: Reproduce upstream V10.5 SOLO images
