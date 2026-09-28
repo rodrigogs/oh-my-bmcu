@@ -280,7 +280,13 @@ static void test_blocked_pull_stops_1s_after_reaching_800_pwm(void)
     TEST_ASSERT_EQUAL_UINT32(t800 + ML_STALL_MS, t_done);
 }
 
-// One guard check of the state under test, as Motion_control.cpp makes it every pass.
+// ---- adapted from Motion_control.cpp: the pull back's and the redetect's guard calls ----
+// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /const ml_result pb_end =/ to /MC_ONLINE_key_stu\[i\]\);/ ----
+// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /ml_redetect_start\(/ to /ml_redetect_start\(/ ----
+// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /if \(ml_redetect_check\(/ to /== ML_OK\)/ ----
+// One guard check of the state under test, as Motion_control.cpp makes it every pass. The pull
+// back's and the redetect's take the PWM of the last pass (x_prev); the redetect starts where the
+// pull back ends, with the retract length (motion_control_pull_back_distance) as its budget.
 typedef ml_result (*guard_check_fn)(uint32_t pos_cnt, float pwm);
 
 static ml_result check_pull(uint32_t pos_cnt, float pwm)
@@ -458,6 +464,7 @@ static void test_bus_offline_gap_is_not_counted(void)
 }
 
 // ---- adapted from Motion_control.cpp: a pull back pass while the ADC stream is stale ----
+// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /const ml_result pb_end =/ to /MC_ONLINE_key_stu\[i\]\);/ ----
 // ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /g_pull_speed_set\[i\] = -v;/ to /filament_motion_pull, 100/ ----
 // ---- anchor: _MOTOR_CONTROL from /if \(motion == _motion\) return;/ to /if \(motion == _motion\) return;/ ----
 // ---- anchor: motor_brake_hold ----
@@ -954,6 +961,7 @@ static uint8_t idle_pct(float pct_f)
 // ---- anchor: MC_PULL_PIDP_PCT ----
 // ---- anchor: MC_HOLD_PWM_MIN ----
 // ---- anchor: run from /normalny idle z filamentem/ to /PID_pressure\.clear\(\);/ ----
+// ---- anchor: run from /const ml_idle_push_act idle_act =/ to /return;/ ----
 // ---- anchor: run from /const bool pull_mode =/ to /if \(x < \(float\)-PWM_lim\)/ ----
 // With the rounded buffer reading below MC_PULL_DEADBAND_PCT_LOW (30 %, MC_PULL_stu -1) the pressure
 // PID (P MC_PULL_PIDP_PCT 25, no I or D) drives towards 50 %, raised to the 420 PWM hold floor and
