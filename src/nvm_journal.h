@@ -36,6 +36,7 @@ static inline bool nvm_journal_needs_erase(const uint32_t *page, uint32_t slot, 
 #define NVM_FIL_SLOTS_PER_PAGE 6u
 #define NVM_STA_SLOT_WORDS 2u
 #define NVM_STA_SLOTS_PER_PAGE 32u  // 256 / 8
+#define NVM_STA_LOG_PAGES 10u
 
 // Filament-info journal: the page of one filament, next record at slot first_empty (6 = full).
 static inline bool nvm_fil_needs_erase(const uint32_t *page, uint32_t first_empty)

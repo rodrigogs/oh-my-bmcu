@@ -16,7 +16,7 @@ static const uint32_t FIL_WORDS = NVM_FIL_SLOT_WORDS;
 static const uint32_t FIL_SLOTS = NVM_FIL_SLOTS_PER_PAGE;
 static const uint32_t STA_WORDS = NVM_STA_SLOT_WORDS;
 static const uint32_t STA_SLOTS = NVM_STA_SLOTS_PER_PAGE;
-static const uint32_t STA_LOG_PAGES = 10u;  // Flash_saves.cpp STA_PAGE_COUNT
+static const uint32_t STA_LOG_PAGES = NVM_STA_LOG_PAGES;
 static const uint32_t STA_LOG_SLOTS = STA_LOG_PAGES * STA_SLOTS;
 
 // ---- adapted from Flash_saves.cpp: crc32_hw_words, the CH32 CRC unit in software ----

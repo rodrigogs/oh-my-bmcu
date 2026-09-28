@@ -170,7 +170,7 @@ static void fil_cache_load_one(uint8_t filament_idx)
 }
 
 static constexpr uint32_t STA_PAGE_FIRST = 6u;
-static constexpr uint32_t STA_PAGE_COUNT = 10u;
+static constexpr uint32_t STA_PAGE_COUNT = NVM_STA_LOG_PAGES;
 static constexpr uint32_t STA_SLOT_BYTES = 8u;
 static constexpr uint32_t STA_SLOTS_PER_PAGE = (FLASH_NVM256_PAGE_SIZE / STA_SLOT_BYTES);
 static constexpr uint32_t STA_TOTAL_SLOTS = (STA_PAGE_COUNT * STA_SLOTS_PER_PAGE);
@@ -336,10 +336,10 @@ bool Flash_AMS_state_write(uint8_t loaded_ch)
         if (!flash256_erase(page)) return false;
     }
 
-    if (!flash_prog_words(addr, buf, 2u))
+    if (!flash_prog_words(addr, buf, NVM_STA_SLOT_WORDS))
     {
         if (!flash256_erase(page)) return false;
-        if (!flash_prog_words(addr, buf, 2u)) return false;
+        if (!flash_prog_words(addr, buf, NVM_STA_SLOT_WORDS)) return false;
     }
 
     g_sta_seq = (uint16_t)(seq + 1u);
