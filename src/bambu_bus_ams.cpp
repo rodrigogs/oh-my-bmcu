@@ -479,6 +479,10 @@ struct bambubus_ams_motion_package_struct
     uint16_t last5 = 0x0000;
     uint16_t crc16;
 } __attribute__((packed));
+static_assert(sizeof(bambubus_ams_motion_package_struct) == 0x2C, "packed size mismatch");
+static_assert(__builtin_offsetof(bambubus_ams_motion_package_struct, filament_stu_flag) == 29, "filament_stu_flag offset");
+static_assert(__builtin_offsetof(bambubus_ams_motion_package_struct, last1) == 30, "last1 offset");
+static_assert(__builtin_offsetof(bambubus_ams_motion_package_struct, last2) == 34, "last2 offset");
 // 3D F0 2C C1 03 00 00 00 FF 00 00 00 00 6F F0 FB FF 36 00 00 00 F8 FF F7 FF 00 00 27 00 55 F8 EE F9 F0 B7 BA B9 B2 00 00 00 00 88 E6
 // 3D D0 2C D1 03 03 00 02 00 00 00 80 3F FF FF FF FF 36 00 00 00 00 00 00 00 00 00 27 00 55 FF FF FF FF 01 01 01 01 00 00 00 00 15 95
 static const bambubus_ams_motion_package_struct _bambubus_ams_motion_package_struct_init_data = {
@@ -506,13 +510,15 @@ static const bambubus_ams_motion_package_struct _bambubus_ams_motion_package_str
     0x0000          // crc16
 };
 
+// frame_29_32 and frame_33_36 are the captured bytes 29..36, as little-endian words: filament_stu_flag
+// (0x57), last1 and the first three bytes of last2. Byte 37 (the last byte of last2) is not in the rows.
 struct before_on_use_sniff_row
 {
     uint16_t pressure;
     uint16_t unknow2;
     uint8_t unknow3[12];
-    uint32_t last1;
-    uint32_t last2;
+    uint32_t frame_29_32;
+    uint32_t frame_33_36;
 };
 
 static const before_on_use_sniff_row before_on_use_sniff_7f_rows[] = {
@@ -640,8 +646,9 @@ void get_package_motion(bambubus_printer_motion_package_struct *package_recv)
             package_send->unknow2 = row.unknow2;
             memcpy(package_send->unknow3, row.unknow3, sizeof(row.unknow3));
 
-            memcpy(out + 29, &row.last1, sizeof(row.last1));
-            memcpy(out + 33, &row.last2, sizeof(row.last2));
+            uint8_t *frame_29 = out + __builtin_offsetof(bambubus_ams_motion_package_struct, filament_stu_flag);
+            memcpy(frame_29, &row.frame_29_32, sizeof(row.frame_29_32));
+            memcpy(frame_29 + sizeof(row.frame_29_32), &row.frame_33_36, sizeof(row.frame_33_36));
 
             before_on_use_sniff_7f_index = (uint8_t)(idx + 1u);
         }
@@ -710,6 +717,10 @@ struct bambubus_ams_stu_motion_package_struct
     uint32_t last4 = 0xFFFFFFFF;
     uint16_t crc16;
 } __attribute__((packed));
+static_assert(sizeof(bambubus_ams_stu_motion_package_struct) == 0x3C, "packed size mismatch");
+static_assert(__builtin_offsetof(bambubus_ams_stu_motion_package_struct, filament_stu_flag) == 41, "filament_stu_flag offset");
+static_assert(__builtin_offsetof(bambubus_ams_stu_motion_package_struct, last1) == 42, "last1 offset");
+static_assert(__builtin_offsetof(bambubus_ams_stu_motion_package_struct, last2) == 46, "last2 offset");
 
 static const bambubus_ams_stu_motion_package_struct _bambubus_ams_stu_motion_package_struct_init_data = {
     0x3D,       // magic_byte
