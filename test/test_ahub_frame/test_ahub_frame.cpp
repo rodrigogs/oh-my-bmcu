@@ -1,13 +1,32 @@
 // Host tests for src/ahub_frame.h, the checks ahub_bus.cpp runs on AHUB (0x33) frames: the active
-// channel a set request stores is a channel (0-3) or none (0xFF), and a set request is applied only
-// if every byte its handler reads lies before the frame's CRC32.
+// channel a set request stores is a channel (0-3) or none (0xFF), a set request is applied only if
+// every byte its handler reads lies before the frame's CRC32, and only the short header is decoded,
+// its CRC32 covering the frame the RX parser (src/_bus_hardware.h, run here) hands over.
 
 #include <stdint.h>
+#include <string.h>
 #include <unity.h>
 
+#include "_bus_hardware.h"
 #include "ahub_frame.h"
+#include "bus_rx_frames.h"
+#include "crc_bus.h"
 
-void setUp(void) {}
+static const uint32_t FRAME_GAP_TICKS = 400u * 18u; // 400 us of silence between frames
+
+static _bus_port_deal port;
+static uint32_t tick;
+
+void bambubus_heartbeat_seen_fast(void) {}
+
+static void no_send(uint8_t *, uint16_t) {}
+
+void setUp(void)
+{
+    port.init(no_send);
+    tick = 0x10000000u;
+}
+
 void tearDown(void) {}
 
 static void test_a_channel_or_none_is_stored_as_sent(void)
@@ -94,6 +113,94 @@ static void test_no_count_reads_past_the_rx_buffer(void)
     }
 }
 
+// An AHUB frame of header length `length`: length * 4 + 12 bytes. Short header: 33, flag, length,
+// CRC8. Long header (flag bit 7 clear), as the RX parser reads it: length at byte 4, CRC8 of bytes
+// 0-5 at byte 6, byte 2 free (b2). The CRC32 word is not checked by the parser and left as filler.
+static int make_ahub(uint8_t *out, uint8_t flag, int length, uint8_t b2)
+{
+    const int len = length * 4 + 12;
+    for (int i = 0; i < len; i++)
+        out[i] = (uint8_t)(0x40u + ((i * 7) & 0x3Fu));
+    out[0] = 0x33;
+    out[1] = flag;
+    if (flag & 0x80u)
+    {
+        out[2] = (uint8_t)length;
+        out[3] = bus_crc8(out, 3);
+    }
+    else
+    {
+        out[2] = b2;
+        out[4] = (uint8_t)length;
+        out[6] = bus_crc8(out, 6);
+    }
+    return len;
+}
+
+// Fed after a quiet line; returns the length the parser handed over (0: none).
+static int parse(const uint8_t *f, int len)
+{
+    tick += FRAME_GAP_TICKS;
+    for (int i = 0; i < len; i++)
+    {
+        tick += BYTE_TICKS;
+        port.rx_byte(f[i], tick, false);
+    }
+    const int got = port.recv_data_len;
+    if (got != 0)
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)_bus_data_type::ahub_bus, (uint8_t)port.bus_package_type);
+    port.recv_data_len = 0;
+    port.bus_package_type = _bus_data_type::none;
+    return got;
+}
+
+static void test_flag_bit_7_tells_the_short_header(void)
+{
+    uint8_t f[8] = {0x33};
+    for (unsigned flag = 0; flag <= 0xFFu; flag++)
+    {
+        f[1] = (uint8_t)flag;
+        TEST_ASSERT_EQUAL((flag & 0x80u) != 0u, ahub_frame_short_header(f));
+    }
+}
+
+// The CRC32 covers every word but the last of each short-header frame the parser hands over.
+static void test_the_crc32_covers_each_short_frame_the_parser_hands_over(void)
+{
+    static const uint8_t flags[] = {0x80, 0xC0, 0xC5, 0xFF};
+    uint8_t f[1280];
+    for (unsigned k = 0; k < sizeof(flags); k++)
+        for (int length = 0; length <= 255; length++)
+        {
+            const int len = make_ahub(f, flags[k], length, 0);
+            TEST_ASSERT_EQUAL_INT(len, parse(f, len));
+            TEST_ASSERT_TRUE(ahub_frame_short_header(port.bus_recv_data_ptr));
+            TEST_ASSERT_EQUAL_UINT32((uint32_t)len / 4u - 1u, ahub_frame_crc_words(port.bus_recv_data_ptr));
+        }
+}
+
+// The parser hands long-header frames over, sized from byte 4. Counted from byte 2, the CRC32 missed
+// them unless byte 2 equalled byte 4; then byte 4, their length, was taken as the command (1-3:
+// heartbeat, query, set) and the handlers read short-header offsets. Now every one is dropped.
+static void test_long_header_frames_are_dropped(void)
+{
+    static const uint8_t flags[] = {0x00, 0x05, 0x40, 0x7F};
+    uint8_t f[1280];
+    for (unsigned k = 0; k < sizeof(flags); k++)
+        for (int length = 0; length <= 255; length++)
+        {
+            const uint8_t b2s[] = {(uint8_t)length, (uint8_t)(length ^ 0x01u)};
+            for (unsigned j = 0; j < sizeof(b2s); j++)
+            {
+                const int len = make_ahub(f, flags[k], length, b2s[j]);
+                TEST_ASSERT_EQUAL_INT(len, parse(f, len));
+                TEST_ASSERT_FALSE(ahub_frame_short_header(port.bus_recv_data_ptr));
+                // The CRC32 counted from byte 2 spans this frame only when byte 2 is its length.
+                TEST_ASSERT_EQUAL(j == 0, ahub_frame_crc_words(port.bus_recv_data_ptr) == (uint32_t)len / 4u - 1u);
+            }
+        }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -103,5 +210,8 @@ int main(void)
     RUN_TEST(test_dryer_stu_needs_a_frame_of_20_bytes);
     RUN_TEST(test_all_filament_stu_needs_every_entry_in_the_frame);
     RUN_TEST(test_no_count_reads_past_the_rx_buffer);
+    RUN_TEST(test_flag_bit_7_tells_the_short_header);
+    RUN_TEST(test_the_crc32_covers_each_short_frame_the_parser_hands_over);
+    RUN_TEST(test_long_header_frames_are_dropped);
     return UNITY_END();
 }
