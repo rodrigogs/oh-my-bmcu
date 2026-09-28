@@ -7,6 +7,8 @@
 static_assert(WDG_RSTF_PIN == RCC_PINRSTF && WDG_RSTF_POR == RCC_PORRSTF && WDG_RSTF_SFT == RCC_SFTRSTF &&
                   WDG_RSTF_IWDG == RCC_IWDGRSTF && WDG_RSTF_WWDG == RCC_WWDGRSTF && WDG_RSTF_LPWR == RCC_LPWRRSTF,
               "watchdog_cfg.h reset flags differ from RCC_RSTSCKR");
+static_assert(BLACKBOX_RCC_PWREN == RCC_PWREN && BLACKBOX_RCC_BKPEN == RCC_BKPEN && BLACKBOX_PWR_DBP == PWR_CTLR_DBP,
+              "blackbox.h backup-domain bits differ from RCC_APB1PCENR and PWR_CTLR");
 
 // /16 and 2500 at 40 kHz: 1.000 s nominal, 0.666 s at 60 kHz, 1.601 s at 25 kHz.
 static constexpr wdg_iwdg_cfg kIwdg = wdg_iwdg_config(WDG_TIMEOUT_MS, WDG_LSI_NOM_HZ);
@@ -67,7 +69,7 @@ void blackbox_boot(uint32_t rstsckr)
 // (GCC compiles __builtin_trap(), for instance on an isolated NULL dereference, to ebreak; none is
 // in the image now) get the same handler, since their default loops too. ecall is never executed.
 //
-// Register writes only, no call and no stack: the trap may come from a bad stack pointer.
+// Register accesses only, no call and no stack: the trap may come from a bad stack pointer.
 // "WCH-Interrupt-fast" like WCH's own HardFault/NMI handlers (EVT ch32v20x_it.c): the hardware
 // prologue (HPE, enabled by the startup code) saves the registers, so GCC emits no software
 // save to the stack, and the handler never returns.
@@ -100,17 +102,21 @@ static inline __attribute__((always_inline)) void failsafe_stop(void)
 
     // The fault record, after the stop: mepc and mcause, their check last, so a reset between the
     // writes reads as no trap. The phase and the longest pass stay as the run left them. Before
-    // blackbox_boot (startup code, SystemInit) the writes are ignored: DBP is still 0.
+    // blackbox_boot turns the backup domain on (startup code, SystemInit, time_hw_init), the record
+    // is skipped: two register reads, PWR_CTLR only once its clock is on.
     uint32_t mepc, mcause;
     __asm volatile("csrr %0, mepc" : "=r"(mepc));
     __asm volatile("csrr %0, mcause" : "=r"(mcause));
     const uint16_t pc_lo = (uint16_t)mepc;
     const uint16_t pc_hi = (uint16_t)(mepc >> 16);
     const uint16_t code = blackbox_mcause_code(mcause);
-    *blackbox_bkp(BLACKBOX_W_MEPC_LO) = pc_lo;
-    *blackbox_bkp(BLACKBOX_W_MEPC_HI) = pc_hi;
-    *blackbox_bkp(BLACKBOX_W_MCAUSE) = code;
-    *blackbox_bkp(BLACKBOX_W_TRAP_CHECK) = blackbox_trap_check(pc_lo, pc_hi, code);
+    if (blackbox_bkp_clocked(RCC->APB1PCENR) && blackbox_bkp_writable(PWR->CTLR))
+    {
+        *blackbox_bkp(BLACKBOX_W_MEPC_LO) = pc_lo;
+        *blackbox_bkp(BLACKBOX_W_MEPC_HI) = pc_hi;
+        *blackbox_bkp(BLACKBOX_W_MCAUSE) = code;
+        *blackbox_bkp(BLACKBOX_W_TRAP_CHECK) = blackbox_trap_check(pc_lo, pc_hi, code);
+    }
 
     for (;;)
         __asm volatile("" ::: "memory");

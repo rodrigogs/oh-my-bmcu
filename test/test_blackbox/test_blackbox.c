@@ -7,7 +7,8 @@
 //
 // watchdog.cpp and main.cpp need the CH32 SDK and are not built on the host. The backup registers
 // are an array here; the boot and the trap handler's writes are modelled below. The RCC_RSTSCKR flag
-// values are the RCC_*RSTF values of ch32v20x.h (watchdog.cpp checks watchdog_cfg.h against them).
+// values are the RCC_*RSTF values of ch32v20x.h (watchdog.cpp checks watchdog_cfg.h against them), and
+// so are the clock and write-enable bits of the backup domain (watchdog.cpp checks blackbox.h's).
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -26,6 +27,11 @@
 #define POWER_ON     (SDK_PORRSTF | SDK_PINRSTF) // RSTSCKR reset value
 #define IWDG         (SDK_IWDGRSTF | SDK_PINRSTF) // an internal reset can set PINRSTF too
 
+// ch32v20x.h, RCC_APB1PCENR and PWR_CTLR
+#define SDK_BKPEN 0x08000000u
+#define SDK_PWREN 0x10000000u
+#define SDK_DBP   0x0100u
+
 // SysTick runs at HCLK/8 = 18 MHz.
 #define TPMS 18000u
 
@@ -35,16 +41,30 @@ void tearDown(void) {}
 // ---- model of the backup registers and of the firmware's writes ----
 
 static uint16_t bkp[BLACKBOX_WORDS];
+static uint32_t apb1pcenr; // RCC_APB1PCENR: PWREN, BKPEN
+static uint32_t pwr_ctlr;  // PWR_CTLR: DBP
 
 static void power_loss(void)
 {
     memset(bkp, 0, sizeof(bkp)); // VDD and VBAT off: backup domain reset, every register 0
 }
 
-// ---- adapted from watchdog.cpp: blackbox_boot(), read, blackbox_boot_words, write back ----
+// Any reset: RCC and PWR back to 0, the backup registers kept. The run is now in the startup code,
+// SystemInit or time_hw_init, before blackbox_boot.
+static void reset(void)
+{
+    apb1pcenr = 0u;
+    pwr_ctlr = 0u;
+}
+
+// ---- adapted from watchdog.cpp: blackbox_boot(), clocks and DBP, read, blackbox_boot_words, write back ----
 // ---- anchor: blackbox_boot ----
+// The reset that starts the run, then blackbox_boot.
 static blackbox_t boot(uint32_t rstsckr)
 {
+    reset();
+    apb1pcenr |= BLACKBOX_RCC_PWREN | BLACKBOX_RCC_BKPEN;
+    pwr_ctlr |= BLACKBOX_PWR_DBP;
     uint16_t w[BLACKBOX_WORDS];
     for (uint32_t i = 0u; i < BLACKBOX_WORDS; i++) w[i] = bkp[i];
     blackbox_t last;
@@ -77,10 +97,13 @@ static void trap(uint32_t mepc, uint32_t mcause)
     const uint16_t pc_lo = (uint16_t)mepc;
     const uint16_t pc_hi = (uint16_t)(mepc >> 16);
     const uint16_t code = blackbox_mcause_code(mcause);
-    bkp[BLACKBOX_W_MEPC_LO] = pc_lo;
-    bkp[BLACKBOX_W_MEPC_HI] = pc_hi;
-    bkp[BLACKBOX_W_MCAUSE] = code;
-    bkp[BLACKBOX_W_TRAP_CHECK] = blackbox_trap_check(pc_lo, pc_hi, code);
+    if (blackbox_bkp_clocked(apb1pcenr) && blackbox_bkp_writable(pwr_ctlr))
+    {
+        bkp[BLACKBOX_W_MEPC_LO] = pc_lo;
+        bkp[BLACKBOX_W_MEPC_HI] = pc_hi;
+        bkp[BLACKBOX_W_MCAUSE] = code;
+        bkp[BLACKBOX_W_TRAP_CHECK] = blackbox_trap_check(pc_lo, pc_hi, code);
+    }
 }
 
 static blackbox_t decoded(const uint16_t w[BLACKBOX_WORDS])
@@ -125,6 +148,67 @@ static void test_the_record_is_the_ten_backup_registers_of_the_v203c8(void)
     TEST_ASSERT_TRUE(BLACKBOX_MAGIC != 0u && BLACKBOX_MAGIC != 0xFFFFu);
     TEST_ASSERT_TRUE(BLACKBOX_TRAP_MAGIC != 0u && BLACKBOX_TRAP_MAGIC != 0xFFFFu);
     TEST_ASSERT_TRUE(BLACKBOX_PHASE_RGB <= 0xFFu); // one byte
+
+    // The backup domain's clock and write-enable bits.
+    TEST_ASSERT_EQUAL_HEX32(SDK_PWREN, BLACKBOX_RCC_PWREN);
+    TEST_ASSERT_EQUAL_HEX32(SDK_BKPEN, BLACKBOX_RCC_BKPEN);
+    TEST_ASSERT_EQUAL_HEX32(SDK_DBP, BLACKBOX_PWR_DBP);
+}
+
+// ---- the trap record's gate ----
+
+static void test_the_backup_domain_is_clocked_only_with_both_clocks_on(void)
+{
+    // Each bit missing gives false, whatever the other APB1 clocks (TIM2-4 on, for instance).
+    const uint32_t others[] = {0u, 0x00000007u, ~(SDK_PWREN | SDK_BKPEN)};
+    for (uint32_t i = 0u; i < sizeof(others) / sizeof(others[0]); i++)
+    {
+        TEST_ASSERT_FALSE(blackbox_bkp_clocked(others[i]));
+        TEST_ASSERT_FALSE(blackbox_bkp_clocked(others[i] | SDK_PWREN));
+        TEST_ASSERT_FALSE(blackbox_bkp_clocked(others[i] | SDK_BKPEN));
+        TEST_ASSERT_TRUE(blackbox_bkp_clocked(others[i] | SDK_PWREN | SDK_BKPEN));
+    }
+}
+
+static void test_the_backup_domain_is_writable_only_with_dbp(void)
+{
+    const uint32_t others[] = {0u, 0x000000FFu, ~SDK_DBP};
+    for (uint32_t i = 0u; i < sizeof(others) / sizeof(others[0]); i++)
+    {
+        TEST_ASSERT_FALSE(blackbox_bkp_writable(others[i]));
+        TEST_ASSERT_TRUE(blackbox_bkp_writable(others[i] | SDK_DBP));
+    }
+}
+
+static void test_a_trap_before_blackbox_boot_is_not_recorded(void)
+{
+    // A run hangs in MOTION; the IWDG reset's run traps in SystemInit, before blackbox_boot: the
+    // clocks and DBP are off, the handler leaves the backup registers as the hung run left them.
+    power_loss();
+    boot(POWER_ON);
+    phase(BLACKBOX_PHASE_MOTION);
+    reset();
+    uint16_t before[BLACKBOX_WORDS];
+    memcpy(before, bkp, sizeof(before));
+    trap(0x00000130u, 2u);
+    TEST_ASSERT_EQUAL_HEX16_ARRAY(before, bkp, BLACKBOX_WORDS);
+
+    // A trap between blackbox_boot's two writes: the clocks on, DBP still off.
+    apb1pcenr |= SDK_PWREN | SDK_BKPEN;
+    trap(0x00000140u, 2u);
+    TEST_ASSERT_EQUAL_HEX16_ARRAY(before, bkp, BLACKBOX_WORDS);
+
+    // The next boot reads the hung run (its reset the only one counted), the watchdog flash only.
+    const blackbox_t last = boot(IWDG);
+    TEST_ASSERT_TRUE(last.valid);
+    TEST_ASSERT_FALSE(last.trapped);
+    TEST_ASSERT_EQUAL_UINT8(BLACKBOX_PHASE_MOTION, last.phase);
+    TEST_ASSERT_EQUAL_INT(BLACKBOX_FLASH_WATCHDOG, blackbox_boot_flash(&last, IWDG));
+
+    // From blackbox_boot on, a trap is recorded.
+    trap(0x00000150u, 2u);
+    TEST_ASSERT_TRUE(decoded(bkp).trapped);
+    TEST_ASSERT_EQUAL_HEX32(0x00000150u, decoded(bkp).mepc);
 }
 
 // ---- no record ----
@@ -511,6 +595,9 @@ int main(void)
     RUN_TEST(test_random_words_read_as_no_record);
     RUN_TEST(test_any_bit_changed_in_the_header_reads_as_no_record);
     RUN_TEST(test_any_bit_changed_in_the_trap_words_reads_as_no_trap);
+    RUN_TEST(test_the_backup_domain_is_clocked_only_with_both_clocks_on);
+    RUN_TEST(test_the_backup_domain_is_writable_only_with_dbp);
+    RUN_TEST(test_a_trap_before_blackbox_boot_is_not_recorded);
     RUN_TEST(test_a_record_survives_encode_and_decode);
     RUN_TEST(test_mcause_keeps_the_code_and_the_interrupt_bit);
     RUN_TEST(test_boots_from_power_on_through_hangs_traps_and_resets);

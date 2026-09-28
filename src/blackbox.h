@@ -18,7 +18,9 @@
 //   the reset that started this run, the resets in a row without a power-on, and a check word;
 // - the run's phase (blackbox_phase), rewritten as main() goes from one step to the next;
 // - the longest main-loop pass so far, in SysTick ticks (HCLK/8, 18 MHz), when it grows;
-// - on a trap, failsafe_stop writes mepc, mcause and their check, the check last.
+// - on a trap, failsafe_stop writes mepc, mcause and their check, the check last. Before
+//   blackbox_boot turns the backup domain on (startup code, SystemInit, time_hw_init) the record
+//   is skipped: failsafe_stop reads the clocks and DBP back first (blackbox_bkp_clocked, _writable).
 // All zero (a cold backup domain), all 0xFFFF, or a header torn by a reset during the boot write
 // does not check, and reads as no record. The trap words only count with a checked header and
 // their own check, and every boot clears them, so a hang after an earlier trap reads as a hang.
@@ -45,6 +47,11 @@
 #define BLACKBOX_TRAP_MAGIC 0x7A9Cu
 #define BLACKBOX_RSTF_SHIFT 26u     // WDG_RSTF_PIN, the lowest reset flag
 #define BLACKBOX_RESETS_MAX 255u
+
+// The backup domain's clocks and write enable (watchdog.cpp checks them against ch32v20x.h).
+#define BLACKBOX_RCC_PWREN (1u << 28) // RCC_APB1PCENR
+#define BLACKBOX_RCC_BKPEN (1u << 27) // RCC_APB1PCENR
+#define BLACKBOX_PWR_DBP   (1u << 8)  // PWR_CTLR
 
 // What main() was doing. Interrupt handlers have no phase of their own: a hang or trap in one shows
 // the phase it interrupted (mepc tells the handler).
@@ -87,6 +94,19 @@ static inline __attribute__((always_inline)) uint16_t blackbox_trap_check(uint16
                                                                          uint16_t mcause_code)
 {
     return (uint16_t)(BLACKBOX_TRAP_MAGIC ^ mepc_lo ^ mepc_hi ^ mcause_code);
+}
+
+// Whether failsafe_stop can write the record: both clocks on (PWR_CTLR reads only then), then DBP.
+// Register values, not a RAM flag: a trap in the startup code comes before .bss is zeroed.
+static inline __attribute__((always_inline)) bool blackbox_bkp_clocked(uint32_t apb1pcenr)
+{
+    const uint32_t both = BLACKBOX_RCC_PWREN | BLACKBOX_RCC_BKPEN;
+    return (apb1pcenr & both) == both;
+}
+
+static inline __attribute__((always_inline)) bool blackbox_bkp_writable(uint32_t pwr_ctlr)
+{
+    return (pwr_ctlr & BLACKBOX_PWR_DBP) != 0u;
 }
 
 // The reset word's complement: a reset between the boot's writes of the two leaves them unmatched.
