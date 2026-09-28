@@ -35,9 +35,14 @@
 //   also run one ADC restart (ADC_DMA_poll on a transfer error, ADC_DMA_restart_if_stale on a stale
 //   stream): adc_dma_start's two calibration waits per ADC take microseconds, up to 4 x 10 ms with a
 //   stuck calibration bit (kCalTimeoutMs). Both in one pass: about 76 ms.
-// - Rest of the boot: Motion_control_init to the loop. ADC_DMA_wait_full (up to 2 s if the ADC
-//   does not fill) feeds in its loop. From its last feed, 16 x 2 ms ADC samples and the AS5600 and
-//   PWM init to the first MOTOR_get_dir feed, or to the loop if no direction test runs: about 40 ms.
+// - Rest of the boot: Motion_control_init to the loop. Every ADC read (ADC_DMA_get_value, and the
+//   poll in ADC_DMA_wait_full) can run one transfer-error restart, up to 40 ms as above.
+//   ADC_DMA_wait_full (up to 2 s if the ADC does not fill) feeds in its loop, and
+//   MC_PULL_detect_channels_inserted before each of its 16 samples (2 ms apart) and after the last,
+//   so each of those gaps holds at most one restart: about 42 ms. From the last feed, the
+//   MC_PULL_ONLINE_read read and the AS5600 and PWM init to the first MOTOR_get_dir feed, or to the
+//   loop if no direction test runs: about 48 ms. Without the sample-loop feeds, a transfer error on
+//   every read with a stuck calibration bit made 16 x 42 ms, over the shortest IWDG timeout.
 //   MOTOR_get_dir (up to 201 x 10 ms at 1000 PWM) feeds once per step, and after it
 //   Motion_control_save (erase + program, about 18 ms) and the bus init run.
 // - Recalibration (the 5 s buffer hold is timed by the loop, not a wait): blink_all_blue_3s feeds

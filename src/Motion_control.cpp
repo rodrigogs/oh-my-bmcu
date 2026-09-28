@@ -507,10 +507,14 @@ void MC_PULL_detect_channels_inserted()
 
     for (int i = 0; i < N; i++)
     {
+        // Before each read and after the last: a read can restart the ADCs, up to 40 ms with a
+        // stuck calibration bit, and 16 of them outlast the shortest IWDG timeout (watchdog_cfg.h).
+        watchdog_feed();
         const float *v = ADC_DMA_get_value();
         for (uint8_t ch = 0; ch < kChCount; ch++) s[ch] += v[idx[ch]];
         delay(2);
     }
+    watchdog_feed();
 
     constexpr float VMIN = 0.30f;
     constexpr float VMAX = 3.00f;
