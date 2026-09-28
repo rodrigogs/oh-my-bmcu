@@ -1,0 +1,54 @@
+name: Set up PlatformIO
+description: >
+  Installs Python, resolves the pinned RISC-V toolchain's current head (when it is part of the
+  cache key), restores or seeds the ~/.platformio cache, and installs the pinned PlatformIO
+  version. Shared by every job in build.yml that runs pio.
+
+inputs:
+  platformio-version:
+    description: PlatformIO version to install, e.g. "6.1.19".
+    required: true
+  toolchain-repo:
+    description: Git URL of the RISC-V toolchain repo. Only read when toolchain-in-key is 'true'.
+    required: false
+    default: ""
+  toolchain-branch:
+    description: Branch of the RISC-V toolchain repo to resolve. Only read when toolchain-in-key is 'true'.
+    required: false
+    default: ""
+  toolchain-in-key:
+    description: Whether to fold the toolchain branch's current head sha into the cache key ('true'/'false').
+    required: false
+    default: "true"
+  key-prefix:
+    description: Prefix for the ~/.platformio cache key.
+    required: false
+    default: "platformio"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+      with:
+        python-version: "3.12"
+
+    # PlatformIO never re-fetches an installed git package, so the toolchain head must be part
+    # of the cache key or a cached copy would hide upstream toolchain changes.
+    - name: Resolve toolchain head
+      id: toolchain
+      if: inputs.toolchain-in-key == 'true'
+      shell: bash
+      run: |
+        set -o pipefail
+        sha=$(git ls-remote --exit-code "${{ inputs.toolchain-repo }}" "refs/heads/${{ inputs.toolchain-branch }}" | cut -f1)
+        test -n "$sha"
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
+      with:
+        path: ~/.platformio
+        key: ${{ inputs.key-prefix }}-${{ runner.os }}-${{ inputs.platformio-version }}-${{ hashFiles('platformio.ini') }}${{ inputs.toolchain-in-key == 'true' && format('-{0}', steps.toolchain.outputs.sha) || '' }}
+
+    - name: Install PlatformIO
+      shell: bash
+      run: pip install "platformio==${{ inputs.platformio-version }}"

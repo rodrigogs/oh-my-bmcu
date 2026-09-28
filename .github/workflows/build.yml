@@ -33,26 +33,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+      - uses: ./.github/actions/setup-pio
         with:
-          python-version: "3.12"
-
-      # PlatformIO never re-fetches an installed git package, so the toolchain head must be part
-      # of the cache key or a cached copy would hide upstream toolchain changes.
-      - name: Resolve toolchain head
-        id: toolchain
-        run: |
-          set -o pipefail
-          sha=$(git ls-remote --exit-code "$TOOLCHAIN_REPO" "refs/heads/$TOOLCHAIN_BRANCH" | cut -f1)
-          test -n "$sha"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
-        with:
-          path: ~/.platformio
-          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}-${{ steps.toolchain.outputs.sha }}
-
-      - run: pip install "platformio==${PLATFORMIO_VERSION}"
+          platformio-version: ${{ env.PLATFORMIO_VERSION }}
+          toolchain-repo: ${{ env.TOOLCHAIN_REPO }}
+          toolchain-branch: ${{ env.TOOLCHAIN_BRANCH }}
 
       - name: Build
         run: pio run $(printf -- '-e %s ' $ENVS)
@@ -142,16 +127,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+      - uses: ./.github/actions/setup-pio
         with:
-          python-version: "3.12"
-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
-        with:
-          path: ~/.platformio
-          key: platformio-native-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}
-
-      - run: pip install "platformio==${PLATFORMIO_VERSION}"
+          platformio-version: ${{ env.PLATFORMIO_VERSION }}
+          key-prefix: platformio-native
+          toolchain-in-key: "false"
 
       - name: Verbatim firmware copies in tests still match src/
         run: python3 scripts/check_test_copies.py
@@ -172,26 +152,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
-        with:
-          python-version: "3.12"
-
       # pio check reads the toolchain's predefined macros, so it needs the same platform install
       # (and cache) as the a1 job.
-      - name: Resolve toolchain head
-        id: toolchain
-        run: |
-          set -o pipefail
-          sha=$(git ls-remote --exit-code "$TOOLCHAIN_REPO" "refs/heads/$TOOLCHAIN_BRANCH" | cut -f1)
-          test -n "$sha"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
+      - uses: ./.github/actions/setup-pio
         with:
-          path: ~/.platformio
-          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}-${{ steps.toolchain.outputs.sha }}
-
-      - run: pip install "platformio==${PLATFORMIO_VERSION}"
+          platformio-version: ${{ env.PLATFORMIO_VERSION }}
+          toolchain-repo: ${{ env.TOOLCHAIN_REPO }}
+          toolchain-branch: ${{ env.TOOLCHAIN_BRANCH }}
 
       # cppcheck over src/ with the A1 env's defines (check_* options in env:base). Gating on
       # medium and high: the baseline has none left after triage. Low (style) findings are listed
@@ -226,24 +193,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+      - uses: ./.github/actions/setup-pio
         with:
-          python-version: "3.12"
-
-      - name: Resolve toolchain head
-        id: toolchain
-        run: |
-          set -o pipefail
-          sha=$(git ls-remote --exit-code "$TOOLCHAIN_REPO" "refs/heads/$TOOLCHAIN_BRANCH" | cut -f1)
-          test -n "$sha"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
-        with:
-          path: ~/.platformio
-          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini') }}-${{ steps.toolchain.outputs.sha }}
-
-      - run: pip install "platformio==${PLATFORMIO_VERSION}"
+          platformio-version: ${{ env.PLATFORMIO_VERSION }}
+          toolchain-repo: ${{ env.TOOLCHAIN_REPO }}
+          toolchain-branch: ${{ env.TOOLCHAIN_BRANCH }}
 
       - name: Prepare the V10.5 tree with this branch's platform pins
         run: |
