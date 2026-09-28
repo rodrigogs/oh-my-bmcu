@@ -4,9 +4,10 @@
 // loaded, so these tests check when a loaded channel stops being loaded: a key that flickers or
 // chatters away from 'both' (with no gear motion, with an idle buffer correction, or while the
 // printer moves the filament) must keep it loaded; filament taken out past both switches, or
-// retracted by the gear 10 mm out of 'both' in idle, must arm Stage-2 again; a normal first
-// insertion and a boot with the key at 'external only' must autoload as before, and a printer load
-// that ends at 'both' must mark the channel loaded.
+// retracted by the gear 10 mm out of 'both' in idle, must arm Stage-2 again; a key that glitches to
+// 'none' for less than 100 ms must not; a normal first insertion and a boot with the key at
+// 'external only' must autoload as before, and a printer load that ends at 'both' must mark the
+// channel loaded.
 
 #include <stdint.h>
 #include <unity.h>
@@ -320,6 +321,64 @@ void test_none_unloads_in_any_printer_state(void)
     }
 }
 
+// ---- Key 'none' glitches: no re-arm ----
+
+void test_a_key_glitching_to_none_keeps_the_channel_loaded(void)
+{
+    // The audit's open point: a key that reads 'none' now and then, here for 1 to 100 ms about every
+    // 5 s for 10 min, from 'both' (a parked, loaded channel) or from 'external only'. One pass at
+    // 'none' used to unload the channel, and the next 'both' pushed another 120 mm (Stage-2).
+    const uint32_t lens[] = {1u, 2u, 50u, 99u, 100u};
+    const uint8_t from[] = {KS_BOTH, KS_EXT};
+    for (unsigned f = 0; f < sizeof(from); f++)
+        for (unsigned i = 0; i < sizeof(lens) / sizeof(lens[0]); i++)
+        {
+            loaded = 1u;
+            for (uint32_t k = 0u; k < 120u; k++)
+            {
+                TEST_ASSERT_EQUAL_INT32(-1, hold(from[f], 0.0, 5000u - lens[i] + (k % 7u)));
+                TEST_ASSERT_EQUAL_INT32(-1, hold(KS_NONE, 0.0, lens[i]));
+                TEST_ASSERT_EQUAL_UINT8(1u, loaded);
+                TEST_ASSERT_EQUAL_INT32(-1, hold(KS_BOTH, 0.0, 1u));
+                TEST_ASSERT_FALSE(stage2_armed());
+            }
+        }
+    TEST_ASSERT_EQUAL_INT(0, events[DM_REARM_EMPTY] + events[DM_REARM_RETRACTED]);
+}
+
+void test_none_must_last_100ms_without_a_break(void)
+{
+    // 99 ms at 'none', one pass at 'external only' or the other state, 99 ms at 'none' again, over
+    // and over: never out. Loaded or not, the debounce starts again at each break.
+    const uint8_t breaks[] = {KS_EXT, KS_OTHER, KS_BOTH};
+    for (unsigned b = 0; b < sizeof(breaks); b++)
+        for (uint8_t l = 0u; l < 2u; l++)
+        {
+            loaded = l;
+            for (int k = 0; k < 100; k++)
+            {
+                TEST_ASSERT_EQUAL_INT32(-1, hold(KS_NONE, 0.0, DM_REARM_AWAY_MS));
+                TEST_ASSERT_EQUAL_INT32(-1, hold(breaks[b], 0.0, 1u));
+            }
+            TEST_ASSERT_EQUAL_UINT8(l, loaded);
+        }
+    TEST_ASSERT_EQUAL_INT(0, events[DM_REARM_EMPTY]);
+    // ... and 101 passes in a row are out
+    TEST_ASSERT_EQUAL_INT32((int32_t)DM_REARM_AWAY_MS, hold(KS_NONE, 0.0, DM_REARM_AWAY_MS + 1u));
+}
+
+void test_a_retract_during_a_none_glitch_still_rearms(void)
+{
+    // A 'none' too short to be out is an excursion away from 'both' like the others: the gear
+    // retracting 10 mm in it (60 mm/s, 167 ms, the key at 'external only' then 'none') re-arms.
+    mark = now;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(KS_EXT, 60.0, 120u));
+    TEST_ASSERT_INT32_WITHIN(1, 167 - 120, hold(KS_NONE, 60.0, 99u));
+    TEST_ASSERT_EQUAL_INT(1, events[DM_REARM_RETRACTED]);
+    TEST_ASSERT_EQUAL_INT(0, events[DM_REARM_EMPTY]);
+    TEST_ASSERT_EQUAL_UINT8(0u, loaded);
+}
+
 // ---- Insertion and boot: as before ----
 
 void test_first_insertion_autoloads_as_before(void)
@@ -472,6 +531,9 @@ int main(void)
     RUN_TEST(test_retract_across_the_count_wrap);
     RUN_TEST(test_filament_removed_past_both_switches_rearms);
     RUN_TEST(test_none_unloads_in_any_printer_state);
+    RUN_TEST(test_a_key_glitching_to_none_keeps_the_channel_loaded);
+    RUN_TEST(test_none_must_last_100ms_without_a_break);
+    RUN_TEST(test_a_retract_during_a_none_glitch_still_rearms);
     RUN_TEST(test_first_insertion_autoloads_as_before);
     RUN_TEST(test_insertion_straight_to_both_autoloads_as_before);
     RUN_TEST(test_boot_with_external_only_then_pushed_in_autoloads_as_before);

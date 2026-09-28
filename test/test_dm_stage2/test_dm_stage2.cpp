@@ -14,9 +14,10 @@
 // still stops (also when the buffer aborts: the stall window goes on across the run's stages), and a
 // buffer that rises on every push still fails after three aborts, also when each retract takes the
 // tip back behind the inner switch. A dip during a retract resumes the retract. Only the filament
-// leaving both switches, the end of the run, or a printer load start a new run. Nor may auto-unloads
-// the buffer-lift gesture starts meanwhile give a blocked gear more push, or a stage more time: their
-// passes count as time for the run's guard.
+// leaving both switches (key 'none' for 100 ms), the end of the run, or a printer load start a new
+// run; a shorter 'none' is a dip too, on whose passes the autoload drives nothing, and it keeps a
+// failed channel failed; Stage-1 goes on after it, its push with its start. Nor may auto-unloads the buffer-lift gesture starts meanwhile give a blocked
+// gear more push, or a stage more time: their passes count as time for the run's guard.
 
 #include <math.h>
 #include <stdint.h>
@@ -723,6 +724,11 @@ static double run_fwd_max;  // the most any run moved the filament net forward f
 static uint32_t au_ms;      // passes on which the auto-unload or the manual pull drove (a retract)
 static uint32_t au_starts;  // auto-unloads started
 static uint64_t au_last;    // last pass the auto-unload drove on (0: none yet)
+static uint32_t none_run;   // passes in a row the key has read 'none'
+
+// The key has read 'none' for DM_REARM_AWAY_MS (dm_rearm.h): the filament is out, the insertion is
+// over. A shorter 'none' is an excursion of the key like the others.
+static bool key_out(void) { return none_run > DM_REARM_AWAY_MS; }
 
 static uint8_t key_from_tip(void)
 {
@@ -764,6 +770,7 @@ static void noise(int ks, uint32_t period_ms, uint32_t len_ms)
 static void pass(void)
 {
     MC_ONLINE_key_stu[0] = key_now();
+    none_run = (MC_ONLINE_key_stu[0] == KS_NONE) ? none_run + 1u : 0u;
     const float pct = buffer_pct();
     MC_PULL_pct_f[0] = (forced_pct >= 0.0f) ? forced_pct : pct;
     as5600_count[0] = cnt0 + (uint32_t)(int32_t)llround(gear_mm / (double)ML_MM_PER_CNT);
@@ -795,7 +802,7 @@ static void pass(void)
     const uint8_t st1 = dm_auto_state[0];
 
     if ((st0 == DM_AUTO_S2_PUSH) && ((st1 == DM_AUTO_S2_RETRACT) || (st1 == DM_AUTO_S2_FAIL_RETRACT))) aborts++;
-    if (MC_ONLINE_key_stu[0] == KS_NONE)
+    if (key_out())
     {
         run_t0 = fail_t0 = 0u;
         runs = 0u;
@@ -829,7 +836,7 @@ static void pass(void)
         run_gear0 = gear_mm;
         run_live = true;
     }
-    if (dm_loaded[0] || dm_fail_latch[0] || (MC_ONLINE_key_stu[0] == KS_NONE)) run_live = false;
+    if (dm_loaded[0] || dm_fail_latch[0] || key_out()) run_live = false;
     // The run record ends with the run (loaded, failed, key 'none' or a dm_rearm change leave no
     // Stage-2 state and no run interrupted), so a later run in the same insertion gets its own.
     if (!s2 && (st1 != DM_AUTO_S2_FAIL_RETRACT) && (dm_s2_run[0].stage == DM_S2_STAGE_NONE)) run_t0 = 0u;
@@ -909,6 +916,7 @@ void setUp(void)
     run_live = false;
     au_ms = au_starts = 0u;
     au_last = 0u;
+    none_run = 0u;
     led_r = led_g = 0u;
     for (uint8_t ch = 0u; ch < 4u; ch++) auto_unload_reset(&g_auto_unload[ch]);
 
@@ -1575,7 +1583,7 @@ static uint32_t rng_next(void)
 static uint32_t rng_in(uint32_t lo, uint32_t hi) { return lo + rng_next() % (hi - lo + 1u); }
 static void rng_seed(uint32_t k) { rng_state = 0x2545F491u ^ (0x9E3779B9u * (k + 1u)); if (!rng_state) rng_state = 1u; }
 
-static uint32_t push_at_none;   // push_ms on the last pass at key 'none' (or at the insertion)
+static uint32_t push_at_none;   // push_ms on the last pass with the key out (or at the insertion)
 static uint32_t drive_at_none;  // drive_ms then
 static uint32_t worst_push_ms;  // the most push_ms - push_at_none any pass saw
 static uint32_t worst_drive_ms; // the most drive_ms - drive_at_none any pass saw
@@ -1590,16 +1598,16 @@ static void blocked_at_lever(void)
     push_at_none = drive_at_none = 0u;
 }
 
-// One pass, checking the bounds of a blocked gear: the push and the drive since the last 'none'
-// pass stay within BLOCKED_PUSH_MAX_MS, a stage has failed STAGE_FAIL_MAX_MS after it began, a run
-// has at most RUN_STAGES_MAX stages, one run at most begins per insertion, and a failed channel does
-// not drive until the next 'none'.
+// One pass, checking the bounds of a blocked gear: the push and the drive since the key was last
+// out (key_out) stay within BLOCKED_PUSH_MAX_MS, a stage has failed STAGE_FAIL_MAX_MS after it began,
+// a run has at most RUN_STAGES_MAX stages, one run at most begins per insertion, and a failed
+// channel does not drive until the key is out.
 static void blocked_pass(void)
 {
     const bool failed = (fail_t0 != 0u);
     const uint32_t d = drive_ms;
     pass();
-    if (MC_ONLINE_key_stu[0] == KS_NONE)
+    if (key_out())
     {
         push_at_none = push_ms;
         drive_at_none = drive_ms;
@@ -1847,7 +1855,8 @@ static void test_any_key_pattern_bounds_the_push_into_a_blocked_gear(void)
 
 static void test_any_key_pattern_with_removals_bounds_each_insertion(void)
 {
-    // Key 'none' ends the insertion (the fail latch too): the bound holds from each 'none' on.
+    // Key 'none' for 100 ms ends the insertion (the fail latch too), a shorter one does not: the
+    // bound holds from each end on.
     worst_push_ms = worst_drive_ms = 0u;
     random_key_sweep(5000u, 300u, 5u, false, 60000u);
     TEST_ASSERT_TRUE(worst_push_ms > 5000u);
@@ -2399,6 +2408,230 @@ static void test_a_printer_load_ends_an_interrupted_run(void)
     TEST_ASSERT_EQUAL_UINT8(DM_S2_STAGE_NONE, dm_s2_run[0].stage);
 }
 
+// ---- Key 'none' glitches ----
+// One pass at 'none' used to end the insertion (motor_motion_run): the fail latch, dm_autoload_gate
+// and the run were cleared, so a key that glitched to 'none' about every 5 s gave a blocked gear
+// Stage-1's 5 s push after every glitch, for good (the audit's open point). The key must now read
+// 'none' for DM_REARM_AWAY_MS (100 ms) for the filament to count as out.
+
+static void test_a_key_glitching_to_none_does_not_restart_stage1_into_a_blocked_gear(void)
+{
+    // Tip at the lever, gear blocked, the key at 'none' for 1 to 100 ms every 5 s (and every 6.5 s),
+    // at several phases, for 2 min: one Stage-1 push, which the glitches neither end nor give more
+    // time (it fails 5 s after it began), and no run, in all. Each glitch used to start another 5 s
+    // push: about 110 s of push in the 2 min.
+    const uint32_t lens[] = {1u, 2u, 50u, 99u, 100u};
+    const uint32_t periods[] = {5000u, 6500u};
+    const uint32_t phases[] = {0u, 50u, 137u, 2500u, 4999u};
+    for (unsigned p = 0; p < sizeof(periods) / sizeof(periods[0]); p++)
+        for (unsigned i = 0; i < sizeof(lens) / sizeof(lens[0]); i++)
+            for (unsigned k = 0; k < sizeof(phases) / sizeof(phases[0]); k++)
+            {
+                blocked_at_lever();
+                noise(KS_NONE, periods[p], lens[i]);
+                noise_t0 = now + phases[k];
+                for (int n = 0; n < 120000; n++) blocked_pass();
+                TEST_ASSERT_TRUE(push_ms <= (uint32_t)DM_AUTO_S1_TIMEOUT_MS);
+                TEST_ASSERT_EQUAL_UINT32(push_ms, drive_ms);
+                TEST_ASSERT_EQUAL_UINT32(0u, runs);
+                TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
+                TEST_ASSERT_EQUAL_UINT8(1u, dm_autoload_gate[0]);
+                TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+            }
+}
+
+static void test_a_key_glitching_to_none_keeps_a_failed_run_failed(void)
+{
+    // The gear turns, the path is blocked 30 mm past the inner switch: three buffer aborts fail the
+    // run (with the filament at 'both'). Glitches to 'none' every 5 s for 2 min keep it failed: red,
+    // motor off, three aborts in all. Each glitch used to clear the fail latch and end the run, and
+    // the next 'both' started a new one with three more aborts.
+    const uint32_t lens[] = {1u, 99u, 100u};
+    for (unsigned i = 0; i < sizeof(lens) / sizeof(lens[0]); i++)
+    {
+        setUp();
+        insert_and_start_stage2();
+        block_mm = 30.0;
+        noise(KS_NONE, 5000u, lens[i]);
+        noise_t0 = now + 3000u;
+        uint32_t d = 0u;
+        for (int n = 0; n < 120000; n++)
+        {
+            pass();
+            if (dm_fail_latch[0] && (d == 0u)) d = drive_ms;
+            if (d != 0u) TEST_ASSERT_EQUAL_UINT32(d, drive_ms);
+        }
+        TEST_ASSERT_TRUE(d != 0u);
+        TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
+        TEST_ASSERT_EQUAL_UINT8(0xFFu, led_r);
+        TEST_ASSERT_EQUAL_INT(3, aborts);
+        TEST_ASSERT_EQUAL_UINT8(0u, dm_loaded[0]);
+    }
+}
+
+static void test_a_none_glitch_stops_the_drive_at_once_and_the_run_goes_on(void)
+{
+    // One pass at 'none' during Stage-1's push, the Stage-2 push and its retract: nothing drives on
+    // that pass. Stage-1 goes on at the next pass; Stage-2 goes on where it stopped: 120 mm in all,
+    // the aborts kept.
+    tip_mm = -10.0;
+    for (int i = 0; (i < 1000) && (dm_auto_state[0] != DM_AUTO_S1_PUSH); i++) pass();
+    run_for(10u);
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S1_PUSH, dm_auto_state[0]);
+    uint32_t d = drive_ms;
+    forced_ks = KS_NONE;
+    pass();
+    forced_ks = -1;
+    TEST_ASSERT_EQUAL_UINT32(d, drive_ms);
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_autoload_gate[0]);
+    pass();
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S1_PUSH, dm_auto_state[0]);
+    TEST_ASSERT_EQUAL_UINT32(d + 1u, drive_ms);
+    TEST_ASSERT_TRUE(until_done(10000u) > 0);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+    ASSERT_MM_WITHIN(0.1, S2_LEN_MM, pushed_s2_mm);
+
+    setUp();
+    insert_and_start_stage2();
+    run_for(500u);
+    d = drive_ms;
+    forced_ks = KS_NONE;
+    pass();
+    forced_ks = -1;
+    TEST_ASSERT_EQUAL_UINT32(d, drive_ms);
+    TEST_ASSERT_EQUAL_UINT8(DM_S2_STAGE_PUSH, dm_s2_run[0].stage);
+    TEST_ASSERT_TRUE(until_done(10000u) > 0);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+    ASSERT_MM_WITHIN(0.1, S2_LEN_MM, pushed_s2_mm);
+
+    setUp();
+    insert_and_start_stage2();
+    block_mm = 30.0;
+    for (int i = 0; (i < 5000) && (dm_auto_state[0] != DM_AUTO_S2_RETRACT); i++) pass();
+    run_for(20u);
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S2_RETRACT, dm_auto_state[0]);
+    d = drive_ms;
+    forced_ks = KS_NONE;
+    pass();
+    forced_ks = -1;
+    TEST_ASSERT_EQUAL_UINT32(d, drive_ms);
+    TEST_ASSERT_EQUAL_UINT8(DM_S2_STAGE_RETRACT, dm_s2_run[0].stage);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_auto_try[0]);
+    pass();
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S2_RETRACT, dm_auto_state[0]); // resumed: a dip
+    TEST_ASSERT_TRUE(until_done(20000u) > 0);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
+    TEST_ASSERT_EQUAL_INT(3, aborts);
+}
+
+static void test_a_short_none_during_stage1_of_a_hand_insertion_still_autoloads(void)
+{
+    // Filament pushed by hand to the outer switch; the key reads 'none' for 1 to 99 ms (the switch
+    // bouncing as it closes, the hand wobbling at the lever) during Stage-1's debounce (5 to 99 ms
+    // after the first 'external only') or its push (from 100 ms on). Stage-1 goes on after it, and
+    // Stage-2 loads the channel with one run of 120 mm. A 'none' shorter than 100 ms first ended
+    // Stage-1 for the insertion (the gate stayed set): the filament then waited at the outer switch.
+    const uint32_t lens[] = {1u, 5u, 30u, 99u};
+    const uint32_t offs[] = {5u, 50u, 99u, 101u, 150u, 200u};
+    for (unsigned i = 0; i < sizeof(lens) / sizeof(lens[0]); i++)
+        for (unsigned k = 0; k < sizeof(offs) / sizeof(offs[0]); k++)
+        {
+            setUp();
+            tip_mm = -10.0;
+            run_for(offs[k]);
+            forced_ks = KS_NONE;
+            run_for(lens[i]);
+            forced_ks = -1;
+            TEST_ASSERT_TRUE(until_done(10000u) > 0);
+            TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+            TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
+            TEST_ASSERT_EQUAL_UINT32(1u, runs);
+            ASSERT_MM_WITHIN(0.1, S2_LEN_MM, pushed_s2_mm);
+        }
+}
+
+static void test_a_short_none_keeps_stage1s_start(void)
+{
+    // Tip at the lever, gear blocked: Stage-1 fails 5 s after its push began. A 'none' of 1 to 99 ms
+    // during the push does not move that: the channel fails on the same pass as without it, having
+    // pushed that much less. A 'none' used to start Stage-1 over with a new 5 s.
+    blocked_at_lever();
+    for (int i = 0; (i < 1000) && (dm_auto_state[0] != DM_AUTO_S1_PUSH); i++) pass();
+    const uint64_t t0 = dm_auto_t0_ms[0];
+    TEST_ASSERT_TRUE(until_done(10000u) > 0);
+    const uint64_t fail_at = now - t0;
+    const uint32_t push_all = push_ms;
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)DM_AUTO_S1_TIMEOUT_MS - 1u, push_all);
+
+    const uint32_t lens[] = {1u, 50u, 99u};
+    const uint32_t offs[] = {1u, 2500u, 4900u};
+    for (unsigned i = 0; i < sizeof(lens) / sizeof(lens[0]); i++)
+        for (unsigned k = 0; k < sizeof(offs) / sizeof(offs[0]); k++)
+        {
+            blocked_at_lever();
+            for (int n = 0; (n < 1000) && (dm_auto_state[0] != DM_AUTO_S1_PUSH); n++) pass();
+            const uint64_t s = dm_auto_t0_ms[0];
+            run_for(offs[k]);
+            forced_ks = KS_NONE;
+            run_for(lens[i]);
+            forced_ks = -1;
+            TEST_ASSERT_TRUE(until_done(10000u) > 0);
+            TEST_ASSERT_EQUAL_UINT64(fail_at, now - s);
+            TEST_ASSERT_EQUAL_UINT32(push_all - lens[i], push_ms);
+        }
+}
+
+static void test_one_pass_none_dips_keep_the_120mm_countdown(void)
+{
+    // As test_one_pass_dips_keep_the_120mm_countdown, with the key at 'none': one pass every 200 ms
+    // or every 10 ms, and 99 ms every 500 ms. Each dip used to start a new run with 120 mm.
+    dip_case(KS_NONE, 200u, 1u);
+    dip_case(KS_NONE, 10u, 1u);
+    dip_case(KS_NONE, 500u, 99u);
+}
+
+static void test_a_real_removal_still_ends_a_failed_insertion(void)
+{
+    // Failed after three aborts; the filament pulled out past both switches: still failed for the
+    // first 100 ms at 'none', then out on the next pass (fail latch, gate and run cleared, not
+    // loaded). Inserted again with the path clear, Stage-1 and a new 120 mm Stage-2 load it.
+    insert_and_start_stage2();
+    block_mm = 30.0;
+    TEST_ASSERT_TRUE(until_done(20000u) > 0);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
+    tip_mm = -100.0;
+    run_for(DM_REARM_AWAY_MS);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_autoload_gate[0]);
+    pass();
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_autoload_gate[0]);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_loaded[0]);
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+    TEST_ASSERT_EQUAL_UINT8(DM_S2_STAGE_NONE, dm_s2_run[0].stage);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_auto_try[0]);
+    run_for(500u);
+    block_mm = 1.0e9;
+    insert_and_start_stage2();
+    TEST_ASSERT_TRUE(until_done(10000u) > 0);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
+    ASSERT_MM_WITHIN(0.1, S2_LEN_MM, pushed_s2_mm);
+
+    // A loaded channel whose filament is pulled out: unloaded after 100 ms at 'none', and the next
+    // insertion autoloads.
+    tip_mm = -100.0;
+    run_for(DM_REARM_AWAY_MS);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+    pass();
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_loaded[0]);
+    run_for(500u);
+    insert_and_start_stage2();
+    TEST_ASSERT_TRUE(until_done(10000u) > 0);
+    ASSERT_MM_WITHIN(0.1, S2_LEN_MM, pushed_s2_mm);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -2451,5 +2684,12 @@ int main(void)
     RUN_TEST(test_removal_and_reinsertion_start_a_new_run);
     RUN_TEST(test_a_finished_run_is_not_resumed);
     RUN_TEST(test_a_printer_load_ends_an_interrupted_run);
+    RUN_TEST(test_a_key_glitching_to_none_does_not_restart_stage1_into_a_blocked_gear);
+    RUN_TEST(test_a_key_glitching_to_none_keeps_a_failed_run_failed);
+    RUN_TEST(test_a_none_glitch_stops_the_drive_at_once_and_the_run_goes_on);
+    RUN_TEST(test_a_short_none_during_stage1_of_a_hand_insertion_still_autoloads);
+    RUN_TEST(test_a_short_none_keeps_stage1s_start);
+    RUN_TEST(test_one_pass_none_dips_keep_the_120mm_countdown);
+    RUN_TEST(test_a_real_removal_still_ends_a_failed_insertion);
     return UNITY_END();
 }
