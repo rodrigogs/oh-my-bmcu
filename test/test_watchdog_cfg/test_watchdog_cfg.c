@@ -300,7 +300,11 @@ static void test_watchdog_flash_is_short_and_visible(void)
 {
     const uint32_t total = 2u * WDG_BOOT_FLASHES * WDG_BOOT_FLASH_MS;
     TEST_ASSERT_EQUAL_UINT32(420u, total);
-    TEST_ASSERT_TRUE(total <= WDG_BOOT_FLASH_MAX_MS);
+    TEST_ASSERT_EQUAL_UINT32(total, wdg_boot_flash_ms(false));
+    // After a trap one more flash, as long as the others, before the LED turns red.
+    TEST_ASSERT_EQUAL_UINT32(total + WDG_BOOT_FLASH_MS, wdg_boot_flash_ms(true));
+    TEST_ASSERT_EQUAL_UINT32(490u, wdg_boot_flash_ms(true));
+    TEST_ASSERT_TRUE(wdg_boot_flash_ms(true) <= WDG_BOOT_FLASH_MAX_MS);
     TEST_ASSERT_EQUAL_UINT32(500u, WDG_BOOT_FLASH_MAX_MS);
     TEST_ASSERT_TRUE(WDG_BOOT_FLASHES >= 2u); // a pattern, not a single blip
     // RGB_update skips a frame less than its throttle gap after the previous one.
