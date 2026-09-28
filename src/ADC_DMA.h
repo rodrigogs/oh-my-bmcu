@@ -22,6 +22,3 @@ uint64_t ADC_DMA_age_ticks(void);
 // Restarts the ADCs and the DMA when the stream is due (adc_stream_restart_due): no half for
 // ADC_STREAM_RESTART_MS, and none of its restarts in that time. Nothing if ADC_DMA_init found no data.
 void  ADC_DMA_restart_if_stale(void);
-
-// True once an ADC calibration wait in ADC_DMA_init gave up.
-bool  ADC_DMA_cal_timed_out(void);

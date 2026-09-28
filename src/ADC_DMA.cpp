@@ -259,8 +259,9 @@ void ADC_DMA_wait_full()
 // A calibration bit clears within microseconds; one that stays set must not hang the boot (the
 // watchdog is not running yet). On a timeout the init carries on as after a finished calibration.
 static constexpr uint32_t kCalTimeoutMs = 10u;
-static bool g_adc_cal_timed_out = false;
-bool ADC_DMA_cal_timed_out() { return g_adc_cal_timed_out; }
+// Set when a calibration wait gave up, at boot or on a restart. Read with a WCH-Link through the ELF
+// symbol, like g_blackbox_last: it has no BKP word (blackbox layout 1 uses all 10).
+volatile bool g_adc_cal_timed_out = false;
 
 static inline void adc_cal_wait(ADC_TypeDef* a, FlagStatus (*busy)(ADC_TypeDef*))
 {
