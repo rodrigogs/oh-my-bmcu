@@ -98,6 +98,24 @@ jobs:
             .pio/build/a1_solo_autoload_rgboff_no_boot_restore/firmware.elf
           if-no-files-found: error
 
+      # Compile-smoke the variant macros this job's two ENVS never touch: env:moj takes the
+      # BMCU_DM_TWO_MICROSWITCH=0 branch (~11 sites in Motion_control.cpp), and env:fw with each
+      # of BMCU_SOFT_LOAD, DBMCU_P1S and BMCU_ONLINE_LED_FILAMENT_RGB set once selects the load-mode
+      # branches and the RGB-gated blocks in ws2812.cpp. Same platform pin as ENVS, so this reuses
+      # the cache above; gating (not uploaded, no size check) because a fork refactor that breaks
+      # one of these variants must fail CI, not go unnoticed until an upstream user hits it. Runs
+      # last in the job: PlatformIO keys .pio/build/ to a single project-wide checksum, and each
+      # of these ${sysenv.*}-driven env:fw builds changes that checksum, which makes PlatformIO
+      # wipe the whole .pio/build/ directory (not just env:fw's own subdirectory) before it
+      # rebuilds -- if this ran earlier it would delete the a1 envs' firmware.bin/.elf out from
+      # under the size-check, ELF-symbol-check and artifact-upload steps above.
+      - name: Compile-smoke the other build-flag variants
+        run: |
+          pio run -e moj
+          BMCU_DM_TWO_MICROSWITCH=1 BMCU_ONLINE_LED_FILAMENT_RGB=0 DBMCU_P1S=0 BMCU_SOFT_LOAD=1 BAMBU_BUS_AMS_NUM=0 AMS_RETRACT_LEN=0.095f pio run -e fw
+          BMCU_DM_TWO_MICROSWITCH=1 BMCU_ONLINE_LED_FILAMENT_RGB=0 DBMCU_P1S=1 BMCU_SOFT_LOAD=0 BAMBU_BUS_AMS_NUM=0 AMS_RETRACT_LEN=0.095f pio run -e fw
+          BMCU_DM_TWO_MICROSWITCH=1 BMCU_ONLINE_LED_FILAMENT_RGB=1 DBMCU_P1S=0 BMCU_SOFT_LOAD=0 BAMBU_BUS_AMS_NUM=0 AMS_RETRACT_LEN=0.095f pio run -e fw
+
   unit-tests:
     name: Host unit tests (env:native)
     runs-on: ubuntu-24.04
