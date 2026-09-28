@@ -317,17 +317,21 @@ bool Flash_AMS_state_write(uint8_t loaded_ch)
         return true;
 
     const uint16_t seq = g_sta_seq;
-    const uint32_t slot = (uint32_t)g_sta_slot;
+    uint32_t slot = (uint32_t)g_sta_slot;
+
+    // A slot that is not erased is never programmed over. In the page that holds the newest record
+    // (a torn record after it, from a power loss between its two words) it is skipped; the page the
+    // log moves on to is erased first when it is not erased (the log has wrapped onto older records,
+    // or it holds another layout's data). A program that still fails erases the page and retries
+    // once, as before.
+    const bool erase = nvm_sta_next_slot((const uint32_t*)sta_page_addr(0u), STA_TOTAL_SLOTS, &slot);
     const uint32_t addr = sta_slot_addr(slot);
     uint32_t buf[NVM_STA_SLOT_WORDS];
     nvm_sta_pack(buf, seq, loaded_ch);
     const uint32_t page_i = slot / STA_SLOTS_PER_PAGE;
     const uint32_t page = sta_page_addr(page_i);
 
-    // Erase first when the slot is not erased (the log has wrapped onto older records, or the page
-    // holds a torn record or another layout's data) instead of programming over it; a program that
-    // still fails erases the page and retries once, as before.
-    if (nvm_sta_needs_erase((const uint32_t*)page, slot))
+    if (erase)
     {
         if (!flash256_erase(page)) return false;
     }

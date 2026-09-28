@@ -49,3 +49,22 @@ static inline bool nvm_sta_needs_erase(const uint32_t *page, uint32_t global_slo
     return nvm_journal_needs_erase(page, global_slot % NVM_STA_SLOTS_PER_PAGE, NVM_STA_SLOT_WORDS,
                                    NVM_STA_SLOTS_PER_PAGE);
 }
+
+// Before a record goes into the loaded-channel log (`slots` slots, whole pages, at log): *slot is
+// the slot after the newest record (nvm_sta_scan). A slot that is not erased and is not the first
+// of its page (so its page holds the newest record: a torn record from a power loss between its two
+// words, or another layout's data) is skipped, like a torn filament record, instead of erasing that
+// page and the newest record with it. *slot is moved to the first erased slot left in the page, or
+// to the first slot of the next page (wrapping to 0), which holds nothing newer: true if that slot
+// is not erased, and its page must be erased first.
+static inline bool nvm_sta_next_slot(const uint32_t *log, uint32_t slots, uint32_t *slot)
+{
+    uint32_t s = *slot;
+
+    while (s % NVM_STA_SLOTS_PER_PAGE != 0u &&
+           !nvm_words_erased(log + s * NVM_STA_SLOT_WORDS, NVM_STA_SLOT_WORDS))
+        s = (s + 1u) % slots;
+
+    *slot = s;
+    return nvm_sta_needs_erase(log + (s - s % NVM_STA_SLOTS_PER_PAGE) * NVM_STA_SLOT_WORDS, s);
+}
