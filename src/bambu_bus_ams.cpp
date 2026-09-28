@@ -846,10 +846,13 @@ void get_package_stu_motion(bambubus_printer_stu_motion_package_struct *package_
     bus_port_to_host.send_data_len = sizeof(bambubus_ams_stu_motion_package_struct);
 }
 
+// Template only, not a captured packet: bytes 0-23 and the CRC16 (last two bytes) are
+// rebuilt for every reply in online_detect_build_packet() below, so the trailing 0x00, 0x00
+// is just a placeholder overwritten by package_add_crc(), not a stand-in checksum.
 uint8_t online_detect_res[29] = {
     0x3D, 0xC0, 0x1D, 0xB4, 0x05, 0x01, 0x00,
     0x0D, 0x0E, 0xA0, '5', '5', '0', '0', 0x00, 0x00, '0', '0', '0', '0', 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00,
-    0x33, 0xF0
+    0x00, 0x00
 };
 
 extern unsigned char long_packge_version_serial_number[];

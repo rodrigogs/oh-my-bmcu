@@ -320,4 +320,4 @@ public:
 extern _bus_port_deal bus_port_to_host;
 extern void bus_init();
 
-extern uint16_t bus_host_device_type; // host_link.h
+extern uint16_t bus_host_device_type; // host_device_type_* values: host_link.h
