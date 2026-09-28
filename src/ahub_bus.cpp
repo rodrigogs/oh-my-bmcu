@@ -11,6 +11,7 @@
 #include "ams.h"
 #include "crc_bus.h"
 #include "bus_link.h"
+#include "ahub_frame.h"
 
 typedef uint32_t u32_alias __attribute__((may_alias));
 
@@ -329,7 +330,7 @@ void ahubus_slave_get_package_set(uint8_t *buf)
 #endif
             if (ams_adr >= ams_max_number) { data_struct_ptr += 6; continue; }
 
-            ams[ams_adr].now_filament_num = data_struct_ptr[1];
+            ams[ams_adr].now_filament_num = ahub_now_filament_num(data_struct_ptr[1]);
             ams[ams_adr].filament[0].motion = (_filament_motion)(data_struct_ptr[2] & 0x7Fu);
             ams[ams_adr].filament[1].motion = (_filament_motion)(data_struct_ptr[3] & 0x7Fu);
             ams[ams_adr].filament[2].motion = (_filament_motion)(data_struct_ptr[4] & 0x7Fu);
