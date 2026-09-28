@@ -18,6 +18,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "bambubus_frame_len.h"
+
 typedef struct
 {
     uint8_t ams_num;
@@ -40,7 +42,7 @@ typedef struct
 // 20-byte name at buf[23..42], CRC16: 45 bytes. Shortest accepted: the fixed fields, 7 + 16 + CRC16.
 #define BAMBUBUS_SET_FIL_FIELDS_OFF 7
 #define BAMBUBUS_SET_FIL_NAME_LEN   20
-#define BAMBUBUS_SET_FIL_MIN_LEN    (BAMBUBUS_SET_FIL_FIELDS_OFF + BAMBUBUS_FIL_FIXED_LEN + 2)
+#define BAMBUBUS_SET_FIL_MIN_LEN    (BAMBUBUS_SET_FIL_FIELDS_OFF + BAMBUBUS_FIL_FIXED_LEN + BAMBUBUS_CRC16_LEN)
 
 // 0x218 payload (long-frame header and CRC16 excluded): ams, channel, fields from datas[2] with the
 // 16-byte name at datas[18..33]: 34 bytes. Shortest accepted: the fixed fields, 2 + 16.
