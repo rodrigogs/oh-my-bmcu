@@ -536,6 +536,12 @@ static inline void MC_PULL_ONLINE_init()
 // ADC_STREAM_STALE_MS. Set by Motion_control_run right after MC_PULL_ONLINE_read().
 static bool g_adc_stale = false;
 
+#if BMCU_DM_TWO_MICROSWITCH
+// The readings of this pass are older than DM_REARM_KEY_FRESH_MS (dm_rearm.h): dm_rearm_pass() does
+// not count them. Set by Motion_control_run from the same age as g_adc_stale.
+static bool g_dm_key_old = false;
+#endif
+
 static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 {
 #if !BMCU_DM_TWO_MICROSWITCH
@@ -2564,12 +2570,14 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
 
         // dm_loaded (dm_rearm.h): a loaded channel is unloaded, which arms Stage-2 again, only once
         // the filament left both switches (key 'none' for DM_REARM_AWAY_MS) or the gear retracted it
-        // out of 'both'; a finished printer load marks it loaded.
+        // out of 'both'; a finished printer load marks it loaded. Key readings from a stream that
+        // stopped (g_dm_key_old) only end the key's run of 'none' and its excursion.
         const filament_now_position_enum pos = filament_now_position[ch];
         const dm_host_t host = dm_host_from_motion(A.now_filament_num == ch, A.filament[ch].motion,
                                                    (pos == filament_pulling_back) || (pos == filament_redetect));
         const dm_rearm_event ev = dm_rearm_pass(&dm_loaded[ch], &dm_loaded_drop_t0_ms[ch], &dm_loaded_drop_cnt[ch],
-                                                &dm_none_t0_ms[ch], ks, host, time_now, as5600_count[ch]);
+                                                &dm_none_t0_ms[ch], ks, g_dm_key_old, host, time_now,
+                                                as5600_count[ch]);
 
         if (ev == DM_REARM_EMPTY)
         {
@@ -2823,8 +2831,12 @@ void Motion_control_run(int error)
     const uint64_t now_ms      = time_ms_fast_from_ticks64(now_ticks64);
 
     MC_PULL_ONLINE_read(now_ticks);
-    g_adc_stale = adc_stream_stale(ADC_DMA_age_ticks(), time_hw_tpms);
+    const uint64_t adc_age_ticks = ADC_DMA_age_ticks();
+    g_adc_stale = adc_stream_stale(adc_age_ticks, time_hw_tpms);
     if (g_adc_stale) ADC_DMA_restart_if_stale();
+#if BMCU_DM_TWO_MICROSWITCH
+    g_dm_key_old = dm_rearm_key_old(adc_age_ticks, time_hw_tpms);
+#endif
 
     const uint8_t loaded_ch = ams_state_get_loaded();
     if ((loaded_ch < kChCount) && (MC_ONLINE_key_stu[loaded_ch] == 0u))

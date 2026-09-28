@@ -17,13 +17,15 @@
 // leaving both switches (key 'none' for 100 ms), the end of the run, or a printer load start a new
 // run; a shorter 'none' is a dip too, on whose passes the autoload drives nothing, and it keeps a
 // failed channel failed; Stage-1 goes on after it, its push with its start. Nor may auto-unloads the buffer-lift gesture starts meanwhile give a blocked
-// gear more push, or a stage more time: their passes count as time for the run's guard.
+// gear more push, or a stage more time: their passes count as time for the run's guard. Nor may an
+// ADC stream that stops on a short 'none' unload a loaded channel: its frozen readings do not count.
 
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
 #include <unity.h>
 
+#include "adc_stream.h"
 #include "ams.h"
 #include "auto_unload.h"
 #include "dm_rearm.h"
@@ -54,6 +56,7 @@ static bool     filament_channel_inserted[4];
 static uint8_t  MC_ONLINE_key_stu[4];
 static float    MC_PULL_pct_f[4];
 static uint32_t as5600_count[4];
+static bool     g_dm_key_old; // the key readings are older than DM_REARM_KEY_FRESH_MS (pass())
 
 static uint8_t led_r, led_g; // red and green of channel 0's last status LED colour
 static void MC_STU_RGB_set(uint8_t ch, uint8_t r, uint8_t g, uint8_t b)
@@ -568,12 +571,14 @@ static void dm_motor_motion_run(uint64_t time_now)
 
         // dm_loaded (dm_rearm.h): a loaded channel is unloaded, which arms Stage-2 again, only once
         // the filament left both switches (key 'none' for DM_REARM_AWAY_MS) or the gear retracted it
-        // out of 'both'; a finished printer load marks it loaded.
+        // out of 'both'; a finished printer load marks it loaded. Key readings from a stream that
+        // stopped (g_dm_key_old) only end the key's run of 'none' and its excursion.
         const filament_now_position_enum pos = filament_now_position[ch];
         const dm_host_t host = dm_host_from_motion(A.now_filament_num == ch, A.filament[ch].motion,
                                                    (pos == filament_pulling_back) || (pos == filament_redetect));
         const dm_rearm_event ev = dm_rearm_pass(&dm_loaded[ch], &dm_loaded_drop_t0_ms[ch], &dm_loaded_drop_cnt[ch],
-                                                &dm_none_t0_ms[ch], ks, host, time_now, as5600_count[ch]);
+                                                &dm_none_t0_ms[ch], ks, g_dm_key_old, host, time_now,
+                                                as5600_count[ch]);
 
         if (ev == DM_REARM_EMPTY)
         {
@@ -741,6 +746,8 @@ static uint32_t au_ms;      // passes on which the auto-unload or the manual pul
 static uint32_t au_starts;  // auto-unloads started
 static uint64_t au_last;    // last pass the auto-unload drove on (0: none yet)
 static uint32_t none_run;   // passes in a row the key has read 'none'
+static bool adc_stopped;    // the ADC stream stopped: the key and the buffer keep their last readings
+static uint64_t adc_stamp;  // the pass whose readings they are (ADC_DMA_age_ticks counts from it)
 
 // The key has read 'none' for DM_REARM_AWAY_MS (dm_rearm.h): the filament is out, the insertion is
 // over. A shorter 'none' is an excursion of the key like the others.
@@ -786,16 +793,37 @@ static void noise(int ks, uint32_t period_ms, uint32_t len_ms)
 // One main-loop pass: the switches and the buffer are read, motor_motion_run's DM pass runs, then
 // what drives the channel: the auto-unload or the manual pull, or run() with its DM block. The gear
 // moves for 1 ms at what it drives (the retracts at 850 or 700 PWM a little slower than at 900).
+// A stopped ADC stream (adc_stopped) leaves the key and the buffer at their last readings: older
+// than DM_REARM_KEY_FRESH_MS they are old for dm_rearm_pass(), and past ADC_STREAM_STALE_MS the pass
+// is stale: motor_motion_run runs its DM pass, then its stale block brakes the channel (x_prev 0) and
+// ends a running auto-unload, and neither the auto-unload nor run() runs. Motion_control_run's
+// restart of the stream is left out (the test ends the stop). Ticks are ms here (ticks_per_ms 1).
 static void pass(void)
 {
     // The printer changing the channel's motion zeroes x_prev (set_motion).
     if (printer_idle != idle_prev) x_prev[0] = 0.0f;
     idle_prev = printer_idle;
-    MC_ONLINE_key_stu[0] = key_now();
-    none_run = (MC_ONLINE_key_stu[0] == KS_NONE) ? none_run + 1u : 0u;
     const float pct = buffer_pct();
-    MC_PULL_pct_f[0] = (forced_pct >= 0.0f) ? forced_pct : pct;
+    if (!adc_stopped)
+    {
+        adc_stamp = now;
+        MC_ONLINE_key_stu[0] = key_now();
+        MC_PULL_pct_f[0] = (forced_pct >= 0.0f) ? forced_pct : pct;
+    }
+    none_run = (MC_ONLINE_key_stu[0] == KS_NONE) ? none_run + 1u : 0u;
     as5600_count[0] = cnt0 + (uint32_t)(int32_t)llround(gear_mm / (double)ML_MM_PER_CNT);
+// ---- adapted from Motion_control.cpp: Motion_control_run's key age and motor_motion_run's stale block ----
+// ---- anchor: Motion_control_run from /g_adc_stale = adc_stream_stale/ to /g_dm_key_old = dm_rearm_key_old/ ----
+// ---- anchor: motor_motion_run from /if \(g_adc_stale\)/ to /return;/ ----
+    g_dm_key_old = dm_rearm_key_old(now - adc_stamp, 1u);
+    if (adc_stream_stale(now - adc_stamp, 1u))
+    {
+        dm_motor_motion_run(now);
+        x_prev[0] = 0.0f;
+        auto_unload_reset(&g_auto_unload[0]);
+        now++;
+        return;
+    }
 
     const uint8_t st0 = dm_auto_state[0];
     const uint8_t try0 = dm_auto_try[0];
@@ -950,6 +978,9 @@ void setUp(void)
     au_ms = au_starts = au_limits = 0u;
     au_last = 0u;
     none_run = 0u;
+    adc_stopped = false;
+    adc_stamp = now;
+    g_dm_key_old = false;
     idle_prev = true;
     led_r = led_g = 0u;
     for (uint8_t ch = 0u; ch < 4u; ch++) auto_unload_reset(&g_auto_unload[ch]);
@@ -2691,6 +2722,66 @@ static void test_a_real_removal_still_ends_a_failed_insertion(void)
     ASSERT_MM_WITHIN(0.1, S2_LEN_MM, pushed_s2_mm);
 }
 
+// A loaded, parked channel whose key reads 'none' for one pass, on which the ADC stream stops: the
+// key keeps reading 'none' for stop_ms (the passes are stale past ADC_STREAM_STALE_MS), then the
+// stream is back with the key at 'both'. The channel stays loaded and nothing drives, for any stop
+// from 1 ms to 2 s. The frozen 'none' used to count as out after DM_REARM_AWAY_MS, on the last pass
+// before the passes were stale, and the 'both' after the restart started a new Stage-2: 120 mm pushed
+// into the loaded filament. Only fresh 'none' readings count: a real removal on which the stream stops is out
+// DM_REARM_AWAY_MS after the stream is back (for a stop past DM_REARM_KEY_FRESH_MS; up to it, the
+// frozen readings count as fresh), and the next insertion autoloads.
+static void test_a_stream_that_stops_on_a_none_glitch_keeps_a_loaded_channel_loaded(void)
+{
+    const uint32_t stops[] = {1u, 20u, 21u, 50u, 99u, 100u, 101u, 150u, 500u, 2000u};
+    for (unsigned i = 0; i < sizeof(stops) / sizeof(stops[0]); i++)
+    {
+        setUp();
+        insert_and_start_stage2();
+        TEST_ASSERT_TRUE(until_done(10000u) > 0);
+        TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+        run_for(500u);
+        const uint8_t gate = dm_autoload_gate[0];
+        pushed_mm = 0.0;
+        drive_ms = 0u;
+        forced_ks = KS_NONE;
+        pass();
+        forced_ks = -1;
+        adc_stopped = true;
+        run_for(stops[i]);
+        adc_stopped = false;
+        run_for(3000u);
+        TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+        TEST_ASSERT_EQUAL_UINT8(gate, dm_autoload_gate[0]);
+        TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+        TEST_ASSERT_EQUAL_UINT32(0u, drive_ms);
+        ASSERT_MM_WITHIN(0.001, 0.0, pushed_mm);
+    }
+
+    const uint32_t out_stops[] = {21u, 150u, 2000u};
+    for (unsigned i = 0; i < sizeof(out_stops) / sizeof(out_stops[0]); i++)
+    {
+        setUp();
+        insert_and_start_stage2();
+        TEST_ASSERT_TRUE(until_done(10000u) > 0);
+        run_for(500u);
+        tip_mm = -100.0;
+        pass();
+        adc_stopped = true;
+        run_for(out_stops[i]);
+        adc_stopped = false;
+        TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+        run_for(DM_REARM_AWAY_MS);
+        TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+        pass();
+        TEST_ASSERT_EQUAL_UINT8(0u, dm_loaded[0]);
+        run_for(500u);
+        insert_and_start_stage2();
+        TEST_ASSERT_TRUE(until_done(10000u) > 0);
+        TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+        ASSERT_MM_WITHIN(0.1, S2_LEN_MM, pushed_s2_mm);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -2750,5 +2841,6 @@ int main(void)
     RUN_TEST(test_a_short_none_keeps_stage1s_start);
     RUN_TEST(test_one_pass_none_dips_keep_the_120mm_countdown);
     RUN_TEST(test_a_real_removal_still_ends_a_failed_insertion);
+    RUN_TEST(test_a_stream_that_stops_on_a_none_glitch_keeps_a_loaded_channel_loaded);
     return UNITY_END();
 }

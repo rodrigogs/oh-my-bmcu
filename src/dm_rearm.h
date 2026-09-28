@@ -48,6 +48,27 @@
 // the buffer falls below 35%: 18 mm even at 12 mm/s, the pull back's end speed (PWM floor 400).
 #define DM_REARM_RETRACT_CNT 1739u
 
+// The key readings dm_rearm_pass() counts must be at most this old (ADC_DMA_age_ticks, adc_stream.h).
+// A stream that stops keeps its last readings, and Motion_control_run counts them stale only past
+// ADC_STREAM_STALE_MS (100 ms), as long as DM_REARM_AWAY_MS. So a stream that stopped on a 'none'
+// of one ADC window read 'none' for 100 ms before its passes were stale: the loaded channel was
+// unloaded (DM_REARM_EMPTY), and the 'both' after the restart pushed it another 120 mm. Older
+// readings end the key's run of 'none' and its excursion, and change nothing else, so both start
+// over on the first fresh pass. A live stream is never this old: ADC_DMA_poll stamps a new half
+// every 1.19 ms, also on a late pass. A 'none' that counts as out was read on its first pass and
+// again at least DM_REARM_AWAY_MS - DM_REARM_KEY_FRESH_MS later.
+#define DM_REARM_KEY_FRESH_MS 20u
+#if DM_REARM_KEY_FRESH_MS >= DM_REARM_AWAY_MS
+#error "the key readings must be fresher than the 'none' the filament counts as out after"
+#endif
+
+// True when the key readings (age_ticks: ADC_DMA_age_ticks(); ticks_per_ms: time_hw_tpms) are
+// older than DM_REARM_KEY_FRESH_MS.
+static inline bool dm_rearm_key_old(uint64_t age_ticks, uint32_t ticks_per_ms)
+{
+    return age_ticks > (uint64_t)DM_REARM_KEY_FRESH_MS * ticks_per_ms;
+}
+
 // Who moves the channel, from the printer's command for it and the BMCU's unload.
 typedef enum
 {
@@ -88,13 +109,21 @@ typedef enum
 // excursion of a loaded channel's key away from 'both' (dm_loaded_drop_t0_ms / dm_loaded_drop_cnt):
 // its first pass and the gear position then; away_t0_ms == 0 means none, and away_cnt is only read
 // while one runs. none_t0_ms: the first pass of the key's current run of 'none' (dm_none_t0_ms; 0 =
-// none). ks: MC_ONLINE_key_stu[ch]; pos_cnt: as5600_count[ch] (wraps; only differences are used).
-// DM_REARM_EMPTY comes on every pass once the key has read 'none' for DM_REARM_AWAY_MS. On any event
-// other than DM_REARM_NONE the caller restarts the autoload from IDLE.
+// none). ks: MC_ONLINE_key_stu[ch]; key_old: it is older than DM_REARM_KEY_FRESH_MS
+// (dm_rearm_key_old), which ends both runs. pos_cnt: as5600_count[ch] (wraps; only differences are
+// used). DM_REARM_EMPTY comes on every pass once the key has read 'none' for DM_REARM_AWAY_MS. On any
+// event other than DM_REARM_NONE the caller restarts the autoload from IDLE.
 static inline dm_rearm_event dm_rearm_pass(uint8_t *loaded, uint64_t *away_t0_ms, uint32_t *away_cnt,
-                                           uint64_t *none_t0_ms, uint8_t ks, dm_host_t host, uint64_t now_ms,
-                                           uint32_t pos_cnt)
+                                           uint64_t *none_t0_ms, uint8_t ks, bool key_old, dm_host_t host,
+                                           uint64_t now_ms, uint32_t pos_cnt)
 {
+    if (key_old)
+    {
+        *none_t0_ms = 0u;
+        *away_t0_ms = 0u;
+        return DM_REARM_NONE;
+    }
+
     if (ks != DM_KEY_NONE)
     {
         *none_t0_ms = 0u;

@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <unity.h>
 
+#include "adc_stream.h" // ADC_STREAM_STALE_MS
 #include "dm_rearm.h"
 #include "motion_limits.h" // ML_MM_PER_CNT, the AS5600 scale Motion_control.cpp asserts
 
@@ -36,6 +37,7 @@ static uint64_t away_t0;      // dm_loaded_drop_t0_ms[ch]
 static uint32_t away_cnt;     // dm_loaded_drop_cnt[ch]
 static uint64_t none_t0;      // dm_none_t0_ms[ch]
 static uint8_t ks;            // MC_ONLINE_key_stu[ch]
+static bool key_old;          // g_dm_key_old: the key reading is older than DM_REARM_KEY_FRESH_MS
 static _filament_motion printer; // A.filament[ch].motion
 static bool active;           // A.now_filament_num == ch
 static bool unloading;        // filament_pulling_back / filament_redetect
@@ -76,6 +78,7 @@ void setUp(void)
     away_cnt = 0u;
     none_t0 = 0u;
     ks = KS_BOTH;
+    key_old = false;
     printer = IDLE;
     active = false;
     unloading = false;
@@ -95,7 +98,7 @@ static dm_rearm_event pass(uint8_t key, double v_mm_s)
     ks = key;
     gear_step(v_mm_s);
     const dm_host_t host = dm_host_from_motion(active, printer, unloading);
-    const dm_rearm_event ev = dm_rearm_pass(&loaded, &away_t0, &away_cnt, &none_t0, ks, host, now, cnt);
+    const dm_rearm_event ev = dm_rearm_pass(&loaded, &away_t0, &away_cnt, &none_t0, ks, key_old, host, now, cnt);
     events[ev]++;
     if (ev != DM_REARM_NONE) last_event_ms = (int32_t)(now - mark);
     now++;
@@ -382,6 +385,45 @@ void test_a_retract_during_a_none_glitch_still_rearms(void)
     TEST_ASSERT_EQUAL_UINT8(0u, loaded);
 }
 
+void test_old_key_readings_end_the_none_run_and_the_excursion(void)
+{
+    // A stream that stopped on a 'none' 99 ms long: its readings, older than DM_REARM_KEY_FRESH_MS
+    // for 1 s, change nothing (the pass that reached 100 ms at 'none' used to unload the channel).
+    // Fresh again and still at 'none': out DM_REARM_AWAY_MS after the first fresh pass, not before.
+    TEST_ASSERT_EQUAL_INT32(-1, hold(KS_NONE, 0.0, DM_REARM_AWAY_MS - 1u));
+    key_old = true;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(KS_NONE, 0.0, 1000u));
+    TEST_ASSERT_EQUAL_UINT8(1u, loaded);
+    key_old = false;
+    TEST_ASSERT_EQUAL_INT32((int32_t)DM_REARM_AWAY_MS, hold(KS_NONE, 0.0, 1000u));
+    TEST_ASSERT_EQUAL_UINT8(0u, loaded);
+
+    // 120 ms of retract at 60 mm/s away from 'both' (7.2 mm), then 100 ms more (13.2 mm in all) on
+    // old readings: not a retract, and the excursion starts over on the first fresh pass. From it the
+    // gear must retract 10 mm again (167 ms at 60 mm/s).
+    setUp();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(KS_EXT, 60.0, 120u));
+    key_old = true;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(KS_EXT, 60.0, 100u));
+    key_old = false;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(KS_EXT, 0.0, 1000u));
+    TEST_ASSERT_EQUAL_UINT8(1u, loaded);
+    TEST_ASSERT_INT32_WITHIN(1, 167, hold(KS_EXT, 60.0, 1000u));
+    TEST_ASSERT_EQUAL_UINT8(0u, loaded);
+
+    // Nor does a printer load mark the channel loaded on an old 'both'; the next fresh pass does.
+    setUp();
+    loaded = 0u;
+    set_printer(true, ON_USE);
+    key_old = true;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(KS_BOTH, 0.0, 100u));
+    TEST_ASSERT_EQUAL_UINT8(0u, loaded);
+    key_old = false;
+    TEST_ASSERT_EQUAL(DM_REARM_LOADED, pass(KS_BOTH, 0.0));
+    TEST_ASSERT_EQUAL_INT(1, events[DM_REARM_LOADED]);
+    TEST_ASSERT_EQUAL_INT(0, events[DM_REARM_EMPTY] + events[DM_REARM_RETRACTED]);
+}
+
 // ---- Insertion and boot: as before ----
 
 void test_first_insertion_autoloads_as_before(void)
@@ -516,6 +558,22 @@ void test_host_state_mapping(void)
     }
 }
 
+void test_key_readings_are_old_only_past_20ms(void)
+{
+    // time_hw_tpms 18000 (SysTick at 144 MHz / 8). A live stream's readings, a half every 21504
+    // ticks (1.19 ms), are never old; up to DM_REARM_KEY_FRESH_MS they still count, one tick more
+    // they do not. Fresher than the 'none' the filament counts as out after, and than a stale stream.
+    const uint32_t tpms = 18000u;
+    TEST_ASSERT_EQUAL_UINT32(20u, DM_REARM_KEY_FRESH_MS);
+    TEST_ASSERT_TRUE(DM_REARM_KEY_FRESH_MS < DM_REARM_AWAY_MS);
+    TEST_ASSERT_TRUE(DM_REARM_KEY_FRESH_MS < ADC_STREAM_STALE_MS);
+    TEST_ASSERT_FALSE(dm_rearm_key_old(0u, tpms));
+    TEST_ASSERT_FALSE(dm_rearm_key_old(21504u, tpms));
+    TEST_ASSERT_FALSE(dm_rearm_key_old((uint64_t)DM_REARM_KEY_FRESH_MS * tpms, tpms));
+    TEST_ASSERT_TRUE(dm_rearm_key_old((uint64_t)DM_REARM_KEY_FRESH_MS * tpms + 1u, tpms));
+    TEST_ASSERT_TRUE(dm_rearm_key_old(UINT64_MAX, tpms));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -537,6 +595,7 @@ int main(void)
     RUN_TEST(test_a_key_glitching_to_none_keeps_the_channel_loaded);
     RUN_TEST(test_none_must_last_100ms_without_a_break);
     RUN_TEST(test_a_retract_during_a_none_glitch_still_rearms);
+    RUN_TEST(test_old_key_readings_end_the_none_run_and_the_excursion);
     RUN_TEST(test_first_insertion_autoloads_as_before);
     RUN_TEST(test_insertion_straight_to_both_autoloads_as_before);
     RUN_TEST(test_boot_with_external_only_then_pushed_in_autoloads_as_before);
@@ -544,5 +603,6 @@ int main(void)
     RUN_TEST(test_printer_load_marks_loaded_only_at_both);
     RUN_TEST(test_boot_with_both_stays_loaded);
     RUN_TEST(test_host_state_mapping);
+    RUN_TEST(test_key_readings_are_old_only_past_20ms);
     return UNITY_END();
 }
