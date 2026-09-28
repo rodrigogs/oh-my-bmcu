@@ -1,7 +1,8 @@
 // Host tests for src/nvm_journal.h: before Flash_saves.cpp programs the next filament-info or
 // loaded-channel record, a slot that is not erased (a torn record, an older firmware's layout, a
-// 0xFF fill) must make it erase the page first. Otherwise the program fails its read-back and every
-// later save of that slot fails the same way, until a full NVM wipe.
+// 0xFF fill) must make it erase the page first, or in the loaded-channel log skip the slot while
+// its page holds the newest record. Otherwise the program fails its read-back and every later save
+// of that slot fails the same way, until a full NVM wipe.
 
 #include <stdint.h>
 #include <string.h>
@@ -21,9 +22,11 @@ static const uint32_t STA_SLOTS = NVM_STA_SLOTS_PER_PAGE;
 static const uint32_t MAGIC_FIL2 = 0x324C4946u; // 'FIL2', V10.0 filament records
 
 // The page under test followed by a second, erased page, so a helper that looks past its page (a
-// full journal checked as if slot 6 existed) reads erased words there and gives itself away.
+// full journal checked as if slot 6 existed) reads erased words there and gives itself away. For
+// nvm_sta_next_slot the two pages are a two-page loaded-channel log (slots 0..63).
 static uint32_t mem[2u * PAGE_WORDS];
 static uint32_t *const page = mem;
+static const uint32_t STA_LOG_SLOTS = 2u * STA_SLOTS;
 
 void setUp(void)
 {
@@ -41,6 +44,14 @@ static bool fil_needs_erase(uint32_t slot)
 static bool sta_needs_erase(uint32_t slot)
 {
     return nvm_sta_needs_erase(page, slot);
+}
+
+// Flash_AMS_state_write's choice of slot in the two-page log: from `slot` (the one after the
+// newest record), the slot it programs and whether it erases that slot's page first.
+static uint32_t sta_next(uint32_t slot, bool *erase)
+{
+    *erase = nvm_sta_next_slot(mem, STA_LOG_SLOTS, &slot);
+    return slot;
 }
 
 // Journal records as Flash_saves.cpp packs them (nvm_records.h). A filament record in slot `slot`,
@@ -227,15 +238,47 @@ static void test_sta_next_slot_after_own_records_is_not_erased(void)
     TEST_ASSERT_FALSE(sta_needs_erase(STA_SLOTS - 1u));
 }
 
-// Torn loaded-channel record (only w0 programmed) and V10.0 'FIL2' page-B records, which sat where
-// the loaded-channel log now starts (pages 6..9): erase first.
-static void test_sta_torn_or_foreign_slot_is_erased(void)
+// Torn loaded-channel record in slot 3 (power lost between its two words: w0 programmed, w1
+// erased), after the newest one in slot 2: the slot itself cannot be programmed over, but the write
+// skips it and programs slot 4 without an erase, so slots 0..2 stay. Torn again there: slot 5.
+// Nothing moves when the slot is erased. The same for a record torn inside its first word.
+static void test_sta_torn_slot_after_the_newest_is_skipped(void)
 {
-    sta_record(3u, 42u, 1u);
-    page[3u * STA_WORDS + 1u] = NVM_ERASED_WORD;
-    TEST_ASSERT_TRUE(sta_needs_erase(3u));
+    bool erase = true;
 
+    for (uint32_t s = 0u; s < 3u; s++) sta_record(s, (uint16_t)(40u + s), 1u);
+    sta_record(3u, 43u, 2u);
+    page[3u * STA_WORDS + 1u] = NVM_ERASED_WORD;
+
+    TEST_ASSERT_TRUE(sta_needs_erase(3u));
+    TEST_ASSERT_EQUAL_UINT32(4u, sta_next(3u, &erase));
+    TEST_ASSERT_FALSE(erase);
+
+    sta_record(4u, 43u, 2u);
+    page[4u * STA_WORDS + 1u] = NVM_ERASED_WORD;
+    TEST_ASSERT_EQUAL_UINT32(5u, sta_next(3u, &erase));
+    TEST_ASSERT_FALSE(erase);
+
+    TEST_ASSERT_EQUAL_UINT32(5u, sta_next(5u, &erase));
+    TEST_ASSERT_FALSE(erase);
+
+    // Only the first half-word of w0 programmed.
     setUp();
+    sta_record(0u, 9u, 0u);
+    page[2] = 0xE3390A00u;
+    page[3] = NVM_ERASED_WORD;
+    TEST_ASSERT_EQUAL_UINT32(2u, sta_next(1u, &erase));
+    TEST_ASSERT_FALSE(erase);
+}
+
+// V10.0 'FIL2' page-B records sat where the loaded-channel log now starts (pages 6..9): no valid
+// loaded-channel record, so the scan gives slot 0, the first slot of a page, and that page is
+// erased first. The same for a torn record in slot 0 of a page, whose newest record is in the page
+// before: that page holds nothing newer.
+static void test_sta_foreign_or_torn_page_start_is_erased(void)
+{
+    bool erase = false;
+
     for (uint32_t r = 0u; r < 4u; r++) // four 64-byte records
     {
         page[r * 16u] = MAGIC_FIL2;
@@ -243,6 +286,49 @@ static void test_sta_torn_or_foreign_slot_is_erased(void)
     }
     TEST_ASSERT_TRUE(sta_needs_erase(0u));
     TEST_ASSERT_TRUE(sta_needs_erase(STA_SLOTS - 1u));
+    TEST_ASSERT_EQUAL_UINT32(0u, sta_next(0u, &erase));
+    TEST_ASSERT_TRUE(erase);
+
+    setUp();
+    for (uint32_t s = 0u; s < STA_SLOTS; s++) sta_record(s, (uint16_t)(100u + s), 3u);
+    sta_record(STA_SLOTS, 132u, 0u);
+    page[STA_SLOTS * STA_WORDS + 1u] = NVM_ERASED_WORD;
+    TEST_ASSERT_EQUAL_UINT32(STA_SLOTS, sta_next(STA_SLOTS, &erase));
+    TEST_ASSERT_TRUE(erase);
+}
+
+// Torn slots up to the end of the page with the newest record: the write moves on to slot 0 of the
+// next page, which it erases only if that slot is not erased (older records from the last pass).
+// At the end of the log it wraps to slot 0.
+static void test_sta_torn_slots_to_the_end_of_the_page_move_to_the_next(void)
+{
+    bool erase = true;
+
+    for (uint32_t s = 0u; s < 30u; s++) sta_record(s, (uint16_t)(500u + s), 1u);
+    for (uint32_t s = 30u; s < STA_SLOTS; s++)
+    {
+        sta_record(s, 530u, 2u);
+        page[s * STA_WORDS + 1u] = NVM_ERASED_WORD;
+    }
+    TEST_ASSERT_EQUAL_UINT32(STA_SLOTS, sta_next(30u, &erase));
+    TEST_ASSERT_FALSE(erase);
+
+    for (uint32_t s = STA_SLOTS; s < STA_LOG_SLOTS; s++) sta_record(s, (uint16_t)(400u + s), 0u);
+    TEST_ASSERT_EQUAL_UINT32(STA_SLOTS, sta_next(30u, &erase));
+    TEST_ASSERT_TRUE(erase);
+
+    // The wrap: the newest record in slot 62, a torn one in 63, the log's last slot.
+    setUp();
+    for (uint32_t s = 0u; s < STA_LOG_SLOTS - 1u; s++) sta_record(s, (uint16_t)(700u + s), 1u);
+    sta_record(STA_LOG_SLOTS - 1u, 763u, 2u);
+    page[(STA_LOG_SLOTS - 1u) * STA_WORDS + 1u] = NVM_ERASED_WORD;
+    TEST_ASSERT_EQUAL_UINT32(0u, sta_next(STA_LOG_SLOTS - 1u, &erase));
+    TEST_ASSERT_TRUE(erase);
+
+    // Slot 0 erased (power lost after that erase, before the record): no erase.
+    for (uint32_t w = 0u; w < STA_WORDS; w++) page[w] = NVM_ERASED_WORD;
+    TEST_ASSERT_EQUAL_UINT32(0u, sta_next(STA_LOG_SLOTS - 1u, &erase));
+    TEST_ASSERT_FALSE(erase);
 }
 
 // The wrappers Flash_saves.cpp calls: the filament one takes first_empty, the loaded-channel one
@@ -280,7 +366,9 @@ int main(void)
     RUN_TEST(test_every_word_of_the_slot_and_only_it_is_checked);
     RUN_TEST(test_sta_wrap_onto_older_records_is_erased);
     RUN_TEST(test_sta_next_slot_after_own_records_is_not_erased);
-    RUN_TEST(test_sta_torn_or_foreign_slot_is_erased);
+    RUN_TEST(test_sta_torn_slot_after_the_newest_is_skipped);
+    RUN_TEST(test_sta_foreign_or_torn_page_start_is_erased);
+    RUN_TEST(test_sta_torn_slots_to_the_end_of_the_page_move_to_the_next);
     RUN_TEST(test_geometry_wrappers);
     return UNITY_END();
 }
