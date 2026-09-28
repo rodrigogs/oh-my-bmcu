@@ -32,6 +32,7 @@ static uint64_t now;          // ms (time_now)
 static uint8_t loaded;        // dm_loaded[ch]
 static uint64_t away_t0;      // dm_loaded_drop_t0_ms[ch]
 static uint32_t away_cnt;     // dm_loaded_drop_cnt[ch]
+static uint64_t none_t0;      // dm_none_t0_ms[ch]
 static uint8_t ks;            // MC_ONLINE_key_stu[ch]
 static _filament_motion printer; // A.filament[ch].motion
 static bool active;           // A.now_filament_num == ch
@@ -70,6 +71,7 @@ void setUp(void)
     loaded = 1u; // e.g. after a Stage-2, or a boot with the key at 'both'
     away_t0 = 0u;
     away_cnt = 0u;
+    none_t0 = 0u;
     ks = KS_BOTH;
     printer = IDLE;
     active = false;
@@ -89,7 +91,7 @@ static dm_rearm_event pass(uint8_t key, double v_mm_s)
     ks = key;
     gear_step(v_mm_s);
     const dm_host_t host = dm_host_from_motion(active, printer, unloading);
-    const dm_rearm_event ev = dm_rearm_pass(&loaded, &away_t0, &away_cnt, ks, host, now, cnt);
+    const dm_rearm_event ev = dm_rearm_pass(&loaded, &away_t0, &away_cnt, &none_t0, ks, host, now, cnt);
     events[ev]++;
     if (ev != DM_REARM_NONE) last_event_ms = (int32_t)(now - mark);
     now++;
@@ -290,10 +292,10 @@ void test_retract_across_the_count_wrap(void)
 
 void test_filament_removed_past_both_switches_rearms(void)
 {
-    // pulled out: 'both' -> 'external only' -> 'none', one pass at 'none' is enough (as before)
+    // pulled out: 'both' -> 'external only' -> 'none', out once 'none' has lasted 100 ms
     TEST_ASSERT_EQUAL_INT32(-1, hold(KS_EXT, 0.0, 50u));
-    TEST_ASSERT_EQUAL_INT32(0, hold(KS_NONE, 0.0, 1u));
-    TEST_ASSERT_EQUAL_INT(1, events[DM_REARM_EMPTY]);
+    TEST_ASSERT_EQUAL_INT32((int32_t)DM_REARM_AWAY_MS, hold(KS_NONE, 0.0, 1000u));
+    TEST_ASSERT_EQUAL_INT(1000 - (int)DM_REARM_AWAY_MS, events[DM_REARM_EMPTY]);
     TEST_ASSERT_EQUAL_UINT8(0u, loaded);
     // re-inserted: Stage-1 at 'external only' (not loaded), then Stage-2 at 'both'
     TEST_ASSERT_EQUAL_INT32(-1, hold(KS_EXT, -60.0, 500u));
@@ -309,9 +311,12 @@ void test_none_unloads_in_any_printer_state(void)
     {
         loaded = 1u;
         set_printer(true, ms[i]);
+        TEST_ASSERT_EQUAL_INT32(-1, hold(KS_NONE, 0.0, DM_REARM_AWAY_MS));
+        TEST_ASSERT_EQUAL_UINT8(1u, loaded);
         TEST_ASSERT_EQUAL(DM_REARM_EMPTY, pass(KS_NONE, 0.0));
         TEST_ASSERT_EQUAL_UINT8(0u, loaded);
         TEST_ASSERT_EQUAL_UINT64(0u, away_t0);
+        (void)pass(KS_BOTH, 0.0); // the next 'none' starts its own debounce
     }
 }
 
@@ -321,7 +326,7 @@ void test_first_insertion_autoloads_as_before(void)
 {
     // boot with no filament: dm_loaded = 0
     loaded = 0u;
-    TEST_ASSERT_EQUAL_INT32(0, hold(KS_NONE, 0.0, 1000u));
+    TEST_ASSERT_EQUAL_INT32((int32_t)DM_REARM_AWAY_MS, hold(KS_NONE, 0.0, 1000u));
     TEST_ASSERT_EQUAL_UINT8(0u, loaded);
     // external switch touched, Stage-1 pushes to the inner switch
     TEST_ASSERT_EQUAL_INT32(-1, hold(KS_EXT, -60.0, 800u));
@@ -342,7 +347,7 @@ void test_first_insertion_autoloads_as_before(void)
 void test_insertion_straight_to_both_autoloads_as_before(void)
 {
     loaded = 0u;
-    TEST_ASSERT_EQUAL_INT32(0, hold(KS_NONE, 0.0, 10u));
+    TEST_ASSERT_EQUAL_INT32((int32_t)DM_REARM_AWAY_MS, hold(KS_NONE, 0.0, 200u));
     TEST_ASSERT_EQUAL_INT32(-1, hold(KS_EXT, -200.0, 20u));
     TEST_ASSERT_EQUAL_INT32(-1, hold(KS_BOTH, 0.0, 1u));
     TEST_ASSERT_TRUE(stage2_armed());

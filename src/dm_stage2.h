@@ -16,10 +16,11 @@
 //
 // Now a Stage-2 run lasts from the first 'both' of a channel that is not loaded until it ends by
 // itself (the length is done and the channel is loaded, or it fails: fail latch), the filament
-// leaves both switches (key 'none'), or the channel's loaded state changes (dm_rearm.h). Only then
-// does the next 'both' start a new run with 120 mm and no aborts. The key leaving 'both' interrupts
-// the run's stage (dm_s2_leave); the run keeps its remaining length and abort count, and at the
-// next 'both' (dm_s2_enter: in IDLE, or in S1_PUSH once Stage-1 has pushed the tip back there):
+// leaves both switches (key 'none' for DM_REARM_AWAY_MS), or the channel's loaded state changes
+// (dm_rearm.h). Only then does the next 'both' start a new run with 120 mm and no aborts. The key
+// leaving 'both' interrupts the run's stage (dm_s2_leave); the run keeps its remaining length and
+// abort count, and at the next 'both' (dm_s2_enter: in IDLE, or in S1_PUSH once Stage-1 has pushed
+// the tip back there):
 // - an interrupted push resumes with its guard, however long the key was away;
 // - an interrupted retract resumes with its guard if the key is back within DM_S2_RESUME_MS (a dip).
 //   After a longer excursion (the retract took the tip back behind the inner switch, and Stage-1
@@ -65,12 +66,14 @@
 // which dm_autoload_gate otherwise allows once per insertion only: without that, such a run could only
 // wait in IDLE until its budget ran out.
 //
-// For one insertion (from key 'none' to the next 'none', which ends any run), with the link up, the
-// channel's AS5600 read and the printer leaving the channel in its idle control, whatever the key, the
-// buffer and the auto-unloads do in between:
+// For one insertion (from key 'none' to the next 'none', which ends any run; 'none' counts once it
+// has lasted DM_REARM_AWAY_MS, dm_rearm.h), with the link up, the channel's AS5600 read and the
+// printer leaving the channel in its idle control, whatever the key, the buffer and the auto-unloads
+// do in between:
 // - a gear that does not turn: Stage-1 before the run pushes for at most DM_AUTO_S1_TIMEOUT_MS (it
-//   starts from IDLE only once, dm_autoload_gate). There is one run (it cannot finish, and a new one
-//   needs key 'none' or a change of the loaded state), and it drives until its stall window has
+//   starts from IDLE only once, dm_autoload_gate, and goes on with its start after a shorter
+//   'none'). There is one run (it cannot finish, and a new one needs key 'none' or a change of the
+//   loaded state), and it drives until its stall window has
 //   counted ML_STALL_MS: with 1 ms passes at most 5.998 s of 900 PWM in all (4.999 s of Stage-1,
 //   then 0.999 s of push or retract; test/test_dm_stage2), however often the buffer aborts. The fail
 //   latch then keeps the motor off;
@@ -85,8 +88,12 @@
 // The stall window charges each pass that drives with the time since the pass before it. That is
 // the time the motor drives when the passes are evenly spaced (a main-loop pass takes under 1 ms,
 // about 36 ms at worst: watchdog_cfg.h); a pass more than ML_STEP_MAX_MS after the one before it is
-// a gap and is left out. Key 'none' on a single pass ends the insertion, as before: a key that
-// glitches to 'none' every few seconds gets Stage-1's 5 s push each time (not changed here).
+// a gap and is left out. Key 'none' for less than DM_REARM_AWAY_MS does not end the insertion: the
+// autoload drives nothing on its passes, a Stage-2 stage it interrupts is kept as for any other key
+// excursion, and Stage-1 goes on after it, its push with its start (dm_none_hold and dm_s1_resume in
+// Motion_control.cpp). So a key that glitches to 'none' every few seconds does not get Stage-1's
+// 5 s push, or a new run, after each glitch, and a switch that bounces during a hand insertion does
+// not stop the autoload. It used to, as upstream: one pass at 'none' ended the insertion.
 #include <stdbool.h>
 #include <stdint.h>
 

@@ -18,6 +18,15 @@
 // (key 'none'), or the gear retracted it by DM_REARM_RETRACT_CNT in one excursion of the key away
 // from 'both' that lasted DM_REARM_AWAY_MS, while the printer did not move the channel. The printer
 // treating the filament as loaded with the key at 'both' marks the channel loaded.
+//
+// Key 'none' used to count as the filament out on its first pass, loaded or not, and
+// motor_motion_run then ended the insertion: it cleared the fail latch, dm_autoload_gate and the
+// Stage-2 run (dm_stage2.h). So a key that glitched to 'none' about every 5 s (a loose key wire, a
+// key voltage near MC_DM_KEY_NONE_THRESH) gave a blocked gear Stage-1's 5 s push at 900 PWM after
+// every glitch, a Stage-2 run that failed three buffer aborts a new run with three more, and a
+// parked, loaded channel another 120 mm pushed at the next 'both'. Now the key must read 'none' for
+// DM_REARM_AWAY_MS too; a shorter 'none' is an excursion away from 'both' like the others, on
+// whose passes the autoload drives nothing, and after which it goes on (motor_motion_run).
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -27,7 +36,8 @@
 #define DM_KEY_NONE 0u
 #define DM_KEY_BOTH 1u
 
-// Unchanged: the key must stay away from 'both' this long.
+// Unchanged: the key must stay away from 'both' this long. And at 'none' this long for the filament
+// to count as out.
 #define DM_REARM_AWAY_MS 100u
 
 // And by then the gear must have retracted the filament 10 mm since the key left 'both' (1739
@@ -69,7 +79,7 @@ static inline dm_host_t dm_host_from_motion(bool active, _filament_motion motion
 typedef enum
 {
     DM_REARM_NONE = 0,   // loaded unchanged
-    DM_REARM_EMPTY,      // key 'none': not loaded, the filament is out (as before)
+    DM_REARM_EMPTY,      // key 'none' for DM_REARM_AWAY_MS: not loaded, the filament is out
     DM_REARM_RETRACTED,  // loaded -> not loaded: retracted out of 'both'; Stage-2 is armed again
     DM_REARM_LOADED,     // not loaded -> loaded: the printer treats it as loaded, key at 'both'
 } dm_rearm_event;
@@ -77,14 +87,25 @@ typedef enum
 // One main-loop pass for one channel. loaded: dm_loaded[ch]. away_t0_ms / away_cnt: the current
 // excursion of a loaded channel's key away from 'both' (dm_loaded_drop_t0_ms / dm_loaded_drop_cnt):
 // its first pass and the gear position then; away_t0_ms == 0 means none, and away_cnt is only read
-// while one runs. ks: MC_ONLINE_key_stu[ch]; pos_cnt: as5600_count[ch] (wraps; only differences are
-// used). On any event other than DM_REARM_NONE the caller restarts the autoload from IDLE.
+// while one runs. none_t0_ms: the first pass of the key's current run of 'none' (dm_none_t0_ms; 0 =
+// none). ks: MC_ONLINE_key_stu[ch]; pos_cnt: as5600_count[ch] (wraps; only differences are used).
+// DM_REARM_EMPTY comes on every pass once the key has read 'none' for DM_REARM_AWAY_MS. On any event
+// other than DM_REARM_NONE the caller restarts the autoload from IDLE.
 static inline dm_rearm_event dm_rearm_pass(uint8_t *loaded, uint64_t *away_t0_ms, uint32_t *away_cnt,
-                                           uint8_t ks, dm_host_t host, uint64_t now_ms, uint32_t pos_cnt)
+                                           uint64_t *none_t0_ms, uint8_t ks, dm_host_t host, uint64_t now_ms,
+                                           uint32_t pos_cnt)
 {
-    if (ks == DM_KEY_NONE)
+    if (ks != DM_KEY_NONE)
     {
-        // both switches open: the filament is out (as before)
+        *none_t0_ms = 0u;
+    }
+    else if (*none_t0_ms == 0u)
+    {
+        *none_t0_ms = now_ms;
+    }
+    else if ((now_ms - *none_t0_ms) >= DM_REARM_AWAY_MS)
+    {
+        // both switches open for DM_REARM_AWAY_MS: the filament is out
         *loaded     = 0u;
         *away_t0_ms = 0u;
         return DM_REARM_EMPTY;

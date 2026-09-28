@@ -250,9 +250,9 @@ enum : uint8_t
 };
 
 static uint8_t  dm_loaded[4]            = {1,1,1,1};   // 1=loaded (after stage2 success)
-static uint8_t  dm_fail_latch[4]        = {0,0,0,0};   // latch until ks==0 (<0.6V)
+static uint8_t  dm_fail_latch[4]        = {0,0,0,0};   // latch until key 'none' for DM_REARM_AWAY_MS
 static uint8_t  dm_auto_state[4]        = {0,0,0,0};
-static uint8_t  dm_autoload_gate[4]     = {0,0,0,0}; // 0=allow Stage1, 1=block Stage1 until idle+ks==0
+static uint8_t  dm_autoload_gate[4]     = {0,0,0,0}; // 0=allow Stage1, 1=block Stage1 until idle+key out
 static uint8_t  dm_auto_try[4]          = {0,0,0,0};   // abort count (stage2)
 static uint64_t dm_auto_t0_ms[4]        = {0ull,0ull,0ull,0ull};
 static float    dm_auto_remain_m[4]     = {0,0,0,0};
@@ -261,6 +261,10 @@ static uint32_t dm_auto_last_cnt[4]     = {0,0,0,0};   // as5600_count at the la
 // A loaded channel's key away from 'both' (dm_rearm.h): first pass (0 = none), gear position then.
 static uint64_t dm_loaded_drop_t0_ms[4] = {0ull,0ull,0ull,0ull};
 static uint32_t dm_loaded_drop_cnt[4]   = {0u,0u,0u,0u};
+// The key's current run of 'none' (dm_rearm.h): its first pass (0 = none).
+static uint64_t dm_none_t0_ms[4]        = {0ull,0ull,0ull,0ull};
+// The Stage-1 state (S1_DEBOUNCE, S1_PUSH) such a 'none' interrupted, DM_AUTO_IDLE = none (dm_none_hold).
+static uint8_t  dm_s1_held[4]           = {0,0,0,0};
 
 // Time and stall limits of S2_PUSH / S2_RETRACT / S2_FAIL_RETRACT (motion_limits.h).
 static motion_guard dm_s2_guard[4];
@@ -287,7 +291,8 @@ static inline uint8_t dm_s2_enter_state(uint8_t ch, uint32_t cur_cnt, uint64_t n
 }
 
 // A limit of the run's guard fails the autoload the way three buffer aborts do: the run is over, and
-// the fail latch keeps the motor off and the LED red until key 'none' or a finished printer load.
+// the fail latch keeps the motor off and the LED red until the key is out (key 'none' for
+// DM_REARM_AWAY_MS, dm_rearm.h) or a printer load finishes.
 static inline void dm_s2_guard_fail(uint8_t ch)
 {
     dm_s2_end(&dm_s2_run[ch]);
@@ -296,6 +301,35 @@ static inline void dm_s2_guard_fail(uint8_t ch)
     dm_auto_try[ch]      = 0u;
     dm_auto_remain_m[ch] = 0.0f;
     dm_auto_t0_ms[ch]    = 0ull;
+}
+
+// Key 'none' for less than DM_REARM_AWAY_MS (dm_rearm.h): the autoload drives nothing on the pass, and
+// a Stage-2 stage it interrupts is kept as any excursion of the key away from 'both' keeps it
+// (dm_s2_leave). The fail latch, dm_autoload_gate and the run's length and aborts wait for the
+// filament to count as out, so a glitch to 'none' does not start the insertion over. A Stage-1 state
+// it interrupts goes on when the key leaves 'none' (dm_s1_resume): the push with its start, which
+// dm_auto_t0_ms keeps meanwhile (nothing else sets it in IDLE with the key at 'none'), so its 5 s
+// still count from the first push; the debounce, which drove nothing, from the start.
+static inline void dm_none_hold(uint8_t ch, uint64_t now_ms)
+{
+    const uint8_t st = dm_auto_state[ch];
+    if (st == DM_AUTO_S2_PUSH)         dm_s2_leave(&dm_s2_run[ch], DM_S2_STAGE_PUSH, now_ms);
+    else if (st == DM_AUTO_S2_RETRACT) dm_s2_leave(&dm_s2_run[ch], DM_S2_STAGE_RETRACT, now_ms);
+    else if ((st == DM_AUTO_S1_DEBOUNCE) || (st == DM_AUTO_S1_PUSH)) dm_s1_held[ch] = st;
+    dm_auto_state[ch] = DM_AUTO_IDLE;
+    if (dm_s1_held[ch] != DM_AUTO_S1_PUSH) dm_auto_t0_ms[ch] = 0ull;
+}
+
+// The first pass after such a 'none': the Stage-1 state it interrupted goes on, and run() does with
+// the key what it would have done in it. Not once the run failed meanwhile (dm_s2_auto_unload_pass).
+static inline void dm_s1_resume(uint8_t ch, uint64_t now_ms)
+{
+    const uint8_t st = dm_s1_held[ch];
+    if (st == DM_AUTO_IDLE) return;
+    dm_s1_held[ch] = DM_AUTO_IDLE;
+    if (dm_fail_latch[ch]) return;
+    dm_auto_state[ch] = st;
+    if (st == DM_AUTO_S1_DEBOUNCE) dm_auto_t0_ms[ch] = now_ms;
 }
 
 // A pass on which the auto-unload (the buffer lifted by hand, motor_motion_run) drives channel ch
@@ -1425,8 +1459,8 @@ public:
                             // so no round of Stage-1 restarts it (dm_stage2.h), and so it does on the passes an
                             // auto-unload drives instead of run() (dm_s2_auto_unload_pass). A limit fails the
                             // autoload the way three buffer aborts do (dm_s2_guard_fail): motor off, red, until
-                            // ks == 0 or a finished printer load. (S2_FAIL_RETRACT does not run today: the fail
-                            // latch set with it skips this state machine.)
+                            // the key is out (dm_rearm.h) or a printer load finishes. (S2_FAIL_RETRACT does not
+                            // run today: the fail latch set with it skips this state machine.)
                             const uint8_t st = dm_auto_state[CHx];
                             const bool s2_stage =
                                 (st == DM_AUTO_S2_PUSH) || (st == DM_AUTO_S2_RETRACT) || (st == DM_AUTO_S2_FAIL_RETRACT);
@@ -2455,6 +2489,8 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             dm_auto_remain_m[ch]     = 0.0f;
             dm_auto_last_cnt[ch]     = 0u;
             dm_loaded_drop_t0_ms[ch] = 0ull;
+            dm_none_t0_ms[ch]        = 0ull;
+            dm_s1_held[ch]           = DM_AUTO_IDLE;
             dm_autoload_gate[ch]     = 0u;
             dm_s2_end(&dm_s2_run[ch]);
             continue;
@@ -2463,15 +2499,15 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
         const uint8_t ks = MC_ONLINE_key_stu[ch];
 
         // dm_loaded (dm_rearm.h): a loaded channel is unloaded, which arms Stage-2 again, only once
-        // the filament left both switches or the gear retracted it out of 'both'; a finished printer
-        // load marks it loaded.
+        // the filament left both switches (key 'none' for DM_REARM_AWAY_MS) or the gear retracted it
+        // out of 'both'; a finished printer load marks it loaded.
         const filament_now_position_enum pos = filament_now_position[ch];
         const dm_host_t host = dm_host_from_motion(A.now_filament_num == ch, A.filament[ch].motion,
                                                    (pos == filament_pulling_back) || (pos == filament_redetect));
         const dm_rearm_event ev = dm_rearm_pass(&dm_loaded[ch], &dm_loaded_drop_t0_ms[ch], &dm_loaded_drop_cnt[ch],
-                                                ks, host, time_now, as5600_count[ch]);
+                                                &dm_none_t0_ms[ch], ks, host, time_now, as5600_count[ch]);
 
-        if (ks == 0u)
+        if (ev == DM_REARM_EMPTY)
         {
             if (filament_now_position[ch] == filament_idle)
                 dm_autoload_gate[ch] = 0u;
@@ -2482,6 +2518,7 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             dm_auto_t0_ms[ch]        = 0ull;
             dm_auto_remain_m[ch]     = 0.0f;
             dm_auto_last_cnt[ch]     = 0u;
+            dm_s1_held[ch]           = DM_AUTO_IDLE;
             dm_s2_end(&dm_s2_run[ch]); // the filament is out: the next 'both' starts a new run
             continue;
         }
@@ -2498,8 +2535,14 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             dm_auto_t0_ms[ch]    = 0ull;
             dm_auto_remain_m[ch] = 0.0f;
             dm_auto_last_cnt[ch] = 0u;
+            dm_s1_held[ch]       = DM_AUTO_IDLE;
             dm_s2_end(&dm_s2_run[ch]);
         }
+
+        if (ks == 0u) // not out yet: nothing drives, the insertion goes on
+            dm_none_hold(ch, time_now);
+        else
+            dm_s1_resume(ch, time_now);
     }
 #endif
 
@@ -3069,6 +3112,8 @@ void Motion_control_init()
                 dm_auto_remain_m[ch]     = 0.0f;
                 dm_auto_last_cnt[ch]     = 0u;
                 dm_loaded_drop_t0_ms[ch] = 0ull;
+                dm_none_t0_ms[ch]        = 0ull;
+                dm_s1_held[ch]           = DM_AUTO_IDLE;
                 dm_autoload_gate[ch]     = 0u;
                 dm_s2_end(&dm_s2_run[ch]);
                 continue;
@@ -3086,6 +3131,8 @@ void Motion_control_init()
             dm_auto_remain_m[ch]     = 0.0f;
             dm_auto_last_cnt[ch]     = 0u;
             dm_loaded_drop_t0_ms[ch] = 0ull;
+            dm_none_t0_ms[ch]        = 0ull;
+            dm_s1_held[ch]           = DM_AUTO_IDLE;
             dm_s2_end(&dm_s2_run[ch]);
         }
     #endif
