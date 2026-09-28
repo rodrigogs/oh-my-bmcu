@@ -18,7 +18,7 @@ env:
   # Fail the A1 build if the image grows past 56 KiB (upload limit is 60 KiB, NVM lives above it).
   IMAGE_BUDGET_BYTES: "57344"
   # Fail the A1 build if free RAM (between _ebss and the stack, see the linker script) drops
-  # below 4 KiB. Measured 6,528 B on a1_solo_autoload_rgboff; RAM is 20480 B total.
+  # below 4 KiB. RAM is 20480 B total; the step summary reports the current headroom.
   RAM_HEADROOM_FLOOR_BYTES: "4096"
 
 jobs:
@@ -57,8 +57,8 @@ jobs:
             # see the ldscript's .stack section), so it is real free RAM, not just "20480 minus
             # .data+.bss" -- the stack is reserved regardless of how much heap/bss is used.
             ram_used=$("$sizebin" --format=sysv "$elf" | awk '$1 == ".data" || $1 == ".bss" {sum += $2} END {print sum}')
-            ebss_hex=$("$nm" "$elf" | awk '$3 == "_ebss" {print $1}')
-            heap_end_hex=$("$nm" "$elf" | awk '$3 == "_heap_end" {print $1}')
+            read -r ebss_hex heap_end_hex < <("$nm" "$elf" | awk '$3 == "_ebss" {e = $1} $3 == "_heap_end" {h = $1} END {print e, h}')
+            [ -n "$ebss_hex" ] && [ -n "$heap_end_hex" ] || { echo "::error::$e: _ebss or _heap_end missing"; exit 1; }
             ram_headroom=$(( 16#$heap_end_hex - 16#$ebss_hex ))
             echo "$e: sha256 ${sha}  size ${size}  ram_used ${ram_used}  ram_headroom ${ram_headroom}"
             {
@@ -122,7 +122,7 @@ jobs:
           BMCU_DM_TWO_MICROSWITCH=1 BMCU_ONLINE_LED_FILAMENT_RGB=1 DBMCU_P1S=0 BMCU_SOFT_LOAD=0 BAMBU_BUS_AMS_NUM=0 AMS_RETRACT_LEN=0.095f pio run -e fw
 
   unit-tests:
-    name: Host unit tests (env:native)
+    name: Host unit tests (env:native, env:native_asan) and guard checks
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
