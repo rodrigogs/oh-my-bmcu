@@ -8,6 +8,7 @@
 #include "crc_bus.h"
 #include "bus_link.h"
 #include "bambubus_set_filament.h"
+#include "bambubus_frame_len.h"
 
 uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
 static void bambubus_build_static_serial(void);
@@ -121,6 +122,8 @@ bambubus_package_type get_packge_type(unsigned char *buf, int length)
 
     if (buf[1] == 0xC5)
     {
+        if (!bambubus_short_frame_len_ok(buf, length)) return bambubus_package_type::none;
+
         switch (buf[4])
         {
         case 0x03:
@@ -456,6 +459,8 @@ struct bambubus_printer_motion_package_struct
     uint8_t unknow;
     uint16_t crc16;
 } __attribute__((packed));
+static_assert(__builtin_offsetof(bambubus_printer_motion_package_struct, motion_flag) + 1 + BAMBUBUS_CRC16_LEN ==
+              BAMBUBUS_MOTION_MIN_LEN, "0x03 minimum length");
 struct bambubus_ams_motion_package_struct
 {
     uint8_t magic_byte = 0x3D;
@@ -687,6 +692,8 @@ struct bambubus_printer_stu_motion_package_struct
     uint16_t crc16;
 } __attribute__((packed));
 static_assert(sizeof(bambubus_printer_stu_motion_package_struct) == 13, "packed size mismatch");
+static_assert(__builtin_offsetof(bambubus_printer_stu_motion_package_struct, filamnet_channel) + 1 + BAMBUBUS_CRC16_LEN ==
+              BAMBUBUS_STU_MOTION_MIN_LEN, "0x04 minimum length");
 
 struct bambubus_ams_stu_motion_package_struct
 {
@@ -863,7 +870,7 @@ static inline void online_detect_build_packet(const uint8_t ams_num, const uint8
 
 void get_package_online_detect(unsigned char *buf, int length)
 {
-    (void)length;
+    (void)length; // get_packge_type() checked it for the subtype (bambubus_frame_len.h)
     if (bus_port_to_host.send_data_len != 0) return;
 
     const uint8_t ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
@@ -904,7 +911,7 @@ void get_package_online_detect(unsigned char *buf, int length)
     online_detect_prefix_now = 0x0Au;
     online_detect_build_packet(ams_num, 0x01);
 
-    if (memcmp(online_detect_res + 7, buf + 7, 17) != 0)
+    if (memcmp(online_detect_res + BAMBUBUS_ONLINE_ID_OFF, buf + BAMBUBUS_ONLINE_ID_OFF, BAMBUBUS_ONLINE_ID_LEN) != 0)
         return;
 
     have_registered = true;
