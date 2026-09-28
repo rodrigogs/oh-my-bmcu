@@ -1079,8 +1079,8 @@ static void test_normal_idle_pushes_are_not_limited(void)
         TEST_ASSERT_EQUAL_UINT32(0u, run_idle(31.0f, 0.0f, 200u));
     }
 
-    // - A hand that presses the buffer down (the DM buffer gesture: below 10 % for at most 2 s)
-    //   while the gear still feeds, then lets it go back to the middle.
+    // - A hand pressing the buffer below 10 % (as for the DM buffer gesture on an empty slot) for up
+    //   to 2 s while the gear still feeds, then letting it go back to the middle.
     setUp();
     idle_reset();
     TEST_ASSERT_EQUAL_UINT32(0u, run_idle(5.0f, 30.0f, 2000u));

@@ -3,7 +3,8 @@
 // the auto-unload and the manual empty pull. Hardware-free, so the decisions are tested on the host
 // (test/test_auto_unload). motor_motion_run calls auto_unload_pass() once per main-loop pass for
 // every channel whose AS5600 reads are good, and drives the channel as it returns instead of
-// running the channel's motor control.
+// running the channel's motor control. It does so only while the ADC stream is fresh (adc_stream.h):
+// a stale stream stops every channel and resets the auto-unload instead.
 //
 // - Auto-unload (upstream V10.5, "automatic filament unload when the buffer is lifted manually"):
 //   while the channel runs its idle control, the buffer lifted to AUTO_UNLOAD_START_PCT and let back
@@ -85,7 +86,7 @@ typedef struct
     uint64_t arm_t0_ms;
     uint64_t active_t0_ms;
     uint64_t empty_t0_ms;   // first pass with the key away from 'both' while active (0 = none)
-    uint8_t  limit;         // 1 on the pass a limit of guard ended the auto-unload, else 0
+    uint8_t  limit;         // 1 on the pass the guard's stall limit ended the auto-unload, else 0
     motion_guard guard;     // the auto-unload's stall limit (motion_limits.h), started with it
 } auto_unload_t;
 

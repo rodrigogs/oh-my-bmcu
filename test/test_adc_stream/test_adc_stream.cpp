@@ -136,7 +136,8 @@ static void test_age_is_the_tick_difference_and_0_for_a_later_stamp(void)
 {
     TEST_ASSERT_EQUAL_UINT64(0u, adc_stream_age_ticks(5u, 5u));
     TEST_ASSERT_EQUAL_UINT64(7u, adc_stream_age_ticks(12u, 5u));
-    // Motion_control_run takes now_ticks64 before the poll stamps a half.
+    // Defensive: a stamp newer than the time read counts as age 0 (ADC_DMA_age_ticks reads the time
+    // after the poll, so the firmware never passes one).
     TEST_ASSERT_EQUAL_UINT64(0u, adc_stream_age_ticks(5u, 6u));
     TEST_ASSERT_FALSE(adc_stream_stale(adc_stream_age_ticks(5u, 6u), TPMS));
     TEST_ASSERT_EQUAL_UINT64(0u, adc_stream_age_ticks(0u, UINT64_MAX));

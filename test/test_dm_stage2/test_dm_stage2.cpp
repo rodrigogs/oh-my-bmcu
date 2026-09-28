@@ -164,7 +164,10 @@ static inline void dm_none_hold(uint8_t ch, uint64_t now_ms)
 }
 
 // The first pass after such a 'none': the Stage-1 state it interrupted goes on, and run() does with
-// the key what it would have done in it. Not once the run failed meanwhile (dm_s2_auto_unload_pass).
+// the key what it would have done in it. The fail latch check is defensive: nothing is resumed once
+// the run failed meanwhile (dm_s2_auto_unload_pass), but what drives from dm_auto_state (run()'s DM
+// block, dm_s2_auto_unload_pass) checks dm_fail_latch first anyway, and every path that clears the
+// latch also sets the state to IDLE.
 static inline void dm_s1_resume(uint8_t ch, uint64_t now_ms)
 {
     const uint8_t st = dm_s1_held[ch];
@@ -248,6 +251,10 @@ static float dm_run(int CHx, uint64_t now_ms)
                                 }
                             }
 
+                            // In every state but IDLE, ks is 1 or 2 here: on a 'none' pass motor_motion_run's
+                            // prelude has already moved the state to IDLE (dm_none_hold, or the DM_REARM_EMPTY
+                            // reset), so the ks == 0u branches below are unreachable. They are upstream's, kept
+                            // unchanged to keep the upstream diff small.
                             switch (dm_auto_state[CHx])
                             {
                             case DM_AUTO_S1_DEBOUNCE:

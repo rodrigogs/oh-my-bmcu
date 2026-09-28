@@ -218,9 +218,18 @@ static inline void ml_dm_s2_start(motion_guard *g, uint64_t now_ms, uint32_t pos
 // on the spool) moves no filament, so the buffer never reaches either: the PID sat at 1000 PWM for
 // as long as the printer kept sending send_out. The stall check stops it: about 0.7 s to 800 PWM,
 // then ML_STALL_MS. A normal load never trips it: the gear moves while it feeds and while it
-// pushes the buffer up. The hold drives 800 PWM or more only with the buffer below 83.7 % (A1),
-// under the 85 % it latched at, or in the anti-stall's 850 PWM kick, which rests 0.5 s after 0.8 s
-// without motion, so a buffer that stops short of 90 % is not a stall.
+// pushes the buffer up. Nor does the hold. On A1 (latch 85 %, hold target 90 %, or the pct it
+// latched at if higher) it drives 800 PWM or more only when it pushes with the buffer below 83.7 %,
+// under the 85 % it latched at, when it retracts above about 92.0 % (800-850 PWM,
+// retract_mag_from_err(err, 850), 2 points over the target), or in the anti-stall's 850 PWM kick.
+// The guard counts the retract too (ml_absf), and in all three the anti-stall rests 0.5 s after
+// 0.8 s without motion, under ML_STALL_MS, so a buffer that stops between 83.7 % and 92 % is not a
+// stall. With BMCU_SOFT_LOAD (latch and target 75 %, so the target is the pct it latched at) the
+// push is 800 PWM or more below 62.6 % and the retract 2 points over that pct (about 77.0 % for a
+// latch at 75 %). On BMCU_P1S (latch 88 %, target 95 %) the push is 1000 PWM at the latch point
+// and 800 PWM or more up to 90.67 %, so the hold drives above 800 PWM at and just above the latch,
+// bounded by the same rest; its retract reaches 800 PWM only above about 97.0 %, where the send has
+// braked (MC_LOAD_S1_HARD_STOP_PCT).
 // No time budget: how long the printer sends is its own decision, and its load timeout reports a
 // send that stopped. ML_SEND_MAX_M of gear travel is upstream's cap (a gear that turns without
 // feeding, e.g. slipping on the filament).
