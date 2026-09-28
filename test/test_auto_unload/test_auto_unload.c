@@ -9,6 +9,10 @@
 // set, and on the pass that releases it (auto_unload_hold()), no lift may arm the auto-unload until
 // a pass with the buffer below 55%, back in the neutral band: the lift that releases the latch, and
 // letting go of the buffer after it, must not unload the channel, and a new lift after that must.
+// An auto-unload whose gear does not turn (less than 1 mm in 1 s at its 850 PWM) must end ML_STALL_MS
+// after the gear stopped, flagged as a limit for the unload fault LED, and need a new lift; one whose
+// gear turns, however slowly past 1 mm/s, must end only on its own ends, as before. The manual empty
+// pull, at 700 PWM and held by hand, has no stall limit.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -23,11 +27,25 @@
 #define KS_BOTH 1u
 #define KS_EXT  2u
 
+// ---- adapted from Motion_control.cpp: AUTO_UNLOAD_PWM_PULL and MANUAL_EMPTY_PULL_PWM (constexpr, C++ only) ----
+#define PWM_UNLOAD     850.0f
+#define PWM_EMPTY_PULL 700.0f
+
 static uint64_t now;
 static auto_unload_t st;
 static au_in_t in;
 static bool latched;            // the jam latch is set, or is released on this pass: held first
 static uint32_t unload_passes;  // passes that drove the auto-unload
+static uint32_t limit_passes;   // passes on which a limit ended it (st.limit)
+
+// The gear: it turns at v_mm_s (0: it does not turn) while the channel is driven, from the pass
+// that drives until the next one, and gives the AS5600 count the guard reads (+ jitter_cnt on odd
+// ms: sensor noise).
+static double v_mm_s;
+static double gear_mm;
+static uint32_t jitter_cnt;
+static float pwm_prev;          // what the previous pass drove (x_prev)
+static uint64_t prev_ms;        // time of the previous pass
 
 void setUp(void)
 {
@@ -35,12 +53,20 @@ void setUp(void)
     memset(&st, 0, sizeof(st));
     latched = false;
     unload_passes = 0u;
+    limit_passes = 0u;
+    v_mm_s = 60.0;
+    gear_mm = 0.0;
+    jitter_cnt = 0u;
+    pwm_prev = 0.0f;
+    prev_ms = now;
     in.online = true;
     in.inserted = true;
     in.idle_ctrl = true;
     in.pct = 50.0f;
     in.ks = KS_BOTH;
     in.now_ms = now;
+    in.pos_cnt = 0u;
+    in.pwm = 0.0f;
 }
 
 void tearDown(void) {}
@@ -50,9 +76,15 @@ void tearDown(void) {}
 static au_drive_t pass(void)
 {
     if (latched) auto_unload_hold(&st);
+    if (pwm_prev != 0.0f) gear_mm += v_mm_s * 0.001 * (double)(now - prev_ms);
+    prev_ms = now;
     in.now_ms = now;
+    in.pos_cnt = 0xFFFFF000u + (uint32_t)(gear_mm / (double)ML_MM_PER_CNT + 0.5) + ((now & 1u) ? jitter_cnt : 0u);
+    in.pwm = pwm_prev;
     const au_drive_t d = auto_unload_pass(&st, &in);
     if (d == AU_DRIVE_UNLOAD) unload_passes++;
+    if (st.limit) limit_passes++;
+    pwm_prev = (d == AU_DRIVE_UNLOAD) ? PWM_UNLOAD : (d == AU_DRIVE_EMPTY_PULL) ? PWM_EMPTY_PULL : 0.0f;
     now++;
     return d;
 }
@@ -160,6 +192,103 @@ static void test_leaving_the_idle_control_does_not_stop_a_running_auto_unload(vo
     lift_and_release();
     in.idle_ctrl = false;
     TEST_ASSERT_EQUAL_INT(AU_DRIVE_UNLOAD, hold(50.0f, 1000u));
+}
+
+// ---- Online: the stall limit ----
+
+static void test_a_blocked_gear_ends_the_auto_unload_1s_in(void)
+{
+    // The gear does not turn (filament held ahead of the gear or behind it), the buffer stays in its
+    // band and the key at 'both': the auto-unload used to retract at 850 PWM for its whole 15 s. It
+    // drives 850 PWM from its first pass, so the stall window counts from the next one: it drives
+    // ML_STALL_MS passes and ends on the next, with the limit flagged on that pass only. As after its
+    // other ends, another one needs a new lift, and that one stops the same way. Also with 1 count of
+    // sensor jitter.
+    for (int k = 0; k < 2; k++)
+    {
+        setUp();
+        v_mm_s = 0.0;
+        jitter_cnt = (uint32_t)k;
+        lift_and_release();
+        TEST_ASSERT_EQUAL_INT32((int32_t)ML_STALL_MS - 1, until_not(AU_DRIVE_UNLOAD, 50.0f, 20000u));
+        TEST_ASSERT_EQUAL_UINT32(ML_STALL_MS, unload_passes);
+        TEST_ASSERT_EQUAL_UINT32(1u, limit_passes);
+        TEST_ASSERT_EQUAL_UINT8(0u, st.active);
+        TEST_ASSERT_EQUAL_UINT8(1u, st.blocked);
+        TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(50.0f, 20000u));
+        TEST_ASSERT_EQUAL_UINT32(1u, limit_passes);
+
+        lift_and_release();
+        TEST_ASSERT_EQUAL_INT32((int32_t)ML_STALL_MS - 1, until_not(AU_DRIVE_UNLOAD, 50.0f, 20000u));
+        TEST_ASSERT_EQUAL_UINT32(2u * ML_STALL_MS, unload_passes);
+        TEST_ASSERT_EQUAL_UINT32(2u, limit_passes);
+    }
+}
+
+static void test_an_auto_unload_that_blocks_stops_1s_after_the_block(void)
+{
+    // 3 s at 60 mm/s, then the gear stops (the filament caught). The window restarts on each full
+    // 1 mm the gear moved, so the drive ends ML_STALL_MS after the last one: at most 17 ms (1 mm at
+    // 60 mm/s) before the block + ML_STALL_MS.
+    lift_and_release();
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_UNLOAD, hold(50.0f, 3000u));
+    v_mm_s = 0.0;
+    const int32_t ms = until_not(AU_DRIVE_UNLOAD, 50.0f, 20000u);
+    TEST_ASSERT_TRUE((ms >= (int32_t)ML_STALL_MS - 18) && (ms < (int32_t)ML_STALL_MS));
+    TEST_ASSERT_EQUAL_UINT32(1u, limit_passes);
+
+    // 0.8 mm/s is a stall too, 1.5 mm/s (the filament still moving) is not: 15 s, as before.
+    setUp();
+    v_mm_s = 0.8;
+    lift_and_release();
+    TEST_ASSERT_EQUAL_INT32((int32_t)ML_STALL_MS - 1, until_not(AU_DRIVE_UNLOAD, 50.0f, 20000u));
+    TEST_ASSERT_EQUAL_UINT32(1u, limit_passes);
+    setUp();
+    v_mm_s = 1.5;
+    lift_and_release();
+    TEST_ASSERT_EQUAL_INT32((int32_t)AUTO_UNLOAD_MAX_MS - 1, until_not(AU_DRIVE_UNLOAD, 50.0f, 20000u));
+    TEST_ASSERT_EQUAL_UINT32(0u, limit_passes);
+}
+
+static void test_a_normal_auto_unload_is_not_limited(void)
+{
+    // At 60 mm/s: the tip leaves the switch after 4 s and the drive ends 1.5 s later, as before (the
+    // gear spins faster once the tail has left it). Against filament held at the tool head: the gear
+    // takes up the slack while the buffer drops from 50% to below 35% (1% per 20 ms) and the buffer
+    // ends it. A buffer that stops short of 35% there is a held filament, so that one does stop on
+    // the limit. Neither of the others is flagged.
+    lift_and_release();
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_UNLOAD, hold(50.0f, 4000u));
+    in.ks = KS_EXT;
+    v_mm_s = 200.0;
+    TEST_ASSERT_EQUAL_INT32((int32_t)AUTO_UNLOAD_EMPTY_MS, until_not(AU_DRIVE_UNLOAD, 50.0f, 5000u));
+    TEST_ASSERT_EQUAL_UINT32(0u, limit_passes);
+
+    setUp();
+    lift_and_release();
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_UNLOAD, hold(50.0f, 500u));
+    for (float p = 49.0f; p > 34.0f; p -= 1.0f) TEST_ASSERT_EQUAL_INT(AU_DRIVE_UNLOAD, hold(p, 20u));
+    TEST_ASSERT_EQUAL_INT32(0, until_not(AU_DRIVE_UNLOAD, 34.0f, 10u));
+    TEST_ASSERT_EQUAL_UINT32(0u, limit_passes);
+
+    setUp();
+    lift_and_release();
+    for (float p = 49.0f; p > 36.0f; p -= 1.0f) TEST_ASSERT_EQUAL_INT(AU_DRIVE_UNLOAD, hold(p, 20u));
+    v_mm_s = 0.0;
+    const int32_t ms = until_not(AU_DRIVE_UNLOAD, 36.0f, 20000u);
+    TEST_ASSERT_TRUE((ms >= (int32_t)ML_STALL_MS - 18) && (ms < (int32_t)ML_STALL_MS));
+    TEST_ASSERT_EQUAL_UINT32(1u, limit_passes);
+}
+
+static void test_the_manual_empty_pull_has_no_stall_limit(void)
+{
+    // 700 PWM, under ML_STALL_PWM, and only while a hand holds the buffer above 80%: a gear that does
+    // not turn pulls on for as long as it is held, as before.
+    v_mm_s = 0.0;
+    in.ks = KS_NONE;
+    TEST_ASSERT_EQUAL_INT32(-1, until_not(AU_DRIVE_EMPTY_PULL, 95.0f, 60000u));
+    TEST_ASSERT_EQUAL_UINT32(0u, limit_passes);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(79.0f, 1u));
 }
 
 static void test_manual_empty_pull_while_the_buffer_is_held_up(void)
@@ -643,6 +772,8 @@ static void test_online_decisions_match_the_code_before(void)
     // The walk exercised both.
     TEST_ASSERT_TRUE(unloads > 10000u);
     TEST_ASSERT_TRUE(pulls > 10000u);
+    // The gear turned: no limit.
+    TEST_ASSERT_EQUAL_UINT32(0u, limit_passes);
 }
 
 // ---- Jam latch: the hold-off against the gesture, at random ----
@@ -720,6 +851,10 @@ int main(void)
     RUN_TEST(test_the_release_may_come_up_to_1000ms_after_the_lift);
     RUN_TEST(test_auto_unload_ends_and_needs_a_new_lift);
     RUN_TEST(test_leaving_the_idle_control_does_not_stop_a_running_auto_unload);
+    RUN_TEST(test_a_blocked_gear_ends_the_auto_unload_1s_in);
+    RUN_TEST(test_an_auto_unload_that_blocks_stops_1s_after_the_block);
+    RUN_TEST(test_a_normal_auto_unload_is_not_limited);
+    RUN_TEST(test_the_manual_empty_pull_has_no_stall_limit);
     RUN_TEST(test_manual_empty_pull_while_the_buffer_is_held_up);
     RUN_TEST(test_offline_nothing_starts);
     RUN_TEST(test_link_lost_ends_a_running_auto_unload);
