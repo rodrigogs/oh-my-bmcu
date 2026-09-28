@@ -4,8 +4,9 @@
 // pause, our own TX cutting in), with ISR jitter, quiet gaps and SysTick wraps in between. After every
 // event the parser's state stays in bounds, a frame handed to the main loop is the one its header
 // describes, with a good CRC8 and made of the last bytes read, and it is left alone until the main
-// loop takes it; a whole frame that starts with the parser at rest is always handed out (a heartbeat
-// counted). The hand-written scenarios are in test_bus_rx_parser.
+// loop takes it; a whole frame that starts with the parser at rest is always handed out when the main
+// loop took the previous one (a heartbeat counted); over a pending one nothing is handed out. The
+// hand-written scenarios are in test_bus_rx_parser.
 
 #include <stdint.h>
 #include <stdio.h>
@@ -509,7 +510,8 @@ static bool send_frame(const uint8_t *f, int len, fault_kind fault, bool after_f
     return !intact;
 }
 
-// Frames of every kind, a third of them faulted, with our reply after some and line glitches.
+// Frames of every kind, 35% of them faulted (rng_pct(65) keeps 65% intact), with our reply after
+// some and line glitches.
 static void run_frames(uint32_t s, uint32_t frames)
 {
     begin_stream(s);
