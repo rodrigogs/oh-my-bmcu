@@ -466,6 +466,29 @@ static void test_change_rearms_and_success_resets_the_back_off(void)
     TEST_ASSERT_TRUE(nvm_job_due(&j, t + NVM_RETRY_TICKS, 0u, 0u));
 }
 
+// give_ups saturates at 0xFFFF instead of wrapping to 0: one give-up short of the cap, a full
+// give-up round reaches it, and a second round leaves it unchanged.
+static void test_give_ups_saturates_instead_of_wrapping(void)
+{
+    const uint32_t t0 = 0x10000000u;
+    nvm_job j;
+    memset(&j, 0, sizeof(j));
+    j.give_ups = 0xFFFEu;
+    uint32_t t = t0;
+
+    for (int round = 1; round <= 2; round++)
+    {
+        nvm_job_changed(&j, t);
+        for (uint32_t f = 0; f < NVM_RETRY_MAX_FAILS; f++)
+        {
+            nvm_job_result(&j, false, t);
+            t += (f == 0u) ? NVM_RETRY_TICKS : NVM_RETRY_SLOW_TICKS;
+        }
+        TEST_ASSERT_EQUAL_UINT16(0xFFFFu, j.give_ups);
+        t += 60000u * MS;
+    }
+}
+
 // A filament change after a failed write is debounced like any other: a burst for the slot still
 // ends in one record 500 ms after its last change, even when the unsaved change before the failure
 // is more than NVM_FIL_MAX_DELAY_TICKS old.
@@ -746,6 +769,7 @@ int main(void)
     RUN_TEST(test_failed_write_waits_before_retrying);
     RUN_TEST(test_failing_write_backs_off_then_gives_up);
     RUN_TEST(test_change_rearms_and_success_resets_the_back_off);
+    RUN_TEST(test_give_ups_saturates_instead_of_wrapping);
     RUN_TEST(test_burst_after_a_failed_write_is_still_one_write);
     RUN_TEST(test_state_write_waits_for_reply_end_plus_1ms);
     RUN_TEST(test_filament_burst_ends_in_one_write_in_a_quiet_window);
