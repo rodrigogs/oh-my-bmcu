@@ -49,6 +49,7 @@ static double gear_mm;
 static uint32_t jitter_cnt;
 static float pwm_prev;          // what the previous pass drove (x_prev)
 static uint64_t prev_ms;        // time of the previous pass
+static float idle_pwm;          // what the channel's motor control drives on the other passes
 
 void setUp(void)
 {
@@ -62,6 +63,7 @@ void setUp(void)
     jitter_cnt = 0u;
     pwm_prev = 0.0f;
     prev_ms = now;
+    idle_pwm = 0.0f;
     in.online = true;
     in.inserted = true;
     in.idle_ctrl = true;
@@ -87,7 +89,7 @@ static au_drive_t pass(void)
     const au_drive_t d = auto_unload_pass(&st, &in);
     if (d == AU_DRIVE_UNLOAD) unload_passes++;
     if (st.limit) limit_passes++;
-    pwm_prev = (d == AU_DRIVE_UNLOAD) ? PWM_UNLOAD : (d == AU_DRIVE_EMPTY_PULL) ? PWM_EMPTY_PULL : 0.0f;
+    pwm_prev = (d == AU_DRIVE_UNLOAD) ? PWM_UNLOAD : (d == AU_DRIVE_EMPTY_PULL) ? PWM_EMPTY_PULL : idle_pwm;
     now++;
     return d;
 }
@@ -222,6 +224,36 @@ static void test_a_blocked_gear_ends_the_auto_unload_1s_in(void)
         TEST_ASSERT_EQUAL_UINT32(1u, limit_passes);
 
         lift_and_release();
+        TEST_ASSERT_EQUAL_INT32((int32_t)ML_STALL_MS - 1, until_not(AU_DRIVE_UNLOAD, 50.0f, 20000u));
+        TEST_ASSERT_EQUAL_UINT32(2u * ML_STALL_MS, unload_passes);
+        TEST_ASSERT_EQUAL_UINT32(2u, limit_passes);
+    }
+}
+
+static void test_a_new_auto_unload_right_after_a_stall_gets_its_own_stall_window(void)
+{
+    // A blocked auto-unload ends on its stall limit, and the buffer is lifted to 90% again at once and
+    // let back to 50%: the next one starts 51 ms after the last check of the one before, under
+    // ML_STEP_MAX_MS, so the gap rule does not restart the stall window. While the buffer is up the
+    // idle control retracts against the hand at its 800 PWM clamp, the x_prev the new one's first
+    // pass reads, so the window does not restart on low PWM either. Only the guard's start with each
+    // auto-unload does: the new one drives ML_STALL_MS passes again, not none. Also with the idle
+    // control at 0 PWM there.
+    static const float lift_pwm[] = {800.0f, 0.0f};
+    for (uint32_t k = 0u; k < sizeof(lift_pwm) / sizeof(lift_pwm[0]); k++)
+    {
+        setUp();
+        v_mm_s = 0.0;
+        lift_and_release();
+        TEST_ASSERT_EQUAL_INT32((int32_t)ML_STALL_MS - 1, until_not(AU_DRIVE_UNLOAD, 50.0f, 20000u));
+        TEST_ASSERT_EQUAL_UINT32(1u, limit_passes);
+        const uint64_t t_limit = now - 1u;
+
+        idle_pwm = lift_pwm[k];
+        TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 50u));
+        idle_pwm = 0.0f;
+        TEST_ASSERT_EQUAL_INT(AU_DRIVE_UNLOAD, hold(50.0f, 1u));
+        TEST_ASSERT_TRUE((now - 1u) - t_limit < ML_STEP_MAX_MS);
         TEST_ASSERT_EQUAL_INT32((int32_t)ML_STALL_MS - 1, until_not(AU_DRIVE_UNLOAD, 50.0f, 20000u));
         TEST_ASSERT_EQUAL_UINT32(2u * ML_STALL_MS, unload_passes);
         TEST_ASSERT_EQUAL_UINT32(2u, limit_passes);
@@ -855,6 +887,7 @@ int main(void)
     RUN_TEST(test_auto_unload_ends_and_needs_a_new_lift);
     RUN_TEST(test_leaving_the_idle_control_does_not_stop_a_running_auto_unload);
     RUN_TEST(test_a_blocked_gear_ends_the_auto_unload_1s_in);
+    RUN_TEST(test_a_new_auto_unload_right_after_a_stall_gets_its_own_stall_window);
     RUN_TEST(test_an_auto_unload_that_blocks_stops_1s_after_the_block);
     RUN_TEST(test_a_normal_auto_unload_is_not_limited);
     RUN_TEST(test_the_manual_empty_pull_has_no_stall_limit);
