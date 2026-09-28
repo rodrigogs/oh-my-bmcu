@@ -531,6 +531,9 @@ static bool g_adc_stale = false;
 
 static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 {
+#if !BMCU_DM_TWO_MICROSWITCH
+    (void)now_ticks;  // only the gesture-load block below uses it
+#endif
     const float *data = ADC_DMA_get_value();
 
     // mapowanie ADC -> kanały

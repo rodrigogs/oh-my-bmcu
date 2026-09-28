@@ -38,6 +38,16 @@ extern bool    filament_channel_inserted[4];
 #define BMCU_ONLINE_LED_FILAMENT_RGB 0
 #endif
 
+// platformio.ini: -DBMCU_SOFT_LOAD=1 (soft load force curve)
+#ifndef BMCU_SOFT_LOAD
+#define BMCU_SOFT_LOAD 0
+#endif
+
+// platformio.ini: -DBMCU_P1S=1 (P1 / X1 / P2 load force curve)
+#ifndef BMCU_P1S
+#define BMCU_P1S 0
+#endif
+
 #ifndef motion_control_ams_num
 #define motion_control_ams_num BAMBU_BUS_AMS_NUM
 #endif
