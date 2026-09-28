@@ -474,6 +474,59 @@ static void test_online_detect_is_answered_again_after_a_link_loss(void)
     ASSERT_REPLY(kOnlineDetectFirst);
 }
 
+// ---- Frames too short for their handler (bambubus_frame_len.h) ----
+
+// A CRC-valid 0x03 of 10 bytes, 3D C5 0A CRC8 03 00 00 FF CRC16: its motion flag would be the CRC16's
+// low byte. The channel restored at boot is loaded and idle; the frame reads as a reset (channel FF,
+// state 00) and used to clear it, with a reply. Now it is dropped as a CRC failure is: no reply,
+// nothing changed. With the motion flag inside the payload (11 bytes) the same request is handled.
+static void test_a_motion_frame_without_its_flag_changes_nothing(void)
+{
+    g_loaded_ch = 0u;
+    const uint8_t p[] = {0x03, BAMBU_BUS_AMS_NUM, 0x00, 0xFF};
+    uint8_t f[16];
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, short_frame(f, p, (int)sizeof(p))));
+    TEST_ASSERT_EQUAL_HEX8(0x00, g_loaded_ch);
+    TEST_ASSERT_EQUAL_UINT8(0, package_num);
+
+    const uint8_t p11[] = {0x03, BAMBU_BUS_AMS_NUM, 0x00, 0xFF, 0x00};
+    TEST_ASSERT_EQUAL_INT(44, exchange(f, short_frame(f, p11, (int)sizeof(p11))));
+    ASSERT_REPLY(kReplyIdle);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, g_loaded_ch);
+}
+
+// The printer's poll cut before its channel byte (11 bytes): the reply used to report the CRC16's
+// low byte as the requested channel. Now no reply; with the channel (12 bytes) the poll is answered.
+static void test_a_poll_without_its_channel_gets_no_reply(void)
+{
+    const uint8_t p[] = {0x04, BAMBU_BUS_AMS_NUM, 0x01, 0x00, 0x03};
+    uint8_t f[16];
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, short_frame(f, p, (int)sizeof(p))));
+    TEST_ASSERT_EQUAL_UINT8(0, package_num);
+
+    const uint8_t p12[] = {0x04, BAMBU_BUS_AMS_NUM, 0x01, 0x00, 0x03, 0xFF};
+    TEST_ASSERT_EQUAL_INT(60, exchange(f, short_frame(f, p12, (int)sizeof(p12))));
+    TEST_ASSERT_EQUAL_HEX8(0xFF, g_tx[12]); // the requested channel
+}
+
+// A confirm one byte short of the ID (25 bytes) does not register, and the next probe is answered; the
+// shortest one holding the whole ID (26 bytes) registers.
+static void test_a_confirm_without_the_whole_id_does_not_register(void)
+{
+    TEST_ASSERT_EQUAL_INT(29, probe());
+    uint8_t p[20] = {0x05, 0x01, BAMBU_BUS_AMS_NUM};
+    memcpy(p + 3, g_tx + 7, 17);
+    uint8_t f[32];
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, short_frame(f, p, 19)));
+    TEST_ASSERT_EQUAL_INT(29, probe());
+    ASSERT_REPLY(kOnlineDetectNext);
+
+    memcpy(p + 3, g_tx + 7, 17);
+    TEST_ASSERT_EQUAL_INT(29, exchange(f, short_frame(f, p, 20)));
+    ASSERT_REPLY(kOnlineDetectConfirm);
+    TEST_ASSERT_EQUAL_INT(0, probe());
+}
+
 // ---- Long replies ----
 
 static void test_version_reply(void)
@@ -527,6 +580,9 @@ int main(int, char **)
     RUN_TEST(test_online_detect_prefix_phases);
     RUN_TEST(test_online_detect_confirm_of_another_id_gets_no_reply);
     RUN_TEST(test_online_detect_is_answered_again_after_a_link_loss);
+    RUN_TEST(test_a_motion_frame_without_its_flag_changes_nothing);
+    RUN_TEST(test_a_poll_without_its_channel_gets_no_reply);
+    RUN_TEST(test_a_confirm_without_the_whole_id_does_not_register);
     RUN_TEST(test_version_reply);
     RUN_TEST(test_mc_online_reply);
     RUN_TEST(test_serial_number_reply);
