@@ -474,16 +474,22 @@ static void test_sta_scan_after_a_torn_slot(void)
 // One write from the slot and sequence the firmware has cached: the slot and erase nvm_sta_next_slot
 // gives, then `words` words of the record (2: written; 1: power lost between the two word programs;
 // 0: power lost right after the erase, or before the first program). Returns the slot used. The
-// erase and retry after a failed program is not modelled: programs here do not fail.
+// erase and retry after a failed program is not modelled: programs here do not fail (sta_fw_write
+// below models them).
 static uint32_t sta_erases;
 static uint32_t sta_erases_off_page_start;
+
+static void sta_erase_page_of(uint32_t slot)
+{
+    uint32_t *const page = sta_log + (slot / STA_SLOTS) * PAGE_WORDS;
+    for (uint32_t w = 0u; w < PAGE_WORDS; w++) page[w] = NVM_ERASED_WORD;
+}
 
 static uint32_t sta_write(uint32_t slot, uint16_t seq, uint8_t ch, uint32_t words)
 {
     if (nvm_sta_next_slot(sta_log, STA_LOG_SLOTS, &slot))
     {
-        uint32_t *const page = sta_log + (slot / STA_SLOTS) * PAGE_WORDS;
-        for (uint32_t w = 0u; w < PAGE_WORDS; w++) page[w] = NVM_ERASED_WORD;
+        sta_erase_page_of(slot);
         sta_erases++;
         if (slot % STA_SLOTS != 0u) sta_erases_off_page_start++;
     }
@@ -491,6 +497,59 @@ static uint32_t sta_write(uint32_t slot, uint16_t seq, uint8_t ch, uint32_t word
     nvm_sta_pack(w, seq, ch);
     for (uint32_t i = 0u; i < words; i++) sta_log[slot * STA_WORDS + i] = w[i];
     return slot;
+}
+
+// The whole write with the firmware's RAM cache, which Flash_AMS_state_read fills at boot: a write
+// of the channel the cache says is saved programs nothing, and a program that fails clears that
+// cache, erases its page and retries once. The next sta_prog_fails programs fail and write nothing;
+// erases do not fail.
+static uint16_t sta_cache_seq;
+static uint32_t sta_cache_slot;
+static uint8_t sta_cache_have;
+static uint8_t sta_cache_loaded;
+static uint32_t sta_prog_fails;
+static uint32_t sta_progs;
+
+static void sta_fw_read(void)
+{
+    sta_cache_have = nvm_sta_scan(sta_log, STA_LOG_SLOTS, &sta_cache_loaded, &sta_cache_seq, &sta_cache_slot)
+                         ? 1u
+                         : 0u;
+}
+
+static bool sta_prog(uint32_t slot, const uint32_t *w)
+{
+    sta_progs++;
+    if (sta_prog_fails > 0u)
+    {
+        sta_prog_fails--;
+        return false;
+    }
+    for (uint32_t i = 0u; i < STA_WORDS; i++) sta_log[slot * STA_WORDS + i] = w[i];
+    return true;
+}
+
+static bool sta_fw_write(uint8_t loaded_ch)
+{
+    if (sta_cache_have && sta_cache_loaded == loaded_ch) return true;
+
+    uint32_t slot = sta_cache_slot;
+    if (nvm_sta_next_slot(sta_log, STA_LOG_SLOTS, &slot)) sta_erase_page_of(slot);
+    uint32_t w[STA_WORDS];
+    nvm_sta_pack(w, sta_cache_seq, loaded_ch);
+
+    if (!sta_prog(slot, w))
+    {
+        sta_cache_have = 0u;
+        sta_erase_page_of(slot);
+        if (!sta_prog(slot, w)) return false;
+    }
+
+    sta_cache_seq = (uint16_t)(sta_cache_seq + 1u);
+    sta_cache_slot = (slot + 1u) % STA_LOG_SLOTS;
+    sta_cache_have = 1u;
+    sta_cache_loaded = loaded_ch;
+    return true;
 }
 
 // Slot 36 holds the newest record and slot 37 a torn one (the reset in the test above). The next
@@ -644,6 +703,45 @@ static void test_sta_power_loss_during_writes_keeps_the_last_record(void)
     TEST_ASSERT_EQUAL_UINT32(0u, sta_erases_off_page_start);
 }
 
+// The newest record (channel 2) in slot 33, page 1; the one before it at the end of page 0 (slot
+// 31, channel 1). An unload writes 0xFF: the program of slot 34 fails, the erase of page 1 takes
+// slot 33 with it, and the retry fails too, so the log now restores channel 1. Loading channel 2
+// again must write it, not take it as already saved from the cache; it goes into slot 34 with the
+// next sequence. With one failed program the retry saves the unload and the cache holds it.
+static void test_sta_failed_retry_after_the_erase_does_not_look_saved(void)
+{
+    uint8_t ch;
+    uint16_t next_seq;
+    uint32_t next_slot;
+
+    for (uint32_t s = 0u; s < 34u; s++) sta_record(s, (uint16_t)(100u + s), (s == 33u) ? 2u : (s == 31u) ? 1u : 3u);
+    sta_fw_read();
+    sta_progs = 0u;
+
+    sta_prog_fails = 2u;
+    TEST_ASSERT_FALSE(sta_fw_write(0xFFu));
+    TEST_ASSERT_EQUAL_UINT32(2u, sta_progs);
+    TEST_ASSERT_TRUE(sta_scan(&ch, &next_seq, &next_slot));
+    TEST_ASSERT_EQUAL_UINT8(1u, ch);
+
+    TEST_ASSERT_TRUE(sta_fw_write(2u));
+    TEST_ASSERT_EQUAL_UINT32(3u, sta_progs);
+    TEST_ASSERT_TRUE(sta_scan(&ch, &next_seq, &next_slot));
+    TEST_ASSERT_EQUAL_UINT8(2u, ch);
+    TEST_ASSERT_EQUAL_UINT16(135u, next_seq);
+    TEST_ASSERT_EQUAL_UINT32(35u, next_slot);
+
+    sta_prog_fails = 1u;
+    TEST_ASSERT_TRUE(sta_fw_write(0xFFu));
+    TEST_ASSERT_EQUAL_UINT32(5u, sta_progs);
+    TEST_ASSERT_TRUE(sta_fw_write(0xFFu));
+    TEST_ASSERT_EQUAL_UINT32(5u, sta_progs);
+    TEST_ASSERT_TRUE(sta_scan(&ch, &next_seq, &next_slot));
+    TEST_ASSERT_EQUAL_HEX8(0xFFu, ch);
+    TEST_ASSERT_EQUAL_UINT16(136u, next_seq);
+    TEST_ASSERT_EQUAL_UINT32(36u, next_slot);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -664,5 +762,6 @@ int main(void)
     RUN_TEST(test_sta_torn_last_slot_wraps_to_slot_0);
     RUN_TEST(test_sta_writes_then_reset_read_back);
     RUN_TEST(test_sta_power_loss_during_writes_keeps_the_last_record);
+    RUN_TEST(test_sta_failed_retry_after_the_erase_does_not_look_saved);
     return UNITY_END();
 }

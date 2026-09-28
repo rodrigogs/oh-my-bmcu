@@ -338,6 +338,9 @@ bool Flash_AMS_state_write(uint8_t loaded_ch)
 
     if (!flash_prog_words(addr, buf, NVM_STA_SLOT_WORDS))
     {
+        // The erase can take the newest record with it (it is in this page unless slot is the
+        // page's first): until a write succeeds, the cached channel must not look already saved.
+        g_sta_have_saved = 0u;
         if (!flash256_erase(page)) return false;
         if (!flash_prog_words(addr, buf, NVM_STA_SLOT_WORDS)) return false;
     }
