@@ -6,7 +6,8 @@
 // The send (load) stops on a stalled gear or after 10 m as before, with no time budget, and a
 // normal A1 load is never stopped. The idle control's push brakes on a stalled gear at any PWM it
 // pushes with, or after 10 s, until it stops pushing, red unless it stopped at the deadband's edge;
-// a push that takes up the buffer's slack never.
+// a push that takes up the buffer's slack never. A stale ADC stream brakes a channel without
+// changing its motion, so a send or idle push stopped by its limit stays stopped once it is fresh.
 //
 // Each test drives the decision functions in 1 ms main-loop passes, the way Motion_control.cpp
 // calls them. The simulated gear gives both of the firmware's position sources: the AS5600 count
@@ -459,20 +460,15 @@ static void test_bus_offline_gap_is_not_counted(void)
 // ---- adapted from Motion_control.cpp: a pull back pass while the ADC stream is stale ----
 // ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /g_pull_speed_set\[i\] = -v;/ to /filament_motion_pull, 100/ ----
 // ---- anchor: _MOTOR_CONTROL from /if \(motion == _motion\) return;/ to /if \(motion == _motion\) return;/ ----
-// ---- anchor: _MOTOR_CONTROL from /const bool keep_pwm =/ to /x_prev\[CHx\] = 0\.0f;/ ----
-// ---- anchor: motor_brake_now ----
+// ---- anchor: motor_brake_hold ----
 // ---- anchor: motor_motion_run from /if \(g_adc_stale\)/ to /return;/ ----
 // motor_motion_filamnet_pull_back_to_online_key checks the pull back with x_prev, then sets the
-// pull, which zeroes x_prev when it changes the motion (set_motion, keep_pwm false); then the stale
-// block brakes the channel through motor_brake_now, which sets stop and zeroes x_prev too.
-static bool s_pulling;  // MOTOR_CONTROL[i].motion == filament_motion_pull
-
+// pull, which the channel still has (set_motion changes nothing); then the stale block brakes the
+// channel where it is (motor_brake_hold), which zeroes x_prev.
 static ml_result stale_pull_back_pass(float *x_prev)
 {
     const ml_result r = ml_pull_back_check(&g, now, s_cnt, *x_prev, SOLO_RETRACT_M, 0.0f, 1u);
-    if (!s_pulling) *x_prev = 0.0f;  // set_motion(pull): a change of motion only after a brake
-    *x_prev   = 0.0f;                // motor_brake_now: stop, x_prev 0
-    s_pulling = false;
+    *x_prev = 0.0f;  // motor_brake_hold: x_prev 0, still pulling
     return r;
 }
 
@@ -480,10 +476,9 @@ static void test_stale_adc_during_a_pull_back_is_not_a_stall(void)
 {
     // A pull back at 1000 PWM, then the ADC stream is stale for 1.5 s: every pass brakes the motor
     // and the gear stands still. The guard reads the last pull PWM on the first stale pass and PWM 0
-    // from the second on (set_motion from stop and the brake both zero x_prev), so the stall window
-    // restarts on every pass; the time budget still runs.
+    // from the second on (the brake zeroes x_prev), so the stall window restarts on every pass; the
+    // time budget still runs.
     ml_pull_back_start(&g, now, s_cnt, SOLO_RETRACT_M);
-    s_pulling = true;
     float x_prev = 1000.0f;
     for (uint32_t t = 1; t <= 1500u; t++)
     {
@@ -1258,6 +1253,120 @@ static void test_idle_push_fault_holds_until_the_control_stops_pushing(void)
     TEST_ASSERT_EQUAL_UINT8(0u, ip.fault);
 }
 
+// ---- Send and idle push limits across a stale ADC stream ----
+
+// ---- adapted from Motion_control.cpp: set_motion's resets of the send and idle push limits, and a pass while the ADC stream is stale ----
+// ---- anchor: _MOTOR_CONTROL from /if \(motion == _motion\) return;/ to /pull_start_ms = 0;/ ----
+// ---- anchor: run from /if \(!send_len_abort &&/ to /return;/ ----
+// ---- anchor: motor_brake_hold ----
+// ---- anchor: motor_motion_run from /if \(g_adc_stale\)/ to /return;/ ----
+// A change of motion (set_motion) ends the idle push's limit (ml_idle_push_reset), and entering or
+// leaving the send clears send_len_abort, entering it with a new guard; setting the same motion
+// again changes nothing. run()'s send brakes from the pass its guard hits a limit until then. On a
+// stale pass motor_motion_switch sets the printer's motion, then the stale block brakes the channel
+// where it is (motor_brake_hold: x_prev 0, the motion unchanged) and run() does not run.
+typedef enum { CH_STOP, CH_SEND, CH_IDLE } ch_motion; // MOTOR_CONTROL[i].motion, the ones used here
+static ch_motion s_motion;
+static uint8_t   s_send_abort;  // send_len_abort
+
+static void ch_set_motion(ch_motion m)
+{
+    if (s_motion == m) return;
+    const ch_motion prev = s_motion;
+    s_motion = m;
+    ml_idle_push_reset(&ip);
+    if (m == CH_SEND)
+    {
+        s_send_abort = 0u;
+        ml_send_start(&g, now, s_cnt);
+    }
+    if ((prev == CH_SEND) && (m != CH_SEND)) s_send_abort = 0u;
+}
+
+static void stale_pass(ch_motion printer)
+{
+    now++;
+    ch_set_motion(printer);
+    ip_pwm = 0.0f;
+}
+
+// One fresh send pass against a gear held still (+-1 count of jitter): the guard with the PWM of
+// the last pass, then the send's PID unless the guard has stopped it. Returns the PWM it drives.
+static float send_pass_held(send_pid_model *m, uint32_t t, uint32_t held_cnt, float pwm_prev)
+{
+    now++;
+    ch_set_motion(CH_SEND);  // motor_motion_switch: send_out
+    const uint32_t p = ((t & 1u) != 0u) ? (held_cnt + 1u) : (held_cnt - 1u);
+    if (!s_send_abort && ml_is_limit(check_send(p, pwm_prev))) s_send_abort = 1u;
+    return s_send_abort ? 0.0f : send_pwm_blocked(m, t);
+}
+
+static void test_stale_adc_keeps_a_send_stopped_by_its_limit(void)
+{
+    // A load into a tangle: the send stops ML_STALL_MS after its PWM reached 800 (1.69 s in). The
+    // ADC stream then stops for 1 s while the printer still sends send_out. Fresh again, the send
+    // stays stopped for as long as the printer keeps sending: no new 1.7 s at up to 1000 PWM into
+    // the same tangle. The stale passes used to stop the channel, and the next send_out started a
+    // new guard.
+    s_motion = CH_STOP;
+    ch_set_motion(CH_SEND);
+    const uint32_t held = s_cnt;
+    send_pid_model m = {0.0f, 0.0f};
+    float pwm = 0.0f;
+    uint32_t t = 1u;
+    for (; (t <= 60000u) && !s_send_abort; t++)
+        pwm = send_pass_held(&m, t, held, pwm);
+    TEST_ASSERT_EQUAL_UINT32(692u + ML_STALL_MS + 1u, t);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, pwm);
+
+    for (uint32_t i = 0; i < 1000u; i++)
+        stale_pass(CH_SEND);
+    TEST_ASSERT_EQUAL_UINT8(1u, s_send_abort);
+    pwm = 0.0f;
+    for (uint32_t i = 0; i < 60000u; i++, t++)
+    {
+        pwm = send_pass_held(&m, t, held, pwm);
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, pwm);
+    }
+
+    // The printer's next command (here idle during the stale spell) and a new send_out start a new
+    // guard, as on fresh passes.
+    stale_pass(CH_IDLE);
+    TEST_ASSERT_EQUAL_UINT8(0u, s_send_abort);
+    stale_pass(CH_SEND);
+    TEST_ASSERT_EQUAL_UINT32(ML_STALL_MS, run_move_then_block(check_send, 0.0f, 0u, 1000.0f));
+}
+
+static void test_stale_adc_keeps_an_idle_push_braked_by_its_limit(void)
+{
+    // A parked channel whose filament is held tight: its idle push is braked, red, ML_STALL_MS after
+    // it starts. The ADC stream then stops for 1 s. Fresh again, with the buffer still below 30 %,
+    // it stays braked and red: no new push with the whole budget. The stale passes used to stop the
+    // channel (ml_idle_push_reset) and the next pass's idle control started a new one.
+    s_motion = CH_IDLE;
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle_held(20.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+
+    for (uint32_t i = 0; i < 1000u; i++)
+        stale_pass(CH_IDLE);
+    TEST_ASSERT_EQUAL_UINT8(ML_IDLE_PUSH_FAULT, ip.fault);
+    for (uint32_t i = 0; i < 60000u; i++)
+    {
+        TEST_ASSERT_TRUE(idle_pass_at(20.0f, ((i & 1u) != 0u) ? (s_cnt + 1u) : (s_cnt - 1u)));
+        TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, ip_pwm);
+    }
+
+    // The printer loading from the channel during the stale spell (send_out, then idle again) ends
+    // the limit, as on fresh passes: the next push starts over, and is braked ML_STALL_MS later.
+    stale_pass(CH_SEND);
+    stale_pass(CH_IDLE);
+    TEST_ASSERT_EQUAL_UINT8(ML_IDLE_PUSH_RUN, ip.fault);
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle_held(20.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+}
+
 // ---- Unfinished unload fault (status LED) ----
 
 static void test_only_a_limit_is_an_unload_fault(void)
@@ -1352,6 +1461,8 @@ int main(void)
     RUN_TEST(test_idle_push_that_stops_at_the_deadband_edge_shows_no_fault);
     RUN_TEST(test_idle_edge_brake_ends_only_below_27);
     RUN_TEST(test_idle_push_fault_holds_until_the_control_stops_pushing);
+    RUN_TEST(test_stale_adc_keeps_a_send_stopped_by_its_limit);
+    RUN_TEST(test_stale_adc_keeps_an_idle_push_braked_by_its_limit);
     RUN_TEST(test_only_a_limit_is_an_unload_fault);
     RUN_TEST(test_unload_fault_stays_until_filament_out_or_next_move);
     RUN_TEST(test_stalled_pull_sets_the_fault_and_a_good_retry_clears_it);

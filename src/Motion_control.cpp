@@ -2512,6 +2512,19 @@ static inline void stu_apply_baseline(int error, uint64_t now_ms)
 }
 
 
+// Brakes channel i at once and leaves its motion as it is: PWM 0, both PIDs cleared, pwm_zeroed set
+// and x_prev 0. Without a change of motion set_motion() resets nothing, so the latches and limits a
+// change of motion clears (the 20 s full-force latch, send_len_abort and its guard, the idle push's
+// fault) stay set.
+static void motor_brake_hold(uint8_t i)
+{
+    MOTOR_CONTROL[i].PID_speed.clear();
+    MOTOR_CONTROL[i].PID_pressure.clear();
+    MOTOR_CONTROL[i].pwm_zeroed = 1;
+    _MOTOR_CONTROL::x_prev[i] = 0.0f;
+    Motion_control_set_PWM(i, 0);
+}
+
 // Stops and brakes channel i at once, into the state run()'s timeout-to-stop branch leaves: PWM 0,
 // both PIDs cleared, pwm_zeroed set and x_prev 0, whatever the motion was. set_motion(stop) alone
 // never writes the PWM, sets pwm_zeroed to 0 on a change of motion, and returns early when the
@@ -2519,11 +2532,7 @@ static inline void stu_apply_baseline(int error, uint64_t now_ms)
 static void motor_brake_now(uint8_t i, uint64_t now_ms)
 {
     MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, now_ms);
-    MOTOR_CONTROL[i].PID_speed.clear();
-    MOTOR_CONTROL[i].PID_pressure.clear();
-    MOTOR_CONTROL[i].pwm_zeroed = 1;
-    _MOTOR_CONTROL::x_prev[i] = 0.0f;
-    Motion_control_set_PWM(i, 0);
+    motor_brake_hold(i);
 }
 
 static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
@@ -2658,18 +2667,23 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
     }
 
     // Stale ADC stream: no channel drives on frozen buffer and switch readings. Every motor is
-    // braked as for a bad AS5600 (motor_brake_now), a running auto-unload ends, and every status LED
-    // blinks blue (250 ms on, 250 ms off) with the buffer LED off, until a new half-buffer comes.
+    // braked where it is (motor_brake_hold), a running auto-unload ends, and every status LED blinks
+    // blue (250 ms on, 250 ms off) with the buffer LED off, until a new half-buffer comes.
     // Motion_control_run restarts the stream every ADC_STREAM_RESTART_MS (500 ms) meanwhile.
+    // The motion stays the one motor_motion_switch just set, so a stale spell is no change of motion:
+    // a silent 20 s latch, a send stopped by its limit and an idle push braked by its limit are still
+    // braked once the stream is back (a stop here, and the printer's motion again on the next pass,
+    // cleared them and gave the channel a new budget against the same blockage). A printer that
+    // changes the motion meanwhile still clears them through set_motion.
     // The pull back and redetect guards run before this block and read x_prev: from the second stale
-    // pass on it is 0 (their set_motion from stop and this brake both zero it), so a stale stream is
-    // no stall; their time budgets still run.
+    // pass on it is 0 (this brake zeroes it), so a stale stream is no stall; their time budgets still
+    // run.
     if (g_adc_stale)
     {
         const uint8_t blue = (((time_now / 250ull) & 1ull) == 0ull) ? 0xFFu : 0x00u;
         for (uint8_t i = 0; i < kChCount; i++)
         {
-            motor_brake_now(i, time_now);
+            motor_brake_hold(i);
             auto_unload_reset(&g_auto_unload[i]);
             MC_STU_RGB_set(i, 0x00u, 0x00u, blue);
             MC_PULL_ONLINE_RGB_set(i, 0x00u, 0x00u, 0x00u);
