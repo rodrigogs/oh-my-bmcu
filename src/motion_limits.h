@@ -263,10 +263,13 @@ static inline void ml_auto_unload_start(motion_guard *g, uint64_t now_ms, uint32
 // A limit hit with the rounded buffer at ML_IDLE_EDGE_PCT or above (28-29 %, the PID's last 512-562
 // PWM, where a gear under heavy drag may stop short of its breakaway, as the on_use anti-stall leaves
 // a gear within 2 % of its target) only brakes: the channel is held as if in the deadband, with no
-// fault shown. Deeper, it brakes with the status LED red.
-#define ML_IDLE_STALL_PWM   420.0f
-#define ML_IDLE_PUSH_MAX_MS 10000u
-#define ML_IDLE_EDGE_PCT    28u
+// fault shown. Deeper, it brakes with the status LED red. The edge brake has one point of
+// hysteresis: it holds down to a rounded 27 % (ML_IDLE_EDGE_EXIT_PCT), so a gear stopped at 28 %
+// is not pushed again, and then shown red, by ADC noise across 27.5 %.
+#define ML_IDLE_STALL_PWM     420.0f
+#define ML_IDLE_PUSH_MAX_MS   10000u
+#define ML_IDLE_EDGE_PCT      28u
+#define ML_IDLE_EDGE_EXIT_PCT (ML_IDLE_EDGE_PCT - 1u)
 
 typedef enum
 {
@@ -293,8 +296,9 @@ static inline void ml_idle_push_reset(ml_idle_push_t *s)
 // (x_prev). From the pass a limit is hit the channel is braked for as long as the control still
 // pushes. Any pass on which it does not (the buffer back in the deadband, or above it) ends the push
 // and clears the limit; ml_idle_push_reset() does when the channel leaves the idle control or its
-// filament the switches. An edge brake also ends when the buffer falls below ML_IDLE_EDGE_PCT (more
-// filament drawn): a new push, with the higher PWM, its whole budget and a new stall window.
+// filament the switches. An edge brake also ends when the buffer falls below ML_IDLE_EDGE_EXIT_PCT
+// (rounded 26 % or less: more filament drawn): a new push, with the higher PWM, its whole budget and
+// a new stall window. A one-point dip to 27 % keeps the brake.
 static inline ml_idle_push_act ml_idle_push_pass(ml_idle_push_t *s, bool push, uint8_t pct, uint64_t now_ms,
                                                  uint32_t pos_cnt, float pwm)
 {
@@ -303,7 +307,7 @@ static inline ml_idle_push_act ml_idle_push_pass(ml_idle_push_t *s, bool push, u
         ml_idle_push_reset(s);
         return ML_IDLE_PUSH_RUN;
     }
-    if ((s->fault == ML_IDLE_PUSH_BRAKE) && (pct < ML_IDLE_EDGE_PCT)) ml_idle_push_reset(s);
+    if ((s->fault == ML_IDLE_PUSH_BRAKE) && (pct < ML_IDLE_EDGE_EXIT_PCT)) ml_idle_push_reset(s);
     if (s->fault != ML_IDLE_PUSH_RUN) return (ml_idle_push_act)s->fault;
     if (!s->pushing)
     {

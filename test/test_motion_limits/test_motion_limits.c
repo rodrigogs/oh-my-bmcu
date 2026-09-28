@@ -1137,6 +1137,46 @@ static void test_idle_push_that_stops_at_the_deadband_edge_shows_no_fault(void)
     TEST_ASSERT_FALSE(idle_pass(29.5f, 0.0f));
 }
 
+static void test_idle_edge_brake_ends_only_below_27(void)
+{
+    // A gear held at 28.0 %, edge-braked. ADC noise across 27.5 % (rounded 27) keeps the brake, with
+    // no new push and no red, however often it comes. Before, a single such pass started a new push
+    // at about 575 PWM; with the gear still held and a reading of 27 on the pass its stall check hit,
+    // the slot went red: a false fault.
+    TEST_ASSERT_EQUAL_UINT8(27u, ML_IDLE_EDGE_EXIT_PCT);
+    TEST_ASSERT_EQUAL_UINT8(27u, idle_pct(26.5f));
+    TEST_ASSERT_EQUAL_UINT8(26u, idle_pct(26.49f));
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle_held(28.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_BRAKE, ip_act);
+    const uint32_t held = s_cnt;
+    for (uint32_t i = 0; i < 120000u; i++)
+    {
+        // alternating with 28.0 % for 60 s, then 27.4 % on every pass for 60 s
+        const float pct = ((i < 60000u) && ((i & 1u) != 0u)) ? 28.0f : 27.4f;
+        TEST_ASSERT_TRUE(idle_pass_at(pct, ((i & 1u) != 0u) ? (held + 1u) : (held - 1u)));
+        TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_BRAKE, ip_act);
+        TEST_ASSERT_EQUAL_FLOAT(0.0f, ip_pwm);
+    }
+
+    // A real drop to 26.4 % (rounded 26, more filament drawn) ends it: a new push, with the higher PWM
+    // and its whole budget, then the red at its time limit.
+    TEST_ASSERT_FALSE(idle_pass(26.4f, 30.0f));
+    TEST_ASSERT_EQUAL_FLOAT(idle_push_pwm(26.4f), ip_pwm);
+    TEST_ASSERT_EQUAL_UINT32(0u, run_idle(26.4f, 30.0f, ML_IDLE_PUSH_MAX_MS - 1u));
+    TEST_ASSERT_EQUAL_UINT32(1u, run_idle(26.4f, 30.0f, 1u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+
+    // With the gear still held there, the new push goes red ML_STALL_MS after it starts.
+    setUp();
+    idle_reset();
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle_held(28.0f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_BRAKE, ip_act);
+    TEST_ASSERT_TRUE(idle_pass_at(27.4f, s_cnt));
+    TEST_ASSERT_EQUAL_UINT32(1u + ML_STALL_MS, run_idle_held(26.4f, 60000u));
+    TEST_ASSERT_EQUAL_INT(ML_IDLE_PUSH_FAULT, ip_act);
+}
+
 static void test_idle_push_fault_holds_until_the_control_stops_pushing(void)
 {
     // Stalled: braked (0 PWM) and red on every pass while the buffer stays below 30 %, for as long
@@ -1264,6 +1304,7 @@ int main(void)
     RUN_TEST(test_idle_push_that_moves_but_never_ends_stops_at_its_budget);
     RUN_TEST(test_normal_idle_pushes_are_not_limited);
     RUN_TEST(test_idle_push_that_stops_at_the_deadband_edge_shows_no_fault);
+    RUN_TEST(test_idle_edge_brake_ends_only_below_27);
     RUN_TEST(test_idle_push_fault_holds_until_the_control_stops_pushing);
     RUN_TEST(test_only_a_limit_is_an_unload_fault);
     RUN_TEST(test_unload_fault_stays_until_filament_out_or_next_move);
