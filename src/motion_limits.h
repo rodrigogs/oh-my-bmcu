@@ -222,14 +222,19 @@ static inline void ml_dm_s2_start(motion_guard *g, uint64_t now_ms, uint32_t pos
 // latched at if higher) it drives 800 PWM or more only when it pushes with the buffer below 83.7 %,
 // under the 85 % it latched at, when it retracts above about 92.0 % (800-850 PWM,
 // retract_mag_from_err(err, 850), 2 points over the target), or in the anti-stall's 850 PWM kick.
-// The guard counts the retract too (ml_absf), and in all three the anti-stall rests 0.5 s after
-// 0.8 s without motion, under ML_STALL_MS, so a buffer that stops between 83.7 % and 92 % is not a
-// stall. With BMCU_SOFT_LOAD (latch and target 75 %, so the target is the pct it latched at) the
-// push is 800 PWM or more below 62.6 % and the retract 2 points over that pct (about 77.0 % for a
-// latch at 75 %). On BMCU_P1S (latch 88 %, target 95 %) the push is 1000 PWM at the latch point
-// and 800 PWM or more up to 90.67 %, so the hold drives above 800 PWM at and just above the latch,
-// bounded by the same rest; its retract reaches 800 PWM only above about 97.0 %, where the send has
-// braked (MC_LOAD_S1_HARD_STOP_PCT).
+// The guard counts the retract too (ml_absf). In all three the anti-stall rests 0.5 s after 0.8 s
+// without motion, under ML_STALL_MS, but only for a gear that reads still: it counts while the
+// speed reads under 1 mm/s, and +-1 count of AS5600 jitter on the 1 ms reads is 5.75 mm/s, so a
+// stopped gear that jitters gets neither the kick nor the rest, and the guard stops the send
+// ML_STALL_MS after its last full 1 mm (test_a1_hold_at_800_pwm_or_more_with_jitter_is_a_stall).
+// A buffer that stops between 83.7 % and 92 % is not a stall because the hold drives under
+// ML_STALL_PWM there, not because of the rest. With BMCU_SOFT_LOAD (latch and target 75 %, so the
+// target is the pct it latched at) the push is 800 PWM or more below 62.6 % and the retract 2
+// points over that pct (about 77.0 % for a latch at 75 %). On BMCU_P1S (latch 88 %, target 95 %)
+// the push is 1000 PWM at the latch point and 800 PWM or more up to 90.67 %, so the hold drives
+// above 800 PWM at and just above the latch: a buffer that stops there is bounded by the same rest
+// only without jitter, and with it the guard stops the send; its retract reaches 800 PWM only above
+// about 97.0 %, where the send has braked (MC_LOAD_S1_HARD_STOP_PCT).
 // No time budget: how long the printer sends is its own decision, and its load timeout reports a
 // send that stopped. ML_SEND_MAX_M of gear travel is upstream's cap (a gear that turns without
 // feeding, e.g. slipping on the filament).

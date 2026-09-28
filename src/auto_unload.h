@@ -17,7 +17,9 @@
 // - Manual empty pull (upstream V10.4, "retraction when the buffer is pulled up manually, even when
 //   there is no filament inside"): no filament at the switches and the buffer above
 //   AUTO_UNLOAD_EMPTY_PULL_PCT: a retract at 700 PWM for as long as the buffer reads above it. It
-//   has no stall check: 700 PWM is under ML_STALL_PWM, and the hand that holds the buffer up ends it.
+//   has no stall check: with no filament at the switches the gear has nothing to stall on (and
+//   700 PWM is under ML_STALL_PWM). A hand that holds the buffer up keeps it running; it ends only
+//   when the buffer reads 80% or less (let go, or a reading that drops).
 //
 // Offline (motor_motion_run's error != 0: from boot until the first heartbeat, and after a lost
 // link) motor_motion_run stops every channel, but an auto-unload that was already running kept its

@@ -251,10 +251,11 @@ static float dm_run(int CHx, uint64_t now_ms)
                                 }
                             }
 
-                            // In every state but IDLE, ks is 1 or 2 here: on a 'none' pass motor_motion_run's
-                            // prelude has already moved the state to IDLE (dm_none_hold, or the DM_REARM_EMPTY
-                            // reset), so the ks == 0u branches below are unreachable. They are upstream's, kept
-                            // unchanged to keep the upstream diff small.
+                            // In every state but IDLE, ks is 1, 2 or 3 here, never 0 (3: between the 'none'
+                            // threshold and 1.4 V, dm_key_to_state): on a 'none' pass motor_motion_run's prelude
+                            // has already moved the state to IDLE (dm_none_hold, or the DM_REARM_EMPTY reset), so
+                            // the ks == 0u branches below are unreachable. They are upstream's, kept unchanged to
+                            // keep the upstream diff small. A branch that is not ks == 1u is not ks == 2u.
                             switch (dm_auto_state[CHx])
                             {
                             case DM_AUTO_S1_DEBOUNCE:
