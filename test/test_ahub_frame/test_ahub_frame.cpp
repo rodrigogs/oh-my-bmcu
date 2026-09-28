@@ -48,6 +48,7 @@ static void test_any_other_value_is_stored_as_none(void)
 static int frame_len(int length) { return length * 4 + 12; }
 
 // ---- adapted from ahub_bus.cpp: the last byte each set handler reads (data_ptr = buf + 4) ----
+// ---- anchor: ahubus_slave_get_package_set from /data_ptr = buf \+ 4/ to /default:/ ----
 // filament_info: the 44-byte info at data_ptr[4..47], the channel at data_ptr[48].
 static int filament_info_last_read(void) { return 4 + 48; }
 // dryer_stu: dryer_power..dryer_time_left at data_ptr[4..7], the channel at data_ptr[8].

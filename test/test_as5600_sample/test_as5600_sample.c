@@ -18,6 +18,7 @@
 // ===== distance/speed tracker =====
 
 // ---- adapted from Motion_control.cpp: AS5600_distance_updata's use of as5600_track_sample(), in counts ----
+// ---- anchor: AS5600_distance_updata ----
 // One channel as AS5600_distance_updata runs it: counts moved, sum of |moves| (what DM Stage-2
 // autoload adds up), speed in counts per ms (held on a skip, 0 on a new baseline).
 typedef struct

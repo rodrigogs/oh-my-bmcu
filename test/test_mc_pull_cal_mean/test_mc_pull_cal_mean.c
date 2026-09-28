@@ -19,6 +19,7 @@
 #define N MC_PULL_CAL_IDLE_SAMPLES
 
 // ---- adapted from ADC_DMA.cpp: the full-filter reading scale ----
+// ---- anchor: kScale128 ----
 // A full-filter reading is the sum of 128 samples of both 12-bit
 // ADCs (0..1,048,320 counts, 256 per ADC LSB) times kScale128.
 #define ACC_MAX     1048320u
@@ -108,6 +109,7 @@ static uint32_t acc_for_volts(double v)
 }
 
 // ---- adapted from MC_PULL_calibration.cpp: MC_PULL_calibration_boot's idle sums, float and (before) double ----
+// ---- anchor: MC_PULL_calibration_boot from /float sum_raw\[4\]/ to /sum_key\[ch\] \+=/ ----
 static float sum_readings(const float *r)
 {
     float sum = 0.0f;

@@ -654,6 +654,7 @@ static constexpr float    MANUAL_EMPTY_PULL_PWM      = 700.0f;
 // ---- end of the Motion_control.cpp copy ----
 
 // ---- adapted from Motion_control.cpp: motor_motion_run's auto-unload call and drive choice ----
+// ---- anchor: motor_motion_run from /au_in_t au;/ to /MOTOR_CONTROL\[i\]\.run\(/ ----
 // What motor_motion_run does for a channel after its DM pass and the status LED's baseline, with the
 // link up, the AS5600 read and the ADC stream fresh (adc_stream.h): auto_unload_pass() decides
 // whether the auto-unload (a retract at AUTO_UNLOAD_PWM_PULL, then the Stage-2 guard's pass
@@ -689,6 +690,7 @@ static au_drive_t au_pass(uint8_t i, uint64_t time_now)
 #define KS_NONE  DM_KEY_NONE
 #define KS_BOTH  DM_KEY_BOTH
 // ---- adapted from Motion_control.cpp: dm_key_to_state()'s other two key states ----
+// ---- anchor: dm_key_to_state ----
 #define KS_EXT   2u // external switch only
 #define KS_OTHER 3u
 
@@ -794,6 +796,8 @@ static void pass(void)
     const uint8_t run_stage = dm_s2_run[0].stage;
 
 // ---- adapted from Motion_control.cpp: stu_apply_baseline's DM colour, the unload fault's blink and the auto-unload's purple ----
+// ---- anchor: stu_apply_baseline ----
+// ---- anchor: motor_motion_run from /au_in_t au;/ to /MOTOR_CONTROL\[i\]\.run\(/ ----
     // The status LED's baseline (stu_apply_baseline): red for a failed channel, else off; then the
     // unload fault's red blink (1 s on, 1 s off) while it is kept; what drives the channel sets its
     // colour after it (the auto-unload's is purple).

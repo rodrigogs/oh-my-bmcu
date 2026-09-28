@@ -1,0 +1,63 @@
+# The src/ regions that the 'adapted from' models in test/ are locked to: the sha256 of each region
+# (line endings and trailing whitespace ignored), its file and its anchor. Written by
+#     python3 scripts/check_test_copies.py --relock
+# once the models of every region that changed have been reviewed (scripts/check_test_copies.py).
+f453b56d2e5bea60232354119faeb9fbee948e277c14cbec5b6ea6e452ce9602 src/ADC_DMA.cpp kScale128
+1a679898380e239be1b3fbeba48f2aa3b8efa3b6c6abd153c17e3b59c5ef2f17 src/Flash_saves.cpp Flash_AMS_filament_write
+f70adf52bd26a3d2fb57797502a91d3548c02d28132b5f86e409c3db006d585c src/Flash_saves.cpp Flash_AMS_state_write
+c18cafaa471b82ad96d1797727094ea66ffbb478cd122ca785155679f874f93a src/Flash_saves.cpp Flash_saves_init
+0252fd8398e2bbb7728e58f2bc84033cd0ccbbff53a98a48ffa448e65a7f7b99 src/Flash_saves.cpp crc32_hw_words
+78e9da94aa8a323ff2c3c9ed7f54553f7e72fa31ec65072ca263d6ebc38433f1 src/MC_PULL_calibration.cpp MC_PULL_calibration_boot from /float sum_raw\[4\]/ to /sum_key\[ch\] \+=/
+75571bea7921ff5af8a1819e72793f27e278e5e62538949872f270b72a09d1d2 src/Motion_control.cpp AS5600_distance_updata
+aaabcf27431ad85fc460260ff996df990233cef03ce884a27ff1af4b1938bcbd src/Motion_control.cpp AS5600_distance_updata from /case AS5600_TRACK_MOVE:/ to /as5600_count\[i\] \+=/
+234164ccaad0ec2704cc1166ab8c8e1d332481bbee8e6ef3129e61d41be02f63 src/Motion_control.cpp DM_AUTO_S2_TARGET_M
+d756a836f3d4a551c65728af44810628199c80c21b64e03f6acd22e3c3d33cad src/Motion_control.cpp MC_PULL_DEADBAND_PCT_LOW
+4aa07e18a1c9673e8f7147576cc1e7415a5bc353dc629cdd87774f048854e90d src/Motion_control.cpp MC_PULL_ONLINE_read from /MC_ONLINE_key_stu\[3\] = \(/ to /MC_ONLINE_key_stu\[0\] = \(/
+b5baee4963d0229e0127233cfec8831e8be159dd618ba279b26c3d51e22183ca src/Motion_control.cpp MC_PULL_ONLINE_read from /MC_PULL_DEADBAND_PCT_HIGH\) MC_PULL_stu/ to /MC_PULL_DEADBAND_PCT_LOW\)/
+d78bd736a34c7ed71ef55d089518bfba8af3f75aaac630475bd6c3df590875a6 src/Motion_control.cpp MOTOR_PID
+d595c51e00febd96b23ce55992b6a191c38491195b6f6c5deb7b4fa11006ca26 src/Motion_control.cpp Motion_control_run
+d1a84bb843516f9826f4a9e53478b925603a0c8ca532e3e3c26dc40f7840105a src/Motion_control.cpp Motion_control_run from /\.online = true;/ to /\.online = false;/
+b7c6bed67ec10062ee4993e54c9b6cd0c7c84a81651922ef668af1101edb9f46 src/Motion_control.cpp PULL_RAMP_M
+46e07b21720f51de67a3c3d407856e12462f0f26e926cd9fbc69fd3f1aba2b7a src/Motion_control.cpp PULL_V_END
+10e054bda6a2228fb0aa62850919ec4b6067c0bbe77a6de96afb229881c0fccd src/Motion_control.cpp PULL_V_FAST
+b65e4431665c037750a4b8af0268d0e7aebd1b440b79f8ed6ba25b03484bd69d src/Motion_control.cpp _MOTOR_CONTROL from /MOTOR_PID PID_speed/ to /MOTOR_PID PID_speed/
+ea31a5d8d7d66115dd0083912b16edb78ad9992ee68cca628edf7893943da8d8 src/Motion_control.cpp dm_key_to_state
+64352cbff9ef6928765fc8b27d9a5a135fa5f52ae3f4c18c9e0abc143c07fcfe src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /remain = target - d/ to /= -v;/
+c87c1d4eaea60b9f6263ee2c3b995ce5d083f1f782eb10e0139d71fe40a9917e src/Motion_control.cpp motor_motion_run from /MC_PULL_ONLINE_RGB_set\(/ to /MC_PULL_ONLINE_RGB_set\(/
+69e7130bc737e82562e4ee57dc1e8f44e3ef8d192611a8d0c08d94ffc7a7394d src/Motion_control.cpp motor_motion_run from /au_in_t au;/ to /MOTOR_CONTROL\[i\]\.run\(/
+375a43349285d2d18374d10637dbca9dc00bd7dc61cecdbd80fea8e6cdee67a6 src/Motion_control.cpp motor_motion_run from /filament_now_position_enum pos =/ to /as5600_count\[ch\]\);/
+cab4bc8959a7f1d8822cbcd2b4c717ff8442dd54ff23273a3ea5e733473df736 src/Motion_control.cpp motor_motion_run from /stu_apply_baseline\(/ to /motor_motion_switch\(/
+5a56b1160f47308a3fc421856749fa2ada17113d0b218fa8de7a0de457b81ca5 src/Motion_control.cpp motor_motion_switch
+1b19e7e2bbcd1dad6960508df2b8545d83e378464661049cf1d015a5939548c5 src/Motion_control.cpp run from /case DM_AUTO_S2_PUSH:/ to /dm_auto_remain_m\[CHx\] = r;/
+f1d9ea9e8cd3e4fb8403009abd7e5f56a665041996a73f005aabefaf205c3f5e src/Motion_control.cpp run from /const bool pull_mode =/ to /if \(x < \(float\)-PWM_lim\)/
+62fd2c09fd0da7a239b2981172aade87b1cd8e688467bd3decac10ab84cbd46c src/Motion_control.cpp run from /const bool use_ramping =/ to /if \(x > hi\) x = hi;/
+7c05a466f52cd38d318ef9677376c9aacffb5542103c7599f7ecd2b27e13ca0f src/Motion_control.cpp run from /const jam_ctrl_t jam_ctrl =/ to /return;/
+fcbe32c055016f51669ab3685a0a7edc2166b747a047f61584cf87af4fb86bde src/Motion_control.cpp run from /if \(motion == \S+pressure_ctrl_idle\)/ to /dm_s2_enter_state\(/
+d53d37f6934a9df00b83de75ea161bb6f2ae0386c6baaad4fe4a57f90db5ee57 src/Motion_control.cpp run from /jam_push_limit_pass\(/ to /g_on_use_jam_latch\[CHx\] = 0u;/
+9c0235e9fb3bf3d8c6dc719dde2375873c1b65b79b17421eb1e50f420855a942 src/Motion_control.cpp run from /normalny idle z filamentem/ to /PID_pressure\.clear\(\);/
+c765c3849d6d840d65526491cfbe75eff65292363ac82203ce367f84822b2876 src/Motion_control.cpp run from /speed_set = g_pull_speed_set\[CHx\]/ to /PID_speed\.caculate\(/
+28e8c865fabbcd6b143f2d7541810fff75ea469a6c8923ec330e11a92b238a0f src/Motion_control.cpp stu_apply_baseline
+7220a574cf0c9261a67bbd5e66b64656f37147d74ec19ccbdd77abde52d18919 src/ahub_bus.cpp ahubus_run
+4014ed15f532c919331505844a3015a77d1fe19a77036346d6849dd0c52fbfba src/ahub_bus.cpp ahubus_slave_get_package_set from /data_ptr = buf \+ 4/ to /default:/
+ab8b38c475258024c25aeccf2d1eb15bc54990c658536e97b0342822b4496c0a src/bambu_bus_ams.cpp bambubus_run from /bool hb_new = false;/ to /return stu;/
+397b807ffeb6828ed884fae949d6fa9f05ab94f95e89f6abe375a676a9243ef7 src/bambu_bus_ams.cpp bambubus_run from /bus_link_poll\(/ to /bus_link_poll\(/
+08484fd704e1546b2bfc71b8936d550f170e1ea22d847190bb984b6ef32698d9 src/bambu_bus_ams.cpp bambubus_run from /bus_link_went_lost\(/ to /online_detect_reset\(\);/
+45f071e99233ed2464663cd63e4fe6ccdd87949ecb8117ca1f0232f1f62fb1dc src/bambu_bus_ams.cpp get_package_motion from /uint8_t ch = ams_ptr->now_filament_num/ to /get_filament_left_char/
+cf24a97062586b754fdeb38bbeae834289a4b4900f838712093b3698093551f8 src/bambu_bus_ams.cpp get_package_stu_motion from /uint8_t ch = ams_ptr->now_filament_num/ to /get_filament_left_char/
+c7ebe42543aab6c1d5460e5a5149b2fee0375e10731009cac7d0149f3ca5c77e src/bambu_bus_ams.cpp online_detect_reset
+0d3f9a91b8a8e56bb41df51942bdc7a09bcdf3dfa99d594497925a6430ab3810 src/main.cpp RGB_init
+235bdcb8dfd739a7a540641559e629ee8f1eadfb23a9cc2c074dea661958a20a src/main.cpp RGB_update
+7671cb8227762db3930c0a5aa5b9343f2f0ed801a76fb2360fcb067003aa4530 src/main.cpp ams_nvm_save_run
+4185da39b2e86c2f7e1b4523879043c58466dbf56beaa71dbaec678096291351 src/main.cpp ams_state_boot_restore_deferred
+9a6f3c06b8a9e87edb72cd53b5688406a6e6355782bfea2dde9974f7c607fbc4 src/main.cpp ams_state_get_loaded
+6eb1907f227c082133a47ea0260925dcf23bd7ccb79e25f8d0b2b0dc29a84af6 src/main.cpp ams_state_printer_command
+8994244f89bf0bc13cf925b88138f9fd0db4259501ce6da1e7342ae4f143db32 src/main.cpp ams_state_set_loaded
+38523f8052566741a115f4529ccf535e1e7b74f91b51f7fc15eb29fccc1d4688 src/main.cpp ams_state_set_unloaded
+0b28c989ccfd35661111a778431b46898bb2aa3ea00c367a4ca393e65feb600b src/main.cpp g_boot_restore
+d74982661f60ba7541a60d97f79efddb699ae26be9b37f6eb297a533c5230852 src/main.cpp main from /ams_init\(\);/ to /Motion_control_init\(\);/
+9011bf6780a8cebf272b837105ec0f1e7964bff9c0d07090ab8484c2dfd3aaff src/main.cpp main from /host_link_offline\(/ to /Motion_control_run\(/
+0e28e1e06670588e32ae3b711f0aaaaeb8fd1a00836de31b125d206041555361 src/main.cpp main from /while \(1\)/ to /ams_nvm_save_run\(\);/
+162b1bed662d4937c9d48b978b56ceb4124417e7cfac925999d3a87ba3cd0083 src/watchdog.cpp blackbox_boot
+788a629344a944f921be9b0775fcdeda14b91fa6c7243bea1d5bfc0f96daa9e5 src/watchdog.cpp failsafe_stop from /uint32_t mepc, mcause;/ to /BLACKBOX_W_TRAP_CHECK/
+ca9a182fc659d47ef2521fde7ee22d9f981cffe3abefca534e90f9109e4f5082 src/watchdog.h blackbox_pass_mark
+918d4779eea6e72d186479bffacf4ca81595f16ba1ac6ca68e904e83c2a6903d src/watchdog.h blackbox_phase_set

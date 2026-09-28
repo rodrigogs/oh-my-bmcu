@@ -19,6 +19,8 @@ static uint32_t grb(uint8_t R, uint8_t G, uint8_t B)
 }
 
 // ---- adapted from Motion_control.cpp: status LED colours it sets ----
+// ---- anchor: stu_apply_baseline ----
+// ---- anchor: motor_motion_switch ----
 // Colours used by Motion_control.cpp.
 #define C_OFF      grb(0x00, 0x00, 0x00)
 #define C_WHITE    grb(0x38, 0x35, 0x32)   // loaded baseline (stu_apply_baseline)
@@ -28,6 +30,7 @@ static uint32_t grb(uint8_t R, uint8_t G, uint8_t B)
 #define C_PULLBACK grb(0xA0, 0x2D, 0xFF)
 
 // ---- adapted from main.cpp: RGB_update without the 10 ms throttle ----
+// ---- anchor: RGB_update ----
 // RGB_update without the 10 ms throttle: send every dirty strip, count the redraws.
 static unsigned rgb_update(ws2812_frame_t *s)
 {
@@ -37,6 +40,8 @@ static unsigned rgb_update(ws2812_frame_t *s)
 }
 
 // ---- adapted from Motion_control.cpp: the order of the LED writes in one main-loop pass ----
+// ---- anchor: motor_motion_run from /stu_apply_baseline\(/ to /motor_motion_switch\(/ ----
+// ---- anchor: motor_motion_run from /MC_PULL_ONLINE_RGB_set\(/ to /MC_PULL_ONLINE_RGB_set\(/ ----
 // One main-loop pass for the active channel strip (LED0 = state, LED1 = online LED):
 // stu_apply_baseline writes the baseline, motor_motion_switch overrides it with the state colour,
 // then the online LED is written.
@@ -260,6 +265,8 @@ static void test_throttle_across_the_systick_wrap(void)
 }
 
 // ---- adapted from main.cpp: RGB_update() over SYS_RGB and RGBOUT[0..3], and the strips' bit timing ----
+// ---- anchor: RGB_init ----
+// ---- anchor: RGB_update ----
 // main.cpp: SYS_RGB (1 LED) and RGBOUT[0..3] (2 LEDs each), one data pin each.
 #define N_STRIPS 5
 

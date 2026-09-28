@@ -42,6 +42,7 @@ static void power_loss(void)
 }
 
 // ---- adapted from watchdog.cpp: blackbox_boot(), read, blackbox_boot_words, write back ----
+// ---- anchor: blackbox_boot ----
 static blackbox_t boot(uint32_t rstsckr)
 {
     uint16_t w[BLACKBOX_WORDS];
@@ -53,6 +54,8 @@ static blackbox_t boot(uint32_t rstsckr)
 }
 
 // ---- adapted from watchdog.h: blackbox_phase_set and blackbox_pass_mark ----
+// ---- anchor: blackbox_phase_set ----
+// ---- anchor: blackbox_pass_mark ----
 static void phase(blackbox_phase p)
 {
     bkp[BLACKBOX_W_PHASE] = (uint16_t)p;
@@ -68,6 +71,7 @@ static void pass_mark(blackbox_pass_t *p, uint32_t now)
 }
 
 // ---- adapted from watchdog.cpp: failsafe_stop's record writes (mepc and mcause from the CSRs) ----
+// ---- anchor: failsafe_stop from /uint32_t mepc, mcause;/ to /BLACKBOX_W_TRAP_CHECK/ ----
 static void trap(uint32_t mepc, uint32_t mcause)
 {
     const uint16_t pc_lo = (uint16_t)mepc;

@@ -31,6 +31,8 @@ const uint8_t bambubus_host_uid[12] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE,
 _bus_port_deal bus_port_to_host;
 
 // ---- adapted from main.cpp: the loaded-channel state, without the NVM and boot-restore parts ----
+// ---- anchor: ams_state_set_loaded ----
+// ---- anchor: ams_state_set_unloaded ----
 static uint8_t g_loaded_ch = 0xFF;
 
 void ams_datas_set_need_to_save_filament(uint8_t) {}

@@ -20,6 +20,7 @@ static const uint32_t STA_LOG_PAGES = 10u;  // Flash_saves.cpp STA_PAGE_COUNT
 static const uint32_t STA_LOG_SLOTS = STA_LOG_PAGES * STA_SLOTS;
 
 // ---- adapted from Flash_saves.cpp: crc32_hw_words, the CH32 CRC unit in software ----
+// ---- anchor: crc32_hw_words ----
 // CRC-32 polynomial 0x04C11DB7, register reset to 0xFFFFFFFF, one 32-bit word at a time MSB first,
 // no reflection or final XOR (STM32-compatible unit). test_crc32_model_matches_the_wch_example pins
 // it to WCH's documented result; the tests below only need pack and validate to use the same CRC.
@@ -271,6 +272,8 @@ static void test_fil_blank_page(void)
 }
 
 // ---- adapted from Flash_saves.cpp: Flash_AMS_filament_write and Flash_saves_init, on RAM ----
+// ---- anchor: Flash_AMS_filament_write ----
+// ---- anchor: Flash_saves_init ----
 // 40 writes of changing info into one page (erased when nvm_fil_needs_erase says so, next slot as
 // the write sets it), each followed by a reset: the scan always gives back the info just written
 // and the slot the firmware had cached.
@@ -467,6 +470,7 @@ static void test_sta_scan_after_a_torn_slot(void)
 }
 
 // ---- adapted from Flash_saves.cpp: Flash_AMS_state_write, on RAM ----
+// ---- anchor: Flash_AMS_state_write ----
 // One write from the slot and sequence the firmware has cached: the slot and erase nvm_sta_next_slot
 // gives, then `words` words of the record (2: written; 1: power lost between the two word programs;
 // 0: power lost right after the erase, or before the first program). Returns the slot used. The

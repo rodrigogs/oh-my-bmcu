@@ -24,6 +24,7 @@
 // ---- adapted from build_all_firmwares.sh: its longest AMS_RETRACT_LEN ----
 #define LONG_RETRACT_M 0.90f    // longest AMS_RETRACT_LEN built by build_all_firmwares.sh
 // ---- adapted from Motion_control.cpp: DM_AUTO_S2_TARGET_M (a C++ constant) ----
+// ---- anchor: DM_AUTO_S2_TARGET_M ----
 #define DM_S2_LEN_M    0.120f   // DM_AUTO_S2_TARGET_M
 #define PULL_CNT0      0xFFFFF000u  // pulls count up: they wrap the uint32_t count after 23.6 mm
 #define FEED_CNT0      0x00000800u  // feeds count down: they wrap it after 11.8 mm
@@ -52,6 +53,7 @@ static void gear_reset(uint32_t cnt0, float meters0)
 }
 
 // ---- adapted from Motion_control.cpp: AS5600_distance_updata's count and odometer update ----
+// ---- anchor: AS5600_distance_updata from /case AS5600_TRACK_MOVE:/ to /as5600_count\[i\] \+=/ ----
 // One AS5600 read after the gear moved v_mm_s for 1 ms (v > 0 feeds, v < 0 pulls). The angle falls
 // when meters rises (kAS5600_MM_PER_CNT < 0). Both sources get the same whole-count step.
 static void gear_step(float v_mm_s)
@@ -74,6 +76,10 @@ void setUp(void)
 void tearDown(void) {}
 
 // ---- adapted from Motion_control.cpp: the pull back's speed command (PULL_V_FAST, PULL_V_END, PULL_RAMP_M) ----
+// ---- anchor: PULL_V_FAST ----
+// ---- anchor: PULL_V_END ----
+// ---- anchor: PULL_RAMP_M ----
+// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /remain = target - d/ to /= -v;/ ----
 // The pull back's speed command in motor_motion_filamnet_pull_back_to_online_key: 60 mm/s, linear
 // down to 12 mm/s over the last 15 mm (PULL_V_FAST, PULL_V_END, PULL_RAMP_M).
 static float pull_cmd_mm_s(float remain_m)
@@ -85,6 +91,11 @@ static float pull_cmd_mm_s(float remain_m)
 }
 
 // ---- adapted from Motion_control.cpp: the pull's speed PID against a held filament, simplified ----
+// ---- anchor: MOTOR_PID ----
+// ---- anchor: _MOTOR_CONTROL from /MOTOR_PID PID_speed/ to /MOTOR_PID PID_speed/ ----
+// ---- anchor: run from /speed_set = g_pull_speed_set\[CHx\]/ to /PID_speed\.caculate\(/ ----
+// ---- anchor: run from /const bool pull_mode =/ to /if \(x < \(float\)-PWM_lim\)/ ----
+// ---- anchor: run from /const bool use_ramping =/ to /if \(x > hi\) x = hi;/ ----
 // The speed PID from standstill against a held filament: the error is the full 60 mm/s (P 2, I 20),
 // with the 500 PWM floor and the 2500 PWM/s soft-start ramp, clamped at 1000.
 static float pull_pwm_blocked(uint32_t t_ms)
@@ -584,6 +595,7 @@ static void test_dm_s2_retract_that_never_relaxes_the_buffer_stops_at_budget(voi
 }
 
 // ---- adapted from Motion_control.cpp: the DM_AUTO_S2_PUSH countdown ----
+// ---- anchor: run from /case DM_AUTO_S2_PUSH:/ to /dm_auto_remain_m\[CHx\] = r;/ ----
 // The Stage-2 push's own countdown (DM_AUTO_S2_PUSH in Motion_control.cpp): each pass subtracts
 // the gear travel since the previous pass, from the count, from the 120 mm left. Returns the pass
 // the countdown reached 0 in, 0 if it did not.

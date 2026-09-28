@@ -14,6 +14,7 @@
 // SysTick runs at HCLK/8 = 18 MHz.
 #define TPMS    18000u
 // ---- adapted from bambu_bus_ams.cpp: the bus_link_poll() timeout, ms_to_ticks32(1000u) (ahub_bus.cpp too) ----
+// ---- anchor: bambubus_run from /bus_link_poll\(/ to /bus_link_poll\(/ ----
 #define TIMEOUT (1000u * TPMS)
 #define WRAP    4294967296ull // 2^32
 
@@ -25,6 +26,7 @@ void setUp(void) {}
 void tearDown(void) {}
 
 // ---- adapted from main.cpp: the main loop's use of host_link_offline() (the NVM writes only counted) ----
+// ---- anchor: main from /host_link_offline\(/ to /Motion_control_run\(/ ----
 // One pass: the error handed to Motion_control_run(), and ams_nvm_save_run() only while online.
 static int motion_error;
 static unsigned nvm_runs;
@@ -44,6 +46,7 @@ static bool main_pass(uint16_t *host_type, host_link_report_t bambubus, host_lin
 }
 
 // ---- adapted from bambu_bus_ams.cpp: bambubus_run()'s status after the packet (error, hb_unreported) ----
+// ---- anchor: bambubus_run from /bool hb_new = false;/ to /return stu;/ ----
 // packet: this pass handled a frame (its type is what bambubus_run() returns); hb: the RX IRQ
 // flagged a heartbeat since the last pass, stamped at now.
 typedef struct
@@ -78,6 +81,7 @@ static host_link_report_t bambubus_pass(bambubus_model_t *m, bool packet, bool h
 }
 
 // ---- adapted from ahub_bus.cpp: ahubus_run()'s status (a heartbeat packet feeds the link, error once lost) ----
+// ---- anchor: ahubus_run ----
 static host_link_report_t ahub_pass(bus_link_t *l, bool hb_packet, uint32_t now)
 {
     if (hb_packet) bus_link_heartbeat(l, now);

@@ -29,6 +29,12 @@ static uint32_t g_ticks = 0x10000000u;
 static uint32_t time_ticks32(void) { return g_ticks; }
 
 // ---- adapted from main.cpp: the loaded-channel state (NVM writes only counted) ----
+// ---- anchor: g_boot_restore ----
+// ---- anchor: ams_state_set_loaded ----
+// ---- anchor: ams_state_set_unloaded ----
+// ---- anchor: ams_state_get_loaded ----
+// ---- anchor: ams_state_boot_restore_deferred ----
+// ---- anchor: ams_state_printer_command ----
 static uint8_t g_loaded_ch = 0xFF;
 static boot_restore_t g_boot_restore = {0xFFu};
 static bool kRestoreAtBoot = true;  // BMCU_BOOT_RESTORE_LOADED != 0 (a constant in the firmware)
@@ -360,6 +366,7 @@ static constexpr uint8_t  kChCount = 4;
 static uint8_t MC_ONLINE_key_stu[4];
 
 // ---- adapted from main.cpp: power-on, ams_init() and the STA record's restore (Motion_control_init sets online) ----
+// ---- anchor: main from /ams_init\(\);/ to /Motion_control_init\(\);/ ----
 // Power-on: RAM as after ams_init(), then main.cpp's restore. sta_ch: the STA record (0xFF: none
 // loaded, or no valid record: g_loaded_ch then stays 0xFF and the restore does nothing either).
 static void boot(bool restore_at_boot, uint8_t sta_ch)
@@ -383,6 +390,8 @@ static void boot(bool restore_at_boot, uint8_t sta_ch)
 static void pass(void)
 {
 // ---- adapted from Motion_control.cpp: MC_PULL_ONLINE_read's key state and Motion_control_run's online flags ----
+// ---- anchor: MC_PULL_ONLINE_read from /MC_ONLINE_key_stu\[3\] = \(/ to /MC_ONLINE_key_stu\[0\] = \(/ ----
+// ---- anchor: Motion_control_run from /\.online = true;/ to /\.online = false;/ ----
     for (uint8_t i = 0; i < 4u; i++)
     {
         MC_ONLINE_key_stu[i] = filament[i] ? 1u : 0u;
@@ -414,6 +423,8 @@ static void stop_on_use(uint8_t ch) { cmd(ch, 0x07, 0x00); }
 static void before_pull_back(uint8_t ch) { cmd(ch, 0x09, 0x3F); }
 
 // ---- adapted from bambu_bus_ams.cpp: the channel, use and state fields of get_package_motion's reply ----
+// ---- anchor: get_package_motion from /uint8_t ch = ams_ptr->now_filament_num/ to /get_filament_left_char/ ----
+// ---- anchor: get_package_stu_motion from /uint8_t ch = ams_ptr->now_filament_num/ to /get_filament_left_char/ ----
 // What get_package_motion / get_package_stu_motion report for the current state.
 typedef struct
 {

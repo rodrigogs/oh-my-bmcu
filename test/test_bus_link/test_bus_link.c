@@ -11,6 +11,7 @@
 // SysTick runs at HCLK/8 = 18 MHz.
 #define TPMS    18000u
 // ---- adapted from bambu_bus_ams.cpp: the bus_link_poll() timeout, ms_to_ticks32(1000u) (ahub_bus.cpp too) ----
+// ---- anchor: bambubus_run from /bus_link_poll\(/ to /bus_link_poll\(/ ----
 #define TIMEOUT (1000u * TPMS)
 #define WRAP    4294967296ull // 2^32
 
@@ -166,6 +167,8 @@ static void test_went_lost_fires_once_per_outage(void)
 }
 
 // ---- adapted from bambu_bus_ams.cpp: bambubus_run()'s online-detect re-arm on bus_link_went_lost() ----
+// ---- anchor: bambubus_run from /bus_link_went_lost\(/ to /online_detect_reset\(\);/ ----
+// ---- anchor: online_detect_reset ----
 // Main-loop model of the BambuBus online-detect latch (bambu_bus_ams.cpp): registered stands for
 // have_registered and is cleared where bambubus_run() calls online_detect_reset(). Registered at
 // boot, heartbeats every 300 ms for two minutes across a tick wrap: the latch must hold. The printer
