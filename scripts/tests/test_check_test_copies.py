@@ -1,6 +1,7 @@
 """Fixture tests for scripts/check_test_copies.py: each builds a tiny src/+test/ tree in a temp
 dir (never a committed tree) and runs the real script against it, so a break in the guard shows up
-as a failing case here instead of only on the real 28 copies. Run with
+as a failing case here instead of only on the real copies (whatever their current count is). Run
+with
     python3 -m unittest discover -s scripts/tests
 """
 

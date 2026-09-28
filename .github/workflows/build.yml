@@ -28,6 +28,9 @@ jobs:
     # Flashable images are only published once the host tests, the V10.5 reproduction and the
     # static analysis pass.
     needs: [unit-tests, reproduce-upstream, static-analysis]
+    # Observed runtime is under a minute (the setup-pio cache is warm by the time this job's
+    # `needs` are satisfied); 20 min is headroom against a hang, not the expected runtime.
+    timeout-minutes: 20
     env:
       ENVS: a1_solo_autoload_rgboff a1_solo_autoload_rgboff_no_boot_restore
     steps:
@@ -124,6 +127,9 @@ jobs:
   unit-tests:
     name: Host unit tests (env:native, env:native_asan) and guard checks
     runs-on: ubuntu-24.04
+    # Observed runtime is around 2 min; 20 min is headroom against a hung test, not the
+    # expected runtime -- without this a hang holds the runner for the default 6 h.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
@@ -149,6 +155,8 @@ jobs:
   static-analysis:
     name: Static analysis (pio check, cppcheck)
     runs-on: ubuntu-24.04
+    # Observed runtime is around 2 min; see unit-tests above for why this is generous.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
@@ -188,6 +196,8 @@ jobs:
   reproduce-upstream:
     name: Reproduce upstream V10.5 SOLO images
     runs-on: ubuntu-24.04
+    # Observed runtime is around 2 min; see unit-tests above for why this is generous.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
