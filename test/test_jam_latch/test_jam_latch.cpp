@@ -115,9 +115,10 @@ static void jam_loop_hold(const uint8_t *g_on_use_jam_latch, jam_event_t ev)
 }
 
 // ---- adapted from Motion_control.cpp: motor_motion_run's auto-unload call ----
-// For a channel whose AS5600 reads are good, with the link up: auto_unload_pass() with the motor
-// state motor_motion_switch has just set (idle_ctrl: the idle control), and the key 'both' while
-// filament is at the switch. A pass it drives does not run run().
+// For a channel whose AS5600 reads are good, with the link up and the ADC stream fresh
+// (adc_stream.h): auto_unload_pass() with the motor state motor_motion_switch has just set
+// (idle_ctrl: the idle control), and the key 'both' while filament is at the switch. A pass it
+// drives does not run run().
 static au_drive_t au_pass(bool idle_ctrl, float pct)
 {
     au_in_t au;
@@ -132,11 +133,11 @@ static au_drive_t au_pass(bool idle_ctrl, float pct)
 
 // ---- adapted from Motion_control.cpp: Motion_control_run's latch clear, jam_latch_pass() call and motor order ----
 // One main-loop pass for the channel: Motion_control_run clears both latches when no filament is
-// at the switch and the jam latch is set, and runs jam_latch_pass() and the auto-unload hold, then
-// motor_motion_switch puts the BMCU into its on_use control when the printer commands on_use for
-// the active channel and filament is at the switch, then the auto-unload's pass and, unless that
-// drives the channel, run(). So the BMCU follows the printer one pass later, as jam_latch_pass()
-// sees it, and the auto-unload and run() see the latch as this pass left it.
+// at the switch and the jam latch is set, and (the ADC stream fresh) runs jam_latch_pass() and the
+// auto-unload hold, then motor_motion_switch puts the BMCU into its on_use control when the printer
+// commands on_use for the active channel and filament is at the switch, then the auto-unload's pass
+// and, unless that drives the channel, run(). So the BMCU follows the printer one pass later, as
+// jam_latch_pass() sees it, and the auto-unload and run() see the latch as this pass left it.
 static jam_event_t pass(_filament_motion m, float pct)
 {
     if (!filament && jam)

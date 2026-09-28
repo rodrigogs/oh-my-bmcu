@@ -1,6 +1,7 @@
 #include "Motion_control.h"
 #include "ams.h"
 #include "ADC_DMA.h"
+#include "adc_stream.h"
 #include "Flash_saves.h"
 #include "_bus_hardware.h"
 #include "many_soft_AS5600.h"
@@ -482,6 +483,10 @@ static inline void MC_PULL_ONLINE_init()
 {
     MC_PULL_detect_channels_inserted();
 }
+
+// The ADC stream stopped (adc_stream.h): the readings of this pass are older than
+// ADC_STREAM_STALE_MS. Set by Motion_control_run right after MC_PULL_ONLINE_read().
+static bool g_adc_stale = false;
 
 static inline void MC_PULL_ONLINE_read(uint32_t now_ticks)
 {
@@ -2554,6 +2559,23 @@ static void motor_motion_run(int error, uint64_t time_now, uint32_t now_ticks)
             MC_STU_RGB_set(i, (((time_now / 1000ull) & 1ull) != 0ull) ? 0xFFu : 0x00u, 0x00u, 0x00u);
     }
 
+    // Stale ADC stream: no channel drives on frozen buffer and switch readings. Every motor is
+    // stopped and braked as for a bad AS5600, a running auto-unload ends, and every status LED
+    // blinks blue (250 ms on, 250 ms off) with the buffer LED off, until a new half-buffer comes.
+    if (g_adc_stale)
+    {
+        const uint8_t blue = (((time_now / 250ull) & 1ull) == 0ull) ? 0xFFu : 0x00u;
+        for (uint8_t i = 0; i < kChCount; i++)
+        {
+            MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, time_now);
+            Motion_control_set_PWM(i, 0);
+            auto_unload_reset(&g_auto_unload[i]);
+            MC_STU_RGB_set(i, 0x00u, 0x00u, blue);
+            MC_PULL_ONLINE_RGB_set(i, 0x00u, 0x00u, 0x00u);
+        }
+        return;
+    }
+
     for (uint8_t i = 0; i < kChCount; i++)
     {
         if (!AS5600_is_good(i))
@@ -2681,6 +2703,7 @@ void Motion_control_run(int error)
     const uint64_t now_ms      = time_ms_fast_from_ticks64(now_ticks64);
 
     MC_PULL_ONLINE_read(now_ticks);
+    g_adc_stale = adc_stream_stale(ADC_DMA_age_ticks(), time_hw_tpms);
 
     const uint8_t loaded_ch = ams_state_get_loaded();
     if ((loaded_ch < kChCount) && (MC_ONLINE_key_stu[loaded_ch] == 0u))
@@ -2718,6 +2741,12 @@ void Motion_control_run(int error)
     // normal pressure from the pass it is released.
     for (uint8_t ch = 0; ch < kChCount; ch++)
     {
+        if (g_adc_stale)
+        {
+            jam_latch_skip(&g_on_use_jam[ch]); // neither trips nor releases on frozen readings
+            continue;
+        }
+
         jam_in_t in;
         in.on_use_ctrl = (MOTOR_CONTROL[ch].motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use);
         in.filament    = (MC_ONLINE_key_stu[ch] != 0u);
@@ -2753,7 +2782,7 @@ void Motion_control_run(int error)
         }
     }
 
-    if ((error <= 0) && all_no_filament())
+    if ((error <= 0) && all_no_filament() && !g_adc_stale) // a frozen press must not wipe the NVM
     {
         int pressed = -1;
 

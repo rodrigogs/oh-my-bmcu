@@ -607,9 +607,10 @@ static constexpr float    MANUAL_EMPTY_PULL_PWM      = 700.0f;
 
 // ---- adapted from Motion_control.cpp: motor_motion_run's auto-unload call and drive choice ----
 // What motor_motion_run does for a channel after its DM pass and the status LED's baseline, with the
-// link up and the AS5600 read: auto_unload_pass() decides whether the auto-unload (a retract at
-// AUTO_UNLOAD_PWM_PULL, then the Stage-2 guard's pass dm_s2_auto_unload_pass) or the manual empty
-// pull (a retract at 700 PWM) drives the channel, or, for AU_DRIVE_NONE, run() with the DM block.
+// link up, the AS5600 read and the ADC stream fresh (adc_stream.h): auto_unload_pass() decides
+// whether the auto-unload (a retract at AUTO_UNLOAD_PWM_PULL, then the Stage-2 guard's pass
+// dm_s2_auto_unload_pass) or the manual empty pull (a retract at 700 PWM) drives the channel, or,
+// for AU_DRIVE_NONE, run() with the DM block.
 // printer_idle stands for the channel's MOTOR_CONTROL motion being the idle control.
 static bool printer_idle;   // the printer commands idle: the channel runs its idle control
 

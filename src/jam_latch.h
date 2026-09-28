@@ -242,6 +242,18 @@ static inline jam_event_t jam_latch_pass(jam_latch_t *s, uint8_t *brake, uint8_t
     return JAM_EVENT_TRIP;
 }
 
+// Instead of jam_latch_pass() on a pass whose buffer reading is stale (the ADC stream stopped:
+// adc_stream.h). Nothing trips or releases, and both timed runs (below JAM_TRIP_PCT, at the release
+// level) start again from the next pass that reads the buffer, so time nobody saw never counts
+// toward JAM_TRIP_MS or JAM_RELEASE_MS. The latches, and what the release has seen since the trip
+// (the printer leaving on_use, the buffer back at JAM_TRIP_PCT), are kept.
+static inline void jam_latch_skip(jam_latch_t *s)
+{
+    jam_trip_reset(&s->trip);
+    s->release.full = 0u;
+    s->release.full_since_ms = 0u;
+}
+
 // ---- 20 s full-force push limit ----
 // The on_use control of a channel that is not braked counts how long it has pushed at full force:
 // more than JAM_PUSH_HI_PWM of 1000 PWM in the push direction (on A1 its push reaches that below
