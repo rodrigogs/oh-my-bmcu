@@ -59,8 +59,9 @@ static void reset(void)
 
 // ---- adapted from watchdog.cpp: blackbox_boot(), clocks and DBP, read, blackbox_boot_words, write back ----
 // ---- anchor: blackbox_boot ----
-// The reset that starts the run, then blackbox_boot.
-static blackbox_t boot(uint32_t rstsckr)
+// The reset that starts the run, then blackbox_boot, cut by another reset after its first `stores`
+// register writes (BLACKBOX_BOOT_STORES: not cut).
+static blackbox_t boot_cut(uint32_t rstsckr, uint32_t stores)
 {
     reset();
     apb1pcenr |= BLACKBOX_RCC_PWREN | BLACKBOX_RCC_BKPEN;
@@ -69,8 +70,14 @@ static blackbox_t boot(uint32_t rstsckr)
     for (uint32_t i = 0u; i < BLACKBOX_WORDS; i++) w[i] = bkp[i];
     blackbox_t last;
     blackbox_boot_words(w, rstsckr, &last);
-    for (uint32_t i = 0u; i < BLACKBOX_WORDS; i++) bkp[i] = w[i];
+    for (uint32_t k = 0u; k < BLACKBOX_BOOT_STORES && k < stores; k++)
+        bkp[blackbox_boot_store_word(k)] = blackbox_boot_store_value(k, w);
     return last;
+}
+
+static blackbox_t boot(uint32_t rstsckr)
+{
+    return boot_cut(rstsckr, BLACKBOX_BOOT_STORES);
 }
 
 // ---- adapted from watchdog.h: blackbox_phase_set and blackbox_pass_mark ----
@@ -485,6 +492,57 @@ static void test_boots_from_power_on_through_hangs_traps_and_resets(void)
     TEST_ASSERT_TRUE(decoded(bkp).valid);
 }
 
+static void test_a_reset_during_the_boot_write_leaves_no_record(void)
+{
+    // Run N traps (an illegal instruction in bambubus_run) and the IWDG resets the chip. In the boot
+    // of run N + 1 a pin reset comes after each of blackbox_boot's register writes in turn. The next
+    // boot reads either run N as it was (no write done yet), or no record, or run N + 1's record
+    // (every write done): never a checked header over the other run's words, which would show run
+    // N's trap as run N + 1's.
+    power_loss();
+    boot(POWER_ON);
+    phase(BLACKBOX_PHASE_BAMBUBUS);
+    trap(0x00003A6Eu, 2u);
+    uint16_t run_n[BLACKBOX_WORDS];
+    memcpy(run_n, bkp, sizeof(bkp));
+    TEST_ASSERT_TRUE(decoded(run_n).trapped);
+
+    boot(IWDG);
+    uint16_t run_n1[BLACKBOX_WORDS];
+    memcpy(run_n1, bkp, sizeof(bkp));
+    TEST_ASSERT_TRUE(decoded(run_n1).valid);
+    TEST_ASSERT_FALSE(decoded(run_n1).trapped);
+
+    for (uint32_t k = 0u; k <= BLACKBOX_BOOT_STORES; k++)
+    {
+        memcpy(bkp, run_n, sizeof(bkp));
+        boot_cut(IWDG, k);
+        if (k == BLACKBOX_BOOT_STORES) TEST_ASSERT_EQUAL_MEMORY(run_n1, bkp, sizeof(bkp)); // every word
+        const blackbox_t last = boot(SDK_PINRSTF);
+        if (k == 0u)
+        {
+            TEST_ASSERT_TRUE(last.trapped); // run N's own record
+            TEST_ASSERT_EQUAL_HEX32(0x00003A6Eu, last.mepc);
+            TEST_ASSERT_EQUAL_UINT8(BLACKBOX_PHASE_BAMBUBUS, last.phase);
+            TEST_ASSERT_EQUAL_UINT8(0u, last.resets);
+        }
+        else if (k < BLACKBOX_BOOT_STORES)
+        {
+            TEST_ASSERT_FALSE_MESSAGE(last.valid, "a record from a cut boot write");
+            TEST_ASSERT_FALSE(last.trapped);
+            TEST_ASSERT_EQUAL_UINT8(1u, decoded(bkp).resets); // the count starts again at 1
+        }
+        else
+        {
+            TEST_ASSERT_TRUE(last.valid); // run N + 1, which reset in BOOT, no trap
+            TEST_ASSERT_FALSE(last.trapped);
+            TEST_ASSERT_EQUAL_UINT8(BLACKBOX_PHASE_BOOT, last.phase);
+            TEST_ASSERT_EQUAL_UINT8(1u, last.resets);
+            TEST_ASSERT_EQUAL_HEX8((uint8_t)(IWDG >> 26), last.reset_flags);
+        }
+    }
+}
+
 static void test_a_reset_without_a_record_starts_the_count_at_one(void)
 {
     // The first boot of this firmware after flashing: the flasher resets the chip (no power-on) and
@@ -601,6 +659,7 @@ int main(void)
     RUN_TEST(test_a_record_survives_encode_and_decode);
     RUN_TEST(test_mcause_keeps_the_code_and_the_interrupt_bit);
     RUN_TEST(test_boots_from_power_on_through_hangs_traps_and_resets);
+    RUN_TEST(test_a_reset_during_the_boot_write_leaves_no_record);
     RUN_TEST(test_a_reset_without_a_record_starts_the_count_at_one);
     RUN_TEST(test_the_reset_count_stops_at_255);
     RUN_TEST(test_the_watchdog_flash_shows_for_the_iwdg_resets_only);

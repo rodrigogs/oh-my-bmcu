@@ -55,7 +55,8 @@ void blackbox_boot(uint32_t rstsckr)
     uint16_t w[BLACKBOX_WORDS];
     for (uint32_t i = 0u; i < BLACKBOX_WORDS; i++) w[i] = *blackbox_bkp(i);
     blackbox_boot_words(w, rstsckr, &g_blackbox_last);
-    for (uint32_t i = 0u; i < BLACKBOX_WORDS; i++) *blackbox_bkp(i) = w[i];
+    for (uint32_t k = 0u; k < BLACKBOX_BOOT_STORES; k++)
+        *blackbox_bkp(blackbox_boot_store_word(k)) = blackbox_boot_store_value(k, w);
 }
 
 // ===== fail-safe trap handlers =====

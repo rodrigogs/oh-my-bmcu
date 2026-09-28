@@ -74,7 +74,7 @@ c7ebe42543aab6c1d5460e5a5149b2fee0375e10731009cac7d0149f3ca5c77e src/bambu_bus_a
 d74982661f60ba7541a60d97f79efddb699ae26be9b37f6eb297a533c5230852 src/main.cpp main from /ams_init\(\);/ to /Motion_control_init\(\);/
 9011bf6780a8cebf272b837105ec0f1e7964bff9c0d07090ab8484c2dfd3aaff src/main.cpp main from /host_link_offline\(/ to /Motion_control_run\(/
 0e28e1e06670588e32ae3b711f0aaaaeb8fd1a00836de31b125d206041555361 src/main.cpp main from /while \(1\)/ to /ams_nvm_save_run\(\);/
-162b1bed662d4937c9d48b978b56ceb4124417e7cfac925999d3a87ba3cd0083 src/watchdog.cpp blackbox_boot
+975e00374a02548bea109bcd2a6cbbfe39bf3e52b959b14eb97f4de49c7adf0c src/watchdog.cpp blackbox_boot
 8d401cb1d93e1cba3008b07d2773f047779c76cf241195be898e6390e510f078 src/watchdog.cpp failsafe_stop from /uint32_t mepc, mcause;/ to /BLACKBOX_W_TRAP_CHECK/
 ca9a182fc659d47ef2521fde7ee22d9f981cffe3abefca534e90f9109e4f5082 src/watchdog.h blackbox_pass_mark
 918d4779eea6e72d186479bffacf4ca81595f16ba1ac6ca68e904e83c2a6903d src/watchdog.h blackbox_phase_set

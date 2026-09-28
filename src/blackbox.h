@@ -21,9 +21,10 @@
 // - on a trap, failsafe_stop writes mepc, mcause and their check, the check last. Before
 //   blackbox_boot turns the backup domain on (startup code, SystemInit, time_hw_init) the record
 //   is skipped: failsafe_stop reads the clocks and DBP back first (blackbox_bkp_clocked, _writable).
-// All zero (a cold backup domain), all 0xFFFF, or a header torn by a reset during the boot write
-// does not check, and reads as no record. The trap words only count with a checked header and
-// their own check, and every boot clears them, so a hang after an earlier trap reads as a hang.
+// All zero (a cold backup domain), all 0xFFFF, or a record left by a reset during the boot write
+// (the magic is cleared first and written last, blackbox_boot_store_word) does not check, and reads
+// as no record. The trap words only count with a checked header and their own check, and every
+// boot clears them, so a hang after an earlier trap reads as a hang.
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -184,6 +185,24 @@ static inline void blackbox_boot_words(uint16_t w[BLACKBOX_WORDS], uint32_t rsts
     blackbox_decode(w, last);
     const blackbox_t next = blackbox_next(last, rstsckr);
     blackbox_encode(&next, w);
+}
+
+// blackbox_boot's register writes of the new record w, in order: store k (0 to
+// BLACKBOX_BOOT_STORES - 1) writes blackbox_boot_store_value(k, w) to word
+// blackbox_boot_store_word(k). The magic goes to 0 first and gets its value last, so after a reset
+// between two stores the header does not check: the next boot reads no record. Written in word
+// order alone, a reset after the new header and before the trap words left run N + 1's checked
+// header over run N's trap, read at the next boot as a trap of run N + 1.
+#define BLACKBOX_BOOT_STORES (BLACKBOX_WORDS + 1u)
+
+static inline uint32_t blackbox_boot_store_word(uint32_t k)
+{
+    return (k < BLACKBOX_WORDS) ? k : BLACKBOX_W_MAGIC;
+}
+
+static inline uint16_t blackbox_boot_store_value(uint32_t k, const uint16_t w[BLACKBOX_WORDS])
+{
+    return (k == 0u) ? 0u : w[blackbox_boot_store_word(k)];
 }
 
 // The SYS LED boot code (main.cpp, timing in watchdog_cfg.h): the watchdog flash after an IWDG reset,
