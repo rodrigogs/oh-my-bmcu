@@ -2508,9 +2508,10 @@ static inline void stu_apply_baseline(int error, uint64_t now_ms)
 }
 
 
-// Stops and brakes channel i at once, into the state run()'s stop branch leaves: PWM 0, PIDs
-// cleared, pwm_zeroed set and x_prev 0, whatever the motion was (set_motion(stop) alone does none
-// of that when the channel is already stopped, e.g. under a manual empty pull).
+// Stops and brakes channel i at once, into the state run()'s timeout-to-stop branch leaves: PWM 0,
+// both PIDs cleared, pwm_zeroed set and x_prev 0, whatever the motion was. set_motion(stop) alone
+// never writes the PWM, sets pwm_zeroed to 0 on a change of motion, and returns early when the
+// channel is already stopped (e.g. under a manual empty pull).
 static void motor_brake_now(uint8_t i, uint64_t now_ms)
 {
     MOTOR_CONTROL[i].set_motion(filament_motion_enum::filament_motion_stop, 100, now_ms);
