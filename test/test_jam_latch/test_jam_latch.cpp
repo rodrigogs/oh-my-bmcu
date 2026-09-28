@@ -17,6 +17,8 @@
 // its neutral band: lifting the buffer of a latched channel, to release it or not, and letting go
 // afterwards, also after a sag and a new lift while it is still held, must never start it, and a
 // new lift after the release must.
+// Passes with stale ADC readings (adc_stream.h) must neither trip nor release, add no time to
+// either timer, keep the latches and what the release has seen, and end a running auto-unload.
 
 #include <stdint.h>
 #include <string.h>
@@ -166,6 +168,28 @@ static jam_event_t pass(_filament_motion m, float pct)
     if (jam && pushing) jammed_pushes++;
     now++;
     return ev;
+}
+
+// ---- adapted from Motion_control.cpp: a main-loop pass with the ADC stream stale (g_adc_stale) ----
+// Motion_control_run clears the latches as in pass(), its jam loop only calls jam_latch_skip(), and
+// motor_motion_run stops the channel and resets its auto-unload before anything else drives it.
+// So the BMCU is out of its on_use control from the next pass on, nothing pushes or unloads, and
+// no trip, release or hold happens.
+static void stale_passes(uint32_t ms)
+{
+    for (uint32_t i = 0; i < ms; i++)
+    {
+        if (!filament && jam)
+        {
+            brake = 0u;
+            jam = 0u;
+        }
+        jam_latch_skip(&st);
+        bmcu_on_use = false;
+        auto_unload_reset(&g_auto_unload[0]);
+        pushing = false;
+        now++;
+    }
 }
 
 // 1 ms passes for `ms` at a constant printer command and buffer level. Returns the ms offset
@@ -1047,6 +1071,73 @@ static void test_the_auto_unload_still_unloads_a_channel_that_was_never_latched(
     }
 }
 
+// ---- Stale ADC readings (adc_stream.h) ----
+
+static void test_stale_passes_neither_trip_nor_count_toward_the_trip(void)
+{
+    // 400 ms of on_use at 30%, then the ADC stream stops for 2 s with the buffer frozen at 30%: no
+    // trip. Fresh again, the trip needs 500 ms of fresh low passes; the first fresh pass still finds
+    // the channel stopped by the stale ones, so the timer starts on the second.
+    TEST_ASSERT_EQUAL_INT32(-1, hold(ON_USE, 30.0f, 400u));
+    stale_passes(2000u);
+    TEST_ASSERT_EQUAL_INT(0, trips);
+    TEST_ASSERT_EQUAL_UINT8(0u, jam);
+    TEST_ASSERT_EQUAL_INT32(501, hold(ON_USE, 30.0f, 1000u));
+
+    // jam_latch_skip() alone, the channel still in its on_use control: the timer restarts.
+    setUp();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(ON_USE, 30.0f, 400u));
+    jam_latch_skip(&st);
+    TEST_ASSERT_EQUAL_INT32(500, hold(ON_USE, 30.0f, 1000u));
+}
+
+static void test_stale_passes_do_not_count_toward_the_release(void)
+{
+    // Latched, the printer in idle, the buffer held at 90% for 500 ms when the stream stops for 2 s:
+    // still latched and braked, and once fresh again the release needs 1 s of fresh passes at 85%.
+    trip_now();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 500u));
+    stale_passes(2000u);
+    TEST_ASSERT_EQUAL_UINT8(1u, jam);
+    TEST_ASSERT_EQUAL_UINT8(1u, brake);
+    TEST_ASSERT_EQUAL_INT32((int32_t)JAM_RELEASE_MS, hold(IDLE, 90.0f, 2000u));
+
+    // The same at the on_use band's low edge while paused.
+    setUp();
+    trip_now();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(STOP_ON_USE, 60.0f, 700u));
+    stale_passes(500u);
+    TEST_ASSERT_EQUAL_INT32((int32_t)JAM_RELEASE_MS, hold(STOP_ON_USE, 60.0f, 2000u));
+    TEST_ASSERT_EQUAL_INT(0, jammed_pushes);
+}
+
+static void test_stale_passes_keep_what_the_release_has_seen(void)
+{
+    // Paused on the jam and the buffer back at 45% (fed by hand) before the stream stops: the resume
+    // after it releases the latch at once, as without the stale passes.
+    trip_now();
+    TEST_ASSERT_EQUAL_INT32(-1, hold(STOP_ON_USE, 45.0f, 100u));
+    stale_passes(1000u);
+    TEST_ASSERT_EQUAL_UINT8(1u, jam);
+    TEST_ASSERT_EQUAL_INT(JAM_EVENT_RELEASE, pass(ON_USE, 45.0f));
+    TEST_ASSERT_EQUAL_INT(1, trips);
+}
+
+static void test_a_stale_pass_ends_a_running_auto_unload(void)
+{
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 50.0f, 1000u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 50.0f, 90.0f));
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 90.0f, 300u));
+    TEST_ASSERT_EQUAL_INT32(-1, ramp(IDLE, 90.0f, 50.0f));
+    TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
+
+    stale_passes(1u);
+    TEST_ASSERT_EQUAL_UINT8(0u, g_auto_unload[0].active);
+    const int n = unload_passes;
+    TEST_ASSERT_EQUAL_INT32(-1, hold(IDLE, 50.0f, 3000u));
+    TEST_ASSERT_EQUAL_INT(n, unload_passes);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -1096,5 +1187,9 @@ int main(void)
     RUN_TEST(test_no_lift_of_a_latched_channel_that_is_not_active_unloads_it);
     RUN_TEST(test_the_pass_that_releases_the_latch_is_held_off_too);
     RUN_TEST(test_the_auto_unload_still_unloads_a_channel_that_was_never_latched);
+    RUN_TEST(test_stale_passes_neither_trip_nor_count_toward_the_trip);
+    RUN_TEST(test_stale_passes_do_not_count_toward_the_release);
+    RUN_TEST(test_stale_passes_keep_what_the_release_has_seen);
+    RUN_TEST(test_a_stale_pass_ends_a_running_auto_unload);
     return UNITY_END();
 }
