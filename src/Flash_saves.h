@@ -11,6 +11,7 @@
 #define FLASH_NVM_CAL_ADDR    (FLASH_NVM_BASE_ADDR + 0x000) // 1x256B
 #define FLASH_NVM_MOTION_ADDR (FLASH_NVM_BASE_ADDR + 0x100) // 1x256B
 #define FLASH_NVM_AMS_ADDR    (FLASH_NVM_BASE_ADDR + 0x200) // 4x256B (0..3) => do +0x5FF
+// Pages: 0 CAL, 1 MOT, 2..5 FIL journals, 6..13 STA log, 14 FIL rollover scratch, 15 CAL backup (Flash_saves.cpp)
 
 #define FLASH_NVM256_PAGE_SIZE (256u)
 #define FLASH_NVM_TOTAL_SIZE    (4096u)
@@ -41,12 +42,22 @@ struct __attribute__((packed, aligned(4))) Flash_FilamentInfo
     uint8_t  color_A;
     uint16_t temperature_min;
     uint16_t temperature_max;
-    char     name[16]; // RAM holds up to 19 chars; longer names are cut to 16 here (bambubus_set_filament.h)
+    // RAM holds up to 19 chars; longer names are cut to 16 here
+    // (bambu_bus_ams.cpp get_package_set_filament / get_package_set_filament_type2).
+    char     name[16];
 };
 
 void Flash_saves_init(void);
+void Flash_background_run(void);
+bool Flash_background_idle(void);
 
 // AMS: 4x 256B
+// The two writes do not touch flash: they queue a background job that Flash_background_run() completes.
+// They return true only when flash already holds that value. false = a job was just queued, another job
+// is running, the bus is busy (state write only), or the sticky flash fault is set; callers keep calling
+// on later passes until true. Flash_AMS_state_write returns false at once for a channel >= 4 && != 0xFF.
+// Flash_AMS_state_read scans flash once; later calls return the cached channel, which completed jobs update.
+// CAL, MOT and the clears stay synchronous and return false while a background job is running.
 bool Flash_AMS_filament_read(uint8_t filament_idx, Flash_FilamentInfo* out);
 bool Flash_AMS_filament_write(uint8_t filament_idx, const Flash_FilamentInfo* info);
 bool Flash_AMS_filament_clear(uint8_t filament_idx);
@@ -54,12 +65,9 @@ bool Flash_AMS_filament_clear(uint8_t filament_idx);
 bool Flash_AMS_state_read(uint8_t* loaded_channel);
 bool Flash_AMS_state_write(uint8_t loaded_channel);
 
-// CAL: 1x 256B
-// fallback_mask: channels whose range is a calibration fallback, kept in the header's rsv bits 4..7
-// next to the polarity bits 0..3 (mc_pull_cal_range.h).
-bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4], uint8_t* fallback_mask);
-bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4],
-                                 uint8_t fallback_mask);
+// CAL: 2x 256B, page 0 and backup page 15; read takes the newer (sequence in rsv 16..31), write goes to the other
+bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4], float dm_none[4], uint8_t* valid_mask);
+bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4], const float dm_none[4], uint8_t valid_mask);
 bool Flash_MC_PULL_cal_clear(void);
 bool Flash_NVM_full_clear(void);
 

@@ -1,13 +1,15 @@
 #pragma once
-// Which AS5600 angle reads may be used, for the distance/speed tracker (AS5600_distance_updata) and
-// the motor direction test (MOTOR_get_dir). Hardware-free, tested on the host (test/test_as5600_sample).
+// Which AS5600 angle reads the distance/speed tracker (AS5600_distance_updata) may use.
+// Hardware-free, tested on the host (test/test_as5600_sample).
 //
-// On a NACK the driver (many_soft_AS5600.cpp, updata_angle) sets raw_angle = 0 and online = false.
-// The health gate only drops a channel after kAS5600_FAIL_TRIP (3) failed reads in a row, so failures
-// 1 and 2 used to be consumed as a real angle of 0: a fake move of up to half a turn (2048 counts,
-// 11.8 mm) and back, seen by every distance consumer (pull back, DM autoload, send limit). Taken as
-// the MOTOR_get_dir baseline, the same 0 made the first good read look like a move in a random
-// direction, which was then saved to flash.
+// The driver (many_soft_AS5600.cpp, updata_angle) returns a mask of the valid reads (answered, and
+// within 12 bits); on a failed read it sets online = false and leaves raw_angle at the last valid
+// angle. The health gate only drops a channel after kAS5600_FAIL_TRIP (3) failed reads in a row, so
+// failures 1 and 2 must be skipped, not consumed as an angle: V10.5's driver set raw_angle = 0 there,
+// a fake move of up to half a turn (2048 counts, 11.8 mm) and back, seen by every distance consumer
+// (pull back, DM autoload, send limit). The tracker skips them and also rejects an answered read that
+// implies an impossible jump, which the driver's mask cannot see. The motor direction test
+// (MOTOR_get_dir) checks its reads itself (V11's phases).
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -17,7 +19,8 @@
 // RAW ANGLE is 12 bits: the top 4 bits of its high byte always read 0. The soft-I2C driver only sees
 // a NACK on the address and register bytes, never a corrupted data byte, so an answered read above
 // 4095 (for example 0xFFFF when SDA opens during the data phase) is garbage: it is a failed read like
-// a NACK, for the health gate (AS5600_distance_updata), the tracker and the direction test alike.
+// a NACK, for the health gate (AS5600_distance_updata) and the tracker alike. The driver already
+// leaves such a read out of its valid mask; the tracker checks it again.
 #define AS5600_RAW_MAX 4095u
 
 static inline bool as5600_raw_ok(uint16_t raw)
@@ -91,8 +94,8 @@ static inline void as5600_track_reset(as5600_track_t *s)
     s->jumps = 0u;
 }
 
-// One poll of one channel. good: the channel passes the health gate; ok: this read was answered
-// (online, magnet present). now: SysTick of the read; ticks_per_us: time_hw_tpus.
+// One poll of one channel. good: the channel passes the health gate; ok: this read is valid (in the
+// driver's mask, magnet present). now: SysTick of the read; ticks_per_us: time_hw_tpus.
 static inline uint8_t as5600_track_sample(as5600_track_t *s, bool good, bool ok, uint16_t raw,
                                           uint32_t now, uint32_t ticks_per_us,
                                           int32_t *diff, uint32_t *dt)
@@ -107,7 +110,7 @@ static inline uint8_t as5600_track_sample(as5600_track_t *s, bool good, bool ok,
         return AS5600_TRACK_OFF;
     }
 
-    // raw is 0 (NACK) or above 12 bits (corrupted) here, not an angle, and never a baseline
+    // a failed read (raw: the last valid angle, or above 12 bits): no new angle, never a baseline
     if (!ok || !as5600_raw_ok(raw)) return AS5600_TRACK_SKIP;
 
     if (!s->valid)
@@ -144,189 +147,4 @@ static inline uint8_t as5600_track_sample(as5600_track_t *s, bool good, bool ok,
     *diff = d;
     *dt   = elapsed;
     return AS5600_TRACK_MOVE;
-}
-
-// ===== motor direction test (MOTOR_get_dir) =====
-// The motor runs at +PWM from rest until the gear has turned AS5600_DIR_MOVE_COUNTS from a baseline
-// read; the sign of that move is the direction saved to flash. A corrupted read can only decide it if
-// it repeats: the baseline needs two agreeing reads and the move three agreeing reads, all answered
-// and within 12 bits.
-
-// 163 counts = 0.94 mm of filament (14 degrees of the gear), unchanged: far above the sensor noise.
-#define AS5600_DIR_MOVE_COUNTS 163
-
-// Answered reads in a row, with the motor stopped, that must agree within AS5600_DIR_BASE_TOL counts
-// before the baseline is taken (the newer one is used). A corrupted baseline read would make every
-// later read look like a move in a random direction, even with no motion at all.
-#define AS5600_DIR_BASE_AGREE 2u
-
-// 32 counts (0.18 mm): 16x the +-2 count noise of a gear at rest, and a fifth of the move threshold.
-// A baseline that is off by up to 32 counts only shifts where the move is seen (after 131 to 195
-// counts of real travel instead of 163); it can neither invert the sign nor see a move where there is
-// none. Two corrupted reads in a row that land within 32 counts of each other are needed to fool it.
-#define AS5600_DIR_BASE_TOL 32
-
-// Reads that must all see the move, with the same sign, before the direction is accepted: the one
-// that first sees it (with the motor on, more than AS5600_DIR_MOVE_COUNTS), then two more with the
-// motor stopped (as before, the motor stops at the first one), which see the gear at rest. Stopping
-// first keeps the gear as close to the baseline as the old one-read test did (far from the half-turn
-// wrap), and costs 20 ms.
-#define AS5600_DIR_AGREE 3u
-
-// The two reads at rest only have to show the move by more than half the threshold, 81 counts
-// (0.47 mm, still 40x the noise), with the same sign. With the H-bridge braked the gear is held only
-// by friction, and the buffer spring or filament held at the toolhead may push it part of the way back
-// toward the baseline, where it rested before the test (it is not expected to go past it). The sign is
-// what gets saved; the size of the move says little about a corrupted read: a random 12-bit value is
-// more than 81 counts away on a given side 48% of the time, and more than 163 counts 46% of the time.
-#define AS5600_DIR_HOLD_COUNTS (AS5600_DIR_MOVE_COUNTS / 2)
-
-// Passes (10 ms apart) without a baseline that may fail (a failed read, or an answered read that
-// disagrees with the one before) before the channel is given up and left untested (dir stays 0,
-// nothing saved). The main loop calls a sensor bad after 3 failed reads in a row; 10 failures, at
-// least 90 ms, is no transient.
-#define AS5600_DIR_BASE_TRIES 10u
-
-// Once the motor has started, failed reads in a row that abort the channel (nothing saved). Same count
-// as the main-loop health gate (kAS5600_FAIL_TRIP): 1 or 2 are a transient, during which the motor is
-// stopped and nothing is counted toward the result.
-#define AS5600_DIR_FAIL_TRIP 3u
-
-enum
-{
-    AS5600_DIR_BASE = 0, // motor off: waiting for AS5600_DIR_BASE_AGREE reads to agree on a baseline
-    AS5600_DIR_RUN,      // motor on: waiting for the gear to move
-    AS5600_DIR_CONFIRM,  // motor off: the move is being re-read
-    AS5600_DIR_DONE,     // direction found (dir = +1 or -1)
-    AS5600_DIR_ABORT     // sensor failed: nothing may be saved for this channel
-};
-
-typedef struct
-{
-    int32_t base;  // baseline raw angle (motor at rest); in BASE, the candidate read
-    uint8_t phase;
-    uint8_t tries; // failed passes in BASE
-    uint8_t agree; // reads in a row that agree: on the baseline (BASE), on the move with sign `sign`
-    uint8_t fails; // failed reads in a row once the motor has started (RUN / CONFIRM)
-    int8_t  sign;
-    int8_t  dir;   // result once phase == AS5600_DIR_DONE
-} as5600_dir_probe_t;
-
-static inline void as5600_dir_probe_init(as5600_dir_probe_t *p)
-{
-    p->base  = 0;
-    p->phase = AS5600_DIR_BASE;
-    p->tries = 0u;
-    p->agree = 0u;
-    p->fails = 0u;
-    p->sign  = 0;
-    p->dir   = 0;
-}
-
-// The motor only runs while the gear is being watched: in RUN, and not after a failed read.
-static inline bool as5600_dir_probe_motor_on(const as5600_dir_probe_t *p)
-{
-    return (p->phase == AS5600_DIR_RUN) && (p->fails == 0u);
-}
-
-// Feed one read (ok: online). Returns the new phase.
-static inline uint8_t as5600_dir_probe_step(as5600_dir_probe_t *p, bool ok, uint16_t raw)
-{
-    // above 12 bits: corrupted data bytes, a failed read like a NACK
-    if (!as5600_raw_ok(raw)) ok = false;
-
-    switch (p->phase)
-    {
-    case AS5600_DIR_BASE:
-        if (!ok)
-        {
-            // raw is 0 or garbage here: never a baseline, and it breaks the run of agreeing reads
-            p->agree = 0u;
-            p->tries++;
-        }
-        else if (p->agree == 0u)
-        {
-            p->base  = (int32_t)raw; // first candidate
-            p->agree = 1u;
-        }
-        else
-        {
-            const int32_t d = as5600_angle_diff((int32_t)raw, p->base);
-            p->base = (int32_t)raw;
-            if ((d <= AS5600_DIR_BASE_TOL) && (d >= -AS5600_DIR_BASE_TOL))
-            {
-                p->agree++;
-            }
-            else
-            {
-                // one of the two is corrupted: the newer read is the new candidate
-                p->agree = 1u;
-                p->tries++;
-            }
-        }
-
-        if (p->agree >= AS5600_DIR_BASE_AGREE)
-        {
-            p->agree = 0u;
-            p->phase = AS5600_DIR_RUN;
-        }
-        else if (p->tries >= AS5600_DIR_BASE_TRIES)
-        {
-            p->phase = AS5600_DIR_ABORT;
-        }
-        break;
-
-    case AS5600_DIR_RUN:
-    case AS5600_DIR_CONFIRM:
-    {
-        if (!ok)
-        {
-            // No angle this pass: the motor is held stopped (as5600_dir_probe_motor_on) and nothing
-            // is counted toward the result. Only a sensor that stays lost aborts the channel, and
-            // then nothing is saved (as before).
-            p->fails++;
-            if (p->fails >= AS5600_DIR_FAIL_TRIP) p->phase = AS5600_DIR_ABORT;
-            break;
-        }
-        p->fails = 0u;
-
-        const int32_t d = as5600_angle_diff((int32_t)raw, p->base);
-        const int32_t m = (d < 0) ? -d : d;
-        const int8_t  s = (d > 0) ? (int8_t)1 : (int8_t)-1;
-
-        if ((p->phase == AS5600_DIR_CONFIRM) && (s == p->sign) && (m > AS5600_DIR_HOLD_COUNTS))
-        {
-            p->agree++; // re-read at rest: the move is still there
-        }
-        else if (m > AS5600_DIR_MOVE_COUNTS)
-        {
-            // the first read that sees the move (or a move the other way): count again from it
-            p->sign  = s;
-            p->agree = 1u;
-        }
-        else
-        {
-            // no move (after all): run the motor again
-            p->agree = 0u;
-            p->phase = AS5600_DIR_RUN;
-            break;
-        }
-
-        if (p->agree >= AS5600_DIR_AGREE)
-        {
-            p->dir   = p->sign;
-            p->phase = AS5600_DIR_DONE;
-        }
-        else
-        {
-            p->phase = AS5600_DIR_CONFIRM;
-        }
-        break;
-    }
-
-    default:
-        break;
-    }
-
-    return p->phase;
 }

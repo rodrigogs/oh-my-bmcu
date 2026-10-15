@@ -1,6 +1,7 @@
 #include "ws2812.h"
 #include "hal/time_hw.h"
 #include "hal/irq_wch.h"
+#include "_bus_hardware.h"
 
 // WS2812B timing (datasheet):
 //  - TH+TL = 1.25us ±600ns
@@ -8,6 +9,9 @@
 //  - T1H   = 0.85us ±150ns
 //  - RES low >= 50us (WS2812B-2020: > 280us). No wait here: RGB_update()'s 10 ms throttle keeps
 //    each strip's own pin low far longer between frames (ws2812_throttle_t in ws2812_frame.h).
+//
+// Not drawn while the flash clock is slowed (time_hw_slow: SysTick at 9 MHz would double every bit)
+// or while the bus is busy (bus_background_ready); the frame stays dirty and is sent on a later pass.
 //
 // STK = HCLK/8. Przy HCLK=144MHz => STK=18MHz => 55.56ns/tick.
 #define WS2812_TBIT_TICKS  (22u)  // 1.222us @18MHz
@@ -87,7 +91,7 @@ void WS2812_class::clear(void)
 
 void WS2812_class::updata(void)
 {
-    if (!ws2812_frame_dirty(&frame)) return;
+    if (!ws2812_frame_dirty(&frame) || time_hw_slow || !bus_background_ready()) return;
 
     GPIO_TypeDef* const p = port;
     const uint32_t      m = (uint32_t)pin;

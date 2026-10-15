@@ -12,7 +12,9 @@
 // An auto-unload whose gear does not turn (less than 1 mm in 1 s at its 850 PWM) must end ML_STALL_MS
 // after the gear stopped, flagged as a limit for the unload fault LED, and need a new lift; one whose
 // gear turns, however slowly past 1 mm/s, must end only on its own ends, as before. The manual empty
-// pull, at 700 PWM and held by hand, has no stall limit.
+// pull, at 700 PWM and held by hand, has no stall limit. Since V11 neither drives a channel without a
+// valid calibration, nor a DM channel whose autoload fail latch is set (motor_motion_run's
+// au.inserted): a running auto-unload ends there, with no unload fault.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -662,6 +664,81 @@ static void test_the_hold_off_leaves_the_manual_empty_pull(void)
     TEST_ASSERT_EQUAL_INT(AU_DRIVE_EMPTY_PULL, hold(95.0f, 3000u));
 }
 
+// ---- Calibration and the DM fail latch (V11) ----
+
+// ---- adapted from Motion_control.cpp: motor_motion_run's au.inserted ----
+// ---- anchor: motor_motion_run from /au\.inserted  = / to /^\s+;$/ ----
+// The channel counts as inserted for auto_unload_pass() only with a valid calibration
+// (MC_PULL_calibration_is_valid) and, with the DM board, its fail latch clear (dm_fail_latch).
+static bool cal_valid  = true;
+static bool fail_latch = false;
+
+static bool au_inserted(bool channel_inserted)
+{
+    return channel_inserted && cal_valid && !fail_latch;
+}
+
+static void test_no_auto_unload_or_manual_pull_without_a_valid_calibration(void)
+{
+    // Why the gate: on a channel without a valid calibration run() and Motion_control_set_PWM keep the
+    // PWM at 0, but x_prev would still read 850 for the auto-unload, so its stall check saw a gear
+    // that does not turn and flagged the unload fault (blinking red) 1 s in, on a channel that never
+    // drove.
+    v_mm_s = 0.0;
+    lift_and_release();
+    TEST_ASSERT_EQUAL_INT32((int32_t)ML_STALL_MS - 1, until_not(AU_DRIVE_UNLOAD, 50.0f, 60000u));
+    TEST_ASSERT_EQUAL_UINT32(1u, limit_passes);
+
+    // With the gate: neither the gesture nor the buffer held up with no filament drives, and nothing
+    // is flagged.
+    setUp();
+    cal_valid = false;
+    in.inserted = au_inserted(true);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 300u));
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(50.0f, 5000u));
+    in.ks = KS_NONE;
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(95.0f, 3000u));
+    TEST_ASSERT_EQUAL_UINT32(0u, unload_passes);
+    TEST_ASSERT_EQUAL_UINT32(0u, limit_passes);
+    TEST_ASSERT_EQUAL_UINT8(0u, st.active);
+
+    // Calibrated (after a reboot): the manual pull and the gesture work as before.
+    cal_valid = true;
+    in.inserted = au_inserted(true);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_EMPTY_PULL, hold(95.0f, 1u));
+    in.ks = KS_BOTH;
+    v_mm_s = 60.0;
+    lift_and_release();
+}
+
+static void test_a_fail_latch_ends_the_auto_unload_and_blocks_the_manual_pull(void)
+{
+    // A DM autoload that fails while an auto-unload runs (its guard counts the auto-unload's passes):
+    // the auto-unload ends on the next pass, with its state cleared and no limit, and a lift does not
+    // start another; the buffer held up with the key at 'none' does not pull either, until the latch
+    // is cleared (the filament counts as out). Then the manual pull runs again, and the gesture needs
+    // a new lift.
+    lift_and_release();
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_UNLOAD, hold(50.0f, 500u));
+    fail_latch = true;
+    in.inserted = au_inserted(true);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(50.0f, 1u));
+    TEST_ASSERT_EQUAL_UINT8(0u, st.active);
+    TEST_ASSERT_EQUAL_UINT8(0u, st.limit);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(90.0f, 300u));
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(50.0f, 1000u));
+    in.ks = KS_NONE;
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(95.0f, 100u));
+    TEST_ASSERT_EQUAL_UINT32(0u, limit_passes);
+    fail_latch = false;
+    in.inserted = au_inserted(true);
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_EMPTY_PULL, hold(95.0f, 1u));
+    in.ks = KS_BOTH;
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(70.0f, AUTO_UNLOAD_ARM_MS + 1u)); // that lift expires
+    TEST_ASSERT_EQUAL_INT(AU_DRIVE_NONE, hold(50.0f, 1000u));
+    lift_and_release();
+}
+
 // ---- Online: the same decisions as the inline code before auto_unload.h ----
 
 // ---- adapted from Motion_control.cpp: motor_motion_run's auto-unload pass before auto_unload.h ----
@@ -904,6 +981,8 @@ int main(void)
     RUN_TEST(test_the_hold_off_outlasts_passes_outside_the_idle_control);
     RUN_TEST(test_the_hold_drops_a_lift_under_way_and_leaves_a_running_auto_unload);
     RUN_TEST(test_the_hold_off_leaves_the_manual_empty_pull);
+    RUN_TEST(test_no_auto_unload_or_manual_pull_without_a_valid_calibration);
+    RUN_TEST(test_a_fail_latch_ends_the_auto_unload_and_blocks_the_manual_pull);
     RUN_TEST(test_online_decisions_match_the_code_before);
     RUN_TEST(test_the_hold_off_only_ever_delays_arming_until_a_pass_below_55);
     return UNITY_END();

@@ -33,6 +33,12 @@
 // the buffer reading drops, so a buffer stuck or misread above 80% drove 700 PWM with no end. Both
 // work again from the first pass with the link up (an auto-unload after a new lift).
 //
+// Since V11 neither runs on a channel without a valid calibration (MC_PULL_calibration_is_valid:
+// run() and Motion_control_set_PWM keep its PWM at 0, so the stall check would see 850 PWM and no
+// motion and blink the unload fault), nor, with the DM board, while the channel's autoload fail
+// latch is set (V11: a failed autoload keeps the motor off until the filament is out).
+// motor_motion_run passes both as inserted == false: the state is reset and nothing drives.
+//
 // Jam latch (jam_latch.h): outside on_use/stop_on_use a person releases it by holding the buffer at
 // or above JAM_RELEASE_AWAY_PCT (85%) for JAM_RELEASE_MS (1 s), the auto-unload's own lift. A
 // latched active channel is stopped in idle (motor_motion_switch), so it had no idle control and no
@@ -124,12 +130,12 @@ typedef enum
 typedef struct
 {
     bool     online;     // motor_motion_run's error == 0
-    bool     inserted;   // filament_channel_inserted[ch]
+    bool     inserted;   // filament_channel_inserted[ch], with a valid calibration and (DM) no fail latch
     bool     idle_ctrl;  // the channel runs its idle control (filament_motion_pressure_ctrl_idle)
     float    pct;        // MC_PULL_pct_f[ch]
     uint8_t  ks;         // MC_ONLINE_key_stu[ch]
     uint64_t now_ms;
-    uint32_t pos_cnt;    // as5600_count[ch]
+    uint32_t pos_cnt;    // encoder_count(ch)
     float    pwm;        // the PWM the channel was driven with since the previous pass (x_prev)
 } au_in_t;
 

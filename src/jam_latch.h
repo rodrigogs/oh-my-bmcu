@@ -70,7 +70,10 @@ static inline bool jam_trip_update(jam_trip_t *t, float pct, uint32_t now_ms)
 // - the printer resumes the channel: since the trip it has commanded anything other than on_use
 //   for it (stop_on_use, send_out, pull-back, idle, another channel) and then commands
 //   before_on_use or on_use for it again, and the buffer has been at or above JAM_TRIP_PCT at
-//   least once since the trip. If it has not, no filament has moved since the trip and the tangle
+//   least once since the trip. The before_on_use leg counts only after a send_out: since V11
+//   set_motion() drops a before_on_use unless the channel is in send_out or before_on_use
+//   (bambu_bus_ams.cpp), before the motion changes, so a paused print (stop_on_use) is resumed,
+//   and released, by on_use. If it has not, no filament has moved since the trip and the tangle
 //   is still there: the channel stays latched, i.e. it is latched again at once, without another
 //   JAM_TRIP_MS of push (the time below JAM_TRIP_PCT has already qualified; a reading at that level
 //   is also what restarts the trip timer). So a printer that retries by itself (stop_on_use, on_use,
@@ -87,9 +90,10 @@ static inline bool jam_trip_update(jam_trip_t *t, float pct, uint32_t now_ms)
 //     extruder): the on_use band's low edge (MC_ON_USE_TARGET_PCT - MC_ON_USE_BAND_LO_DELTA, where
 //     the on_use control stops pushing; 51.8% on A1). The spring's rest position is the calibrated
 //     neutral, 50%, but on A1 that edge is only 0.036 of the buffer's high side above it
-//     (pull_v_to_percent_f()): +3.6 mV with the 1.75 V fallback high side, +5.4 to 6.3 mV with a
-//     150-175 mV side, +12.6 mV with the 2.00 V default. That is inside the 20 mV the calibration
-//     accepts as the buffer back at rest (CAL_CENTER_EPS_V, mc_pull_cal_range.h), so a slack
+//     (pull_v_to_percent_f()): +3.6 mV with the narrowest high side the calibration stores (just
+//     over MC_PULL_CAL_PRESS_DELTA_V, 100 mV), +5.4 to 6.3 mV with a 150-175 mV side, +12.6 mV with
+//     the 2.00 V default. That is inside the 25 mV the calibration accepts as the buffer back at
+//     rest (MC_PULL_CAL_CENTER_EPS_V, mc_pull_cal_range.h), so a slack
 //     filament alone can release it: a buffer that rests slightly high meets the edge with nothing
 //     moved, and 1 s later the latch is released and the red LED goes out, though the tangle is
 //     still there. The next resume then pushes again, and the channel latches again JAM_TRIP_MS
@@ -334,7 +338,7 @@ typedef enum
 // g_on_use_low_latch and g_on_use_jam_latch.
 // - The on_use control: while either latch is set (unchanged).
 // - hold_load in before_on_use: while the jam latch is set. It used to run on, so a printer that
-//   resumed a paused print with before_on_use while the spool was still held had the motor push
+//   reloaded the channel (send_out, then before_on_use) while the spool was still held had the motor push
 //   into the tangle at up to 1000 PWM (duty-cycled by the anti-stall). Its silent 20 s latch cannot
 //   be set there: set_motion() clears it when the channel enters before_on_use.
 // - The idle control: while the jam latch is set. motor_motion_switch stops a latched channel in
@@ -353,12 +357,14 @@ typedef enum
 // it and does not unload it, also when the hand sags (without reaching the middle) and lifts it
 // again before letting go. The manual empty pull needs no filament at the switch, which clears the
 // latch.
-// The release rules above are unchanged. A resume with before_on_use releases the latch at once if
-// the buffer has been back at JAM_TRIP_PCT since the trip (a person fed filament or lifted the
+// The release rules above are unchanged. A before_on_use after a send_out releases the latch at once
+// if the buffer has been back at JAM_TRIP_PCT since the trip (a person fed filament or lifted the
 // buffer), and hold_load runs from that pass on. If it has not, the channel stays latched and
 // braked, its state LED stays red, and the printer's on_use after it gets 0xF06F: the printer's
 // before_on_use replies carry the fixed pressure set_motion() gives them (bambu_bus_ams.cpp), so
-// the jam reaches the printer in on_use, as before.
+// the jam reaches the printer in on_use, as before. From a pause (stop_on_use) set_motion() drops a
+// before_on_use, so the printer's on_use releases the latch, or gets 0xF06F if the buffer has not
+// risen since the trip; the 1 s level rule above (the band's low edge, or 85%) still applies.
 static inline bool jam_latch_brakes(jam_ctrl_t ctrl, uint8_t brake, uint8_t jam)
 {
     if (ctrl == JAM_CTRL_ON_USE) return brake != 0u;

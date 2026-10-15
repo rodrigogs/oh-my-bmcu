@@ -154,7 +154,14 @@ static void test_the_record_is_the_ten_backup_registers_of_the_v203c8(void)
     // A cleared or erased-looking register is neither magic.
     TEST_ASSERT_TRUE(BLACKBOX_MAGIC != 0u && BLACKBOX_MAGIC != 0xFFFFu);
     TEST_ASSERT_TRUE(BLACKBOX_TRAP_MAGIC != 0u && BLACKBOX_TRAP_MAGIC != 0xFFFFu);
-    TEST_ASSERT_TRUE(BLACKBOX_PHASE_RGB <= 0xFFu); // one byte
+    TEST_ASSERT_TRUE(BLACKBOX_PHASE_FLASH <= 0xFFu); // the last phase: one byte
+
+    // Phases are appended: a record stored by an older image keeps its meaning (V11 merge: FLASH 12).
+    TEST_ASSERT_EQUAL_INT(6, BLACKBOX_PHASE_AHUB);
+    TEST_ASSERT_EQUAL_INT(9, BLACKBOX_PHASE_NVM);
+    TEST_ASSERT_EQUAL_INT(10, BLACKBOX_PHASE_MOTION);
+    TEST_ASSERT_EQUAL_INT(11, BLACKBOX_PHASE_RGB);
+    TEST_ASSERT_EQUAL_INT(12, BLACKBOX_PHASE_FLASH);
 
     // The backup domain's clock and write-enable bits.
     TEST_ASSERT_EQUAL_HEX32(SDK_PWREN, BLACKBOX_RCC_PWREN);
@@ -353,6 +360,7 @@ static void test_a_record_survives_encode_and_decode(void)
         {true, 0x03u, 0u, BLACKBOX_PHASE_BOOT, 0u, false, 0u, 0u},
         {true, 0x09u, 1u, BLACKBOX_PHASE_MOTION, 648000u, false, 0u, 0u}, // a 36 ms pass: over 16 bits
         {true, 0x3Fu, 255u, BLACKBOX_PHASE_RGB, 0xFFFFFFFFu, true, 0x82u, 0xFFFFFFFEu},
+        {true, 0x09u, 1u, BLACKBOX_PHASE_FLASH, 54000u, false, 0u, 0u}, // a 3 ms pass in the flash step
         {true, 0x08u, 7u, BLACKBOX_PHASE_BAMBUBUS, 0x00010000u, true, 0x02u, 0x00000000u},
         {true, 0x09u, 2u, BLACKBOX_PHASE_CALIBRATION, 17u, true, 0x05u, 0x00004F3Au},
     };
@@ -405,7 +413,7 @@ static void test_boots_from_power_on_through_hangs_traps_and_resets(void)
     TEST_ASSERT_EQUAL_UINT32(0u, now.pass_max);
     TEST_ASSERT_FALSE(now.trapped);
 
-    // The run: boot steps, then the loop with passes of 0.5, 36 (an NVM job) and 1 ms, and it hangs
+    // The run: boot steps, then the loop with passes of 0.5, 36 (a late pass) and 1 ms, and it hangs
     // in Motion_control_run.
     phase(BLACKBOX_PHASE_CALIBRATION);
     phase(BLACKBOX_PHASE_BUS_INIT);
@@ -620,7 +628,7 @@ static void test_the_longest_pass_is_kept_and_reported_once(void)
     TEST_ASSERT_TRUE(blackbox_pass_end(&p, 0x00000100u));
     TEST_ASSERT_EQUAL_UINT32(0x200u, p.max);
 
-    // A 36 ms pass (one NVM job) and the watchdog's longest 1.6 s both fit 32 bits.
+    // A 36 ms late pass and the watchdog's longest 1.6 s both fit 32 bits.
     blackbox_pass_begin(&p, 0u);
     TEST_ASSERT_TRUE(blackbox_pass_end(&p, 36u * TPMS));
     TEST_ASSERT_TRUE(blackbox_pass_end(&p, 36u * TPMS + 1601u * TPMS));

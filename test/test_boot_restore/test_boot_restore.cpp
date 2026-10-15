@@ -1,9 +1,12 @@
 // Host tests for src/boot_restore.h: the loaded channel the BMCU restores at boot (NVM STA record)
 // and what it reports for it until the printer references it. They run the header through copies
-// of its callers: main.cpp's loaded-channel state (ams_state_*), the empty-switch check at the top
-// of Motion_control_run, and set_motion from bambu_bus_ams.cpp, so the order in which the hooks run
+// of its callers: main.cpp's loaded-channel state (ams_state_*, V11's claim / pending-write rules),
+// main.cpp's boot check after Motion_control_init (V11), the empty-switch check at the top of
+// Motion_control_run, and set_motion from bambu_bus_ams.cpp, so the order in which the hooks run
 // inside a printer command is covered too.
 //
+// At boot (V11), a restored channel whose switches read empty or whose calibration is not valid is
+// unloaded before the bus starts, in both images (the 'none' STA record is queued).
 // BMCU_BOOT_RESTORE_LOADED=1 (default): the restored channel is reported in use from boot, as
 // before, and still is after any number of idle polls; but when its switches read empty before the
 // printer has referenced it, the restored state is undone and the channel reads idle. Once the
@@ -18,34 +21,71 @@
 
 #define BAMBU_BUS_AMS_NUM 0
 
+#include "ams_addressing.h"
 #include "boot_restore.h"
 
 // ---- Host stand-ins for the firmware globals set_motion uses ----
 _ams ams[ams_max_number];
 uint8_t bus_now_ams_num = 0;
-uint8_t bambubus_ams_map[4] = {0, 1, 2, 3};
 uint32_t time_hw_tpms = 18000u;  // SysTick ticks per ms (144 MHz / 8)
 static uint32_t g_ticks = 0x10000000u;
 static uint32_t time_ticks32(void) { return g_ticks; }
+// bambu_bus_ams.cpp, fixed mode (BAMBU_BUS_AMS_NUM 0..3): the unit number and the local ams[] index.
+static uint8_t bambubus_ams_num(void) { return (uint8_t)BAMBU_BUS_AMS_NUM; }
+static uint8_t bambubus_local_ams_index(void) { return (uint8_t)BMCU_LOCAL_AMS_INDEX; }
 
-// ---- adapted from main.cpp: the loaded-channel state (NVM writes only counted) ----
+// ---- adapted from main.cpp: the loaded-channel state (the STA writes it queues counted) ----
 // ---- anchor: g_boot_restore ----
+// ---- anchor: ams_state_claim_loaded ----
 // ---- anchor: ams_state_set_loaded ----
 // ---- anchor: ams_state_set_unloaded ----
 // ---- anchor: ams_state_get_loaded ----
 // ---- anchor: ams_state_boot_restore_deferred ----
 // ---- anchor: ams_state_printer_command ----
+// g_state_dirty / g_state_write_value: the STA write main()'s loop hands to Flash_AMS_state_write
+// (never cleared here: no flash). sta_writes counts every write queued.
 static uint8_t g_loaded_ch = 0xFF;
+static uint8_t g_state_dirty = 0;
+static uint8_t g_state_write_value = 0xFF;
+static uint8_t g_loaded_flash_pending = 0;
 static boot_restore_t g_boot_restore = {0xFFu};
 static bool kRestoreAtBoot = true;  // BMCU_BOOT_RESTORE_LOADED != 0 (a constant in the firmware)
-static int nvm_jobs;
+static int sta_writes;
+
+static void queue_sta_write(uint8_t value)
+{
+    g_state_write_value = value;
+    g_state_dirty = 1u;
+    sta_writes++;
+}
+
+void ams_state_claim_loaded(uint8_t filament_ch)
+{
+    if (filament_ch >= 4u) return;
+    if (g_loaded_ch != 0xFFu && g_loaded_ch != filament_ch) return;
+
+    if (g_loaded_ch == 0xFFu)
+    {
+        g_loaded_ch = filament_ch;
+        g_loaded_flash_pending = 1u;
+    }
+}
 
 void ams_state_set_loaded(uint8_t filament_ch)
 {
     if (filament_ch >= 4u) return;
-    if (g_loaded_ch != 0xFFu) return;
-    g_loaded_ch = filament_ch;
-    nvm_jobs++;
+    if (g_loaded_ch != 0xFFu && g_loaded_ch != filament_ch) return;
+
+    if (g_loaded_ch == 0xFFu)
+    {
+        g_loaded_ch = filament_ch;
+        g_loaded_flash_pending = 1u;
+    }
+
+    if (!g_loaded_flash_pending) return;
+
+    queue_sta_write(filament_ch);
+    g_loaded_flash_pending = 0u;
 }
 
 void ams_state_set_unloaded(uint8_t filament_ch)
@@ -53,10 +93,11 @@ void ams_state_set_unloaded(uint8_t filament_ch)
     if (g_loaded_ch == 0xFFu) return;
     if (filament_ch < 4u && g_loaded_ch != filament_ch) return;
     g_loaded_ch = 0xFFu;
-    nvm_jobs++;
+    g_loaded_flash_pending = 0u;
+    queue_sta_write(0xFFu);
 
     // On any path: a restored in-use state the printer has not referenced yet goes with it.
-    boot_restore_on_unloaded(&g_boot_restore, &ams[BAMBU_BUS_AMS_NUM], kRestoreAtBoot);
+    boot_restore_on_unloaded(&g_boot_restore, &ams[BMCU_LOCAL_AMS_INDEX], kRestoreAtBoot);
 }
 
 uint8_t ams_state_get_loaded(void)
@@ -71,7 +112,7 @@ bool ams_state_boot_restore_deferred(void)
 
 void ams_state_printer_command(uint8_t read_num, uint8_t statu_flags, uint8_t motion_flag)
 {
-    boot_restore_on_command(&g_boot_restore, &ams[BAMBU_BUS_AMS_NUM], kRestoreAtBoot, read_num, statu_flags,
+    boot_restore_on_command(&g_boot_restore, &ams[BMCU_LOCAL_AMS_INDEX], kRestoreAtBoot, read_num, statu_flags,
                             motion_flag);
 }
 
@@ -97,10 +138,11 @@ static uint8_t last_before_on_use_motion_flag = 0x00;
 static uint8_t count_on_use = 0u;
 bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char fliment_motion_flag, uint8_t ams_num)
 {
-    const uint8_t fixed_ams_num = (uint8_t)BAMBU_BUS_AMS_NUM;
+    const uint8_t fixed_ams_num = bambubus_ams_num();
+    const uint8_t local_ams_idx = bambubus_local_ams_index();
     if (ams_num != fixed_ams_num) return false;
 
-    _ams *ams_ptr = &ams[bambubus_ams_map[fixed_ams_num]];
+    _ams *ams_ptr = &ams[local_ams_idx];
 
     // Hands the loaded channel restored at boot to the printer on its first reference (main.cpp).
     ams_state_printer_command(read_num, statu_flags, fliment_motion_flag);
@@ -114,6 +156,11 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
         const bool is_stop_on_use   = ((statu_flags == 0x07) && (fliment_motion_flag == 0x00));
         const bool is_on_use        = ((statu_flags == 0x07) && (fliment_motion_flag == 0x7F));
         const bool is_before_pullb  = ((statu_flags == 0x09) && (fliment_motion_flag == 0x3F));
+
+        if (is_before_on_use &&
+            ams_ptr->filament[ch].motion != _filament_motion::send_out &&
+            ams_ptr->filament[ch].motion != _filament_motion::before_on_use)
+            return true;
 
         uint32_t &t_sendout_onuse = time_sendout_onuse_ticks[ch];
 
@@ -140,7 +187,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                     ams_ptr->pressure = 0xF9C6;
                     time_sendout_onuse_ticks[prev] = 0u;
                 }
-                bus_now_ams_num = bambubus_ams_map[fixed_ams_num];
+                bus_now_ams_num = local_ams_idx;
                 ams_ptr->now_filament_num = ch;
             }
         }
@@ -149,6 +196,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
         {
             t_sendout_onuse = 0u;
             count_on_use = 0u;
+            last_before_on_use_motion_flag = 0x00u;
 
             const _filament_motion prev = ams_ptr->filament[ch].motion;
 
@@ -182,7 +230,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 ams_ptr->pressure = (prev == _filament_motion::send_out) ? 0x4700 : 0x2B00;
             }
 
-            ams_state_set_loaded(ch);
+            ams_state_claim_loaded(ch);
         }
         else if (is_stop_on_use)
         {
@@ -357,33 +405,62 @@ static const _filament_motion BEFORE_PULL_BACK = _filament_motion::before_pull_b
 static const _filament_motion PULL_BACK = _filament_motion::pull_back;
 static const _filament_motion STOP_ON_USE = _filament_motion::stop_on_use;
 
-static _ams &A = ams[BAMBU_BUS_AMS_NUM];
-static bool filament[4];  // MC_ONLINE_key_stu[ch] != 0: filament at the channel's switches
+static _ams &A = ams[BMCU_LOCAL_AMS_INDEX];
+static bool filament[4];   // MC_ONLINE_key_stu[ch] != 0: filament at the channel's switches
+static bool cal_valid[4];  // MC_PULL_calibration_is_valid(ch)
 
 // ---- Motion_control.cpp at this commit: kChCount, verbatim ----
 static constexpr uint8_t  kChCount = 4;
 // ---- end of the Motion_control.cpp copy ----
 static uint8_t MC_ONLINE_key_stu[4];
 
-// ---- adapted from main.cpp: power-on, ams_init() and the STA record's restore (Motion_control_init sets online) ----
+// Motion_control.cpp (V11): a channel's filament is present when its buffer is plugged in
+// (filament_channel_inserted, always here) and its switches see filament.
+static bool Motion_control_filament_present(uint8_t ch)
+{
+    return ch < kChCount && MC_ONLINE_key_stu[ch] != 0u;
+}
+
+static bool MC_PULL_calibration_is_valid(uint8_t ch)
+{
+    return ch < 4u && cal_valid[ch];
+}
+
+// ---- adapted from main.cpp: power-on, ams_init(), the STA record's restore and V11's check after Motion_control_init ----
 // ---- anchor: main from /ams_init\(\);/ to /Motion_control_init\(\);/ ----
+// ---- anchor: main from /Motion_control_init\(\);/ to /ams_state_set_unloaded\(g_loaded_ch\);/ ----
 // Power-on: RAM as after ams_init(), then main.cpp's restore. sta_ch: the STA record (0xFF: none
 // loaded, or no valid record: g_loaded_ch then stays 0xFF and the restore does nothing either).
+// Motion_control_init sets the AMS online and reads the switches (MC_PULL_ONLINE_read).
 static void boot(bool restore_at_boot, uint8_t sta_ch)
 {
     for (uint8_t i = 0; i < ams_max_number; i++) ams[i].init();
-    A.online = true;  // Motion_control_init
     bus_now_ams_num = 0;
     memset(time_sendout_onuse_ticks, 0, sizeof(time_sendout_onuse_ticks));
     last_before_on_use_motion_flag = 0x00;
     count_on_use = 0u;
 
     kRestoreAtBoot = restore_at_boot;
-    g_boot_restore.ch = 0xFFu;  // static initialiser
-    nvm_jobs = 0;
+    g_boot_restore.ch = 0xFFu;  // static initialisers
+    g_state_dirty = 0u;
+    g_state_write_value = 0xFFu;
+    g_loaded_flash_pending = 0u;
+    sta_writes = 0;
 
     g_loaded_ch = sta_ch;
     boot_restore_init(&g_boot_restore, &A, sta_ch, kRestoreAtBoot);
+
+    A.online = true;  // Motion_control_init
+    for (uint8_t i = 0; i < 4u; i++) MC_ONLINE_key_stu[i] = filament[i] ? 1u : 0u;
+    if (g_loaded_ch < 4u && (!Motion_control_filament_present(g_loaded_ch) ||
+        !MC_PULL_calibration_is_valid(g_loaded_ch))) {
+        _ams* a = &ams[BMCU_LOCAL_AMS_INDEX];
+        a->filament[g_loaded_ch].motion = _filament_motion::idle;
+        a->now_filament_num = 0xFFu;
+        a->filament_use_flag = 0u;
+        a->pressure = 0xF9C6u;
+        ams_state_set_unloaded(g_loaded_ch);
+    }
 }
 
 // Motion_control_run up to the empty-switch check, once per main-loop pass (with or without link).
@@ -467,7 +544,7 @@ static void assert_motion(uint8_t ch, _filament_motion m)
 // Everything set_motion reads or writes, to compare two runs.
 typedef struct
 {
-    uint8_t  now, use, loaded, last_flag, count, bus_ams;
+    uint8_t  now, use, loaded, last_flag, count, bus_ams, sta_dirty, sta_value, pending;
     uint8_t  motion[4];
     uint16_t pressure;
     uint32_t t_sendout[4];
@@ -483,6 +560,9 @@ static snap_t snap(void)
     s.last_flag = last_before_on_use_motion_flag;
     s.count = count_on_use;
     s.bus_ams = bus_now_ams_num;
+    s.sta_dirty = g_state_dirty;
+    s.sta_value = g_state_write_value;
+    s.pending = g_loaded_flash_pending;
     for (uint8_t i = 0; i < 4u; i++)
     {
         s.motion[i] = (uint8_t)A.filament[i].motion;
@@ -498,7 +578,11 @@ static const uint8_t X = 2u;  // another channel with filament
 void setUp(void)
 {
     g_ticks = 0x10000000u;
-    for (uint8_t i = 0; i < 4u; i++) filament[i] = false;
+    for (uint8_t i = 0; i < 4u; i++)
+    {
+        filament[i] = false;
+        cal_valid[i] = true;
+    }
     filament[S] = true;
     filament[X] = true;
 }
@@ -531,6 +615,7 @@ static void test_references_every_command_for_the_channel_and_the_unload_only(vo
 
 static void test_init_restores_on_use_at_boot_as_before(void)
 {
+    for (uint8_t i = 0; i < 4u; i++) filament[i] = true;
     for (uint8_t ch = 0; ch < 4u; ch++)
     {
         boot(true, ch);
@@ -539,12 +624,13 @@ static void test_init_restores_on_use_at_boot_as_before(void)
         TEST_ASSERT_EQUAL_HEX8(0x04, A.filament_use_flag);
         TEST_ASSERT_EQUAL_HEX16(0x2B00, A.pressure);
         for (uint8_t i = 0; i < 4u; i++) assert_motion(i, (i == ch) ? ON_USE : IDLE);
-        TEST_ASSERT_EQUAL(0, nvm_jobs);
+        TEST_ASSERT_EQUAL(0, sta_writes);
     }
 }
 
 static void test_init_deferred_keeps_the_channel_but_leaves_ram_idle(void)
 {
+    for (uint8_t i = 0; i < 4u; i++) filament[i] = true;
     for (uint8_t ch = 0; ch < 4u; ch++)
     {
         boot(false, ch);
@@ -592,13 +678,15 @@ static void test_default_idle_polls_still_see_the_channel_in_use(void)
         assert_motion(S, ON_USE);
         TEST_ASSERT_EQUAL_HEX8(S, g_loaded_ch);
     }
-    TEST_ASSERT_EQUAL(0, nvm_jobs);
+    TEST_ASSERT_EQUAL(0, sta_writes);
 }
 
 static void test_default_channel_empty_at_boot_reports_idle(void)
 {
     filament[S] = false;  // pulled out while the printer was off
-    boot(true, S);
+    boot(true, S);        // V11's check after Motion_control_init unloads it
+    TEST_ASSERT_EQUAL_HEX8(0xFF, g_loaded_ch);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, g_boot_restore.ch);
     pass();  // first main-loop pass, before the printer's first heartbeat
 
     TEST_ASSERT_EQUAL_HEX8(0xFF, g_loaded_ch);
@@ -612,7 +700,8 @@ static void test_default_channel_empty_at_boot_reports_idle(void)
         idle_poll();
         assert_reports_idle();
     }
-    TEST_ASSERT_EQUAL(1, nvm_jobs);  // the unloaded record, as before
+    TEST_ASSERT_EQUAL(1, sta_writes);  // the unloaded record, as before
+    TEST_ASSERT_EQUAL_HEX8(0xFF, g_state_write_value);
 }
 
 static void test_default_channel_pulled_out_after_idle_polls_reports_idle(void)
@@ -736,8 +825,12 @@ static void test_default_restored_state_is_not_undone_once_referenced(void)
         pass();
         snap_t after = snap();
         TEST_ASSERT_EQUAL_HEX8(0xFF, after.loaded);
+        TEST_ASSERT_EQUAL_HEX8(1u, after.sta_dirty);    // 'none' queued
+        TEST_ASSERT_EQUAL_HEX8(0xFF, after.sta_value);
         after.loaded = before.loaded;
-        TEST_ASSERT_EQUAL_MEMORY(&before, &after, sizeof(before));  // only g_loaded_ch changed
+        after.sta_dirty = before.sta_dirty;
+        after.sta_value = before.sta_value;
+        TEST_ASSERT_EQUAL_MEMORY(&before, &after, sizeof(before));  // only g_loaded_ch and its write changed
     }
 }
 
@@ -786,6 +879,117 @@ static void test_default_ahub_host_keeps_the_old_behaviour(void)
     assert_motion(S, ON_USE);
 }
 
+// ---- V11's boot check and loaded-channel writes ----
+
+static void test_boot_check_unloads_a_restored_channel_without_filament_in_both_images(void)
+{
+    for (int mode = 0; mode < 2; mode++)
+    {
+        setUp();
+        filament[S] = false;
+        boot(mode != 0, S);
+        TEST_ASSERT_EQUAL_HEX8(0xFF, g_loaded_ch);
+        TEST_ASSERT_EQUAL_HEX8(0xFF, g_boot_restore.ch);
+        TEST_ASSERT_EQUAL_HEX8(0xFF, A.now_filament_num);
+        TEST_ASSERT_EQUAL_HEX8(0x00, A.filament_use_flag);
+        TEST_ASSERT_EQUAL_HEX16(0xF9C6, A.pressure);  // V11's unloaded pressure, in both images
+        for (uint8_t i = 0; i < 4u; i++) assert_motion(i, IDLE);
+        TEST_ASSERT_EQUAL(1, sta_writes);  // 'none' queued once
+        TEST_ASSERT_EQUAL_HEX8(0xFF, g_state_write_value);
+
+        // A later printer command for S finds nothing to hand over (the restore is gone).
+        on_use(X);
+        assert_reports_in_use(X);
+        TEST_ASSERT_EQUAL_HEX8(X, g_loaded_ch);
+    }
+}
+
+static void test_boot_check_unloads_a_restored_channel_without_a_valid_calibration(void)
+{
+    for (int mode = 0; mode < 2; mode++)
+    {
+        setUp();
+        cal_valid[S] = false;  // filament present, but no drive on this channel
+        boot(mode != 0, S);
+        TEST_ASSERT_EQUAL_HEX8(0xFF, g_loaded_ch);
+        TEST_ASSERT_EQUAL_HEX8(0xFF, g_boot_restore.ch);
+        assert_reports_idle();
+        TEST_ASSERT_EQUAL(1, sta_writes);
+
+        // Another channel's calibration does not matter.
+        setUp();
+        cal_valid[X] = false;
+        boot(mode != 0, S);
+        TEST_ASSERT_EQUAL_HEX8(S, g_loaded_ch);
+        TEST_ASSERT_EQUAL_HEX8(S, g_boot_restore.ch);
+        TEST_ASSERT_EQUAL(0, sta_writes);
+    }
+}
+
+static void test_a_load_claims_the_channel_and_writes_it_once_on_use(void)
+{
+    boot(true, 0xFFu);  // nothing loaded at power-off
+    send_out(X);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, g_loaded_ch);
+
+    // before_on_use claims the channel (gating) without a flash write.
+    before_on_use(X);
+    TEST_ASSERT_EQUAL_HEX8(X, g_loaded_ch);
+    TEST_ASSERT_EQUAL(0, sta_writes);
+    TEST_ASSERT_EQUAL_HEX8(1u, g_loaded_flash_pending);
+
+    // on_use writes the claim, once.
+    on_use(X);
+    TEST_ASSERT_EQUAL(1, sta_writes);
+    TEST_ASSERT_EQUAL_HEX8(X, g_state_write_value);
+    for (int i = 0; i < 10; i++) on_use(X);
+    TEST_ASSERT_EQUAL(1, sta_writes);
+
+    // The unload queues 'none'.
+    stop_on_use(X);
+    before_pull_back(X);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, g_loaded_ch);
+    TEST_ASSERT_EQUAL(2, sta_writes);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, g_state_write_value);
+}
+
+static void test_a_resume_of_the_restored_channel_writes_nothing(void)
+{
+    // The STA record already holds S: neither image rewrites it on the resume.
+    for (int mode = 0; mode < 2; mode++)
+    {
+        setUp();
+        boot(mode != 0, S);
+        idle_poll();
+        on_use(S);
+        for (int i = 0; i < 5; i++) on_use(S);
+        TEST_ASSERT_EQUAL_HEX8(S, g_loaded_ch);
+        TEST_ASSERT_EQUAL(0, sta_writes);
+    }
+}
+
+static void test_before_on_use_from_idle_is_ignored_and_hands_over_the_restore(void)
+{
+    // V11 acts on before_on_use only after a send_out (or a repeated before_on_use); the hook runs
+    // first, so the restore still ends on it.
+    boot(true, S);
+    before_on_use(S);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, g_boot_restore.ch);
+    assert_motion(S, ON_USE);
+    assert_reports_in_use(S);
+
+    boot(false, S);
+    before_on_use(S);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, g_boot_restore.ch);
+    assert_motion(S, ON_USE);  // the deferred restore applied, then the command ignored
+    assert_reports_in_use(S);
+
+    boot(true, S);
+    before_on_use(X);  // ignored: X is idle (and S is loaded)
+    assert_motion(X, IDLE);
+    TEST_ASSERT_EQUAL_HEX8(S, g_boot_restore.ch);
+}
+
 // ---- BMCU_BOOT_RESTORE_LOADED=0 (A/B image) ----
 
 static void test_ab_boot_reports_idle_and_keeps_the_loaded_channel(void)
@@ -799,7 +1003,7 @@ static void test_ab_boot_reports_idle_and_keeps_the_loaded_channel(void)
         TEST_ASSERT_EQUAL_HEX8(S, g_loaded_ch);
         TEST_ASSERT_EQUAL_HEX8(S, g_boot_restore.ch);
     }
-    TEST_ASSERT_EQUAL(0, nvm_jobs);
+    TEST_ASSERT_EQUAL(0, sta_writes);
 
     // The gating still sees S loaded: commands for another channel are dropped as before.
     on_use(X);
@@ -919,7 +1123,7 @@ static void test_ab_restore_dropped_when_the_loaded_channel_is_cleared(void)
     reset_to_idle();
     TEST_ASSERT_EQUAL_HEX8(S, g_loaded_ch);
     TEST_ASSERT_EQUAL_HEX8(S, g_boot_restore.ch);
-    TEST_ASSERT_EQUAL_INT(0, nvm_jobs);
+    TEST_ASSERT_EQUAL_INT(0, sta_writes);
     assert_reports_idle();
     boot(true, S);
     reset_to_idle();
@@ -943,6 +1147,11 @@ int main(int, char **)
     RUN_TEST(test_default_restored_state_is_not_undone_once_referenced);
     RUN_TEST(test_default_handover_changes_nothing);
     RUN_TEST(test_default_ahub_host_keeps_the_old_behaviour);
+    RUN_TEST(test_boot_check_unloads_a_restored_channel_without_filament_in_both_images);
+    RUN_TEST(test_boot_check_unloads_a_restored_channel_without_a_valid_calibration);
+    RUN_TEST(test_a_load_claims_the_channel_and_writes_it_once_on_use);
+    RUN_TEST(test_a_resume_of_the_restored_channel_writes_nothing);
+    RUN_TEST(test_before_on_use_from_idle_is_ignored_and_hands_over_the_restore);
     RUN_TEST(test_ab_boot_reports_idle_and_keeps_the_loaded_channel);
     RUN_TEST(test_ab_matches_the_default_from_the_first_reference);
     RUN_TEST(test_ab_unload_after_the_power_cut_still_pulls_back);

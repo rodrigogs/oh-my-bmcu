@@ -341,7 +341,7 @@ static tim_base_t mc_pwm_init_base(void)
     tim_base_t TIM_TimeBaseStructure;
 // ---- Motion_control.cpp at this commit: MC_PWM_init time base, verbatim ----
     TIM_TimeBaseStructure.TIM_Period        = 999;
-    TIM_TimeBaseStructure.TIM_Prescaler     = 1;
+    TIM_TimeBaseStructure.TIM_Prescaler     = 0;
     TIM_TimeBaseStructure.TIM_ClockDivision = 0;
     TIM_TimeBaseStructure.TIM_CounterMode   = TIM_CounterMode_Up;
 // ---- end of the Motion_control.cpp copy ----

@@ -10,10 +10,12 @@
 // changing its motion, so a send or idle push stopped by its limit stays stopped once it is fresh.
 //
 // Each test drives the decision functions in 1 ms main-loop passes, the way Motion_control.cpp
-// calls them. The simulated gear gives both of the firmware's position sources: the AS5600 count
-// (as5600_count, what the guard reads, and through ml_travel_m every distance a motor state decides
-// on) and the float32 odometer filament[].meters, updated per read the way AS5600_distance_updata
-// does it (only reported to the printer). pwm is the PWM of the previous pass.
+// calls them. The simulated gear gives the firmware's one position source: the int64 AS5600
+// odometer (as5600_odometer_count, V11), updated per read the way AS5600_distance_updata does it.
+// Its low 32 bits (encoder_count) are what the guards read and, through ml_travel_m, every
+// distance a motor state decides on; the printer's meters is computed from it when sent
+// (Motion_control_filament_meters). pwm is the PWM of the previous pass. The pull back ends on
+// empty switches only once V11's confirmation (kKeyEmptyPublications fresh publications) says so.
 
 #include <stdint.h>
 #include <unity.h>
@@ -27,8 +29,10 @@
 // ---- adapted from Motion_control.cpp: DM_AUTO_S2_TARGET_M (a C++ constant) ----
 // ---- anchor: DM_AUTO_S2_TARGET_M ----
 #define DM_S2_LEN_M    0.120f   // DM_AUTO_S2_TARGET_M
-#define PULL_CNT0      0xFFFFF000u  // pulls count up: they wrap the uint32_t count after 23.6 mm
-#define FEED_CNT0      0x00000800u  // feeds count down: they wrap it after 11.8 mm
+#define PULL_ODO0      (-4096)      // pulls count up: they wrap encoder_count (0xFFFFF000) after 23.6 mm
+#define FEED_ODO0      2048         // feeds count down: they wrap it (0x00000800) after 11.8 mm
+#define PULL_CNT0      ((uint32_t)PULL_ODO0)
+#define FEED_CNT0      ((uint32_t)FEED_ODO0)
 
 static motion_guard g;
 static uint64_t now;
@@ -36,8 +40,8 @@ static uint64_t now;
 // ---- Simulated gear ----
 static double   s_travel_mm;  // exact gear travel since the start of the test, + = feeding
 static int32_t  s_read_cnt;   // whole counts read so far (relative to the start)
-static uint32_t s_cnt;        // as5600_count
-static float    s_meters;     // filament[].meters
+static int64_t  s_odo;        // as5600_odometer_count
+static uint32_t s_cnt;        // encoder_count: its low 32 bits
 
 static int32_t floor_i32(double x)
 {
@@ -45,33 +49,48 @@ static int32_t floor_i32(double x)
     return (x < (double)i) ? (i - 1) : i;
 }
 
-static void gear_reset(uint32_t cnt0, float meters0)
+static void gear_reset(int64_t odo0)
 {
     s_travel_mm = 0.0;
     s_read_cnt  = 0;
-    s_cnt       = cnt0;
-    s_meters    = meters0;
+    s_odo       = odo0;
+    s_cnt       = (uint32_t)odo0;
 }
 
-// ---- adapted from Motion_control.cpp: AS5600_distance_updata's count and odometer update ----
-// ---- anchor: AS5600_distance_updata from /case AS5600_TRACK_MOVE:/ to /as5600_count\[i\] \+=/ ----
+// ---- adapted from Motion_control.cpp: AS5600_distance_updata's odometer update, and encoder_count ----
+// ---- anchor: AS5600_distance_updata from /case AS5600_TRACK_MOVE:/ to /as5600_odometer_count\[i\] \+=/ ----
+// ---- anchor: encoder_count ----
 // One AS5600 read after the gear moved v_mm_s for 1 ms (v > 0 feeds, v < 0 pulls). The angle falls
-// when meters rises (kAS5600_MM_PER_CNT < 0). Both sources get the same whole-count step.
+// when the filament feeds (kAS5600_MM_PER_CNT < 0). The odometer gets the whole-count step.
 static void gear_step(float v_mm_s)
 {
     s_travel_mm += (double)v_mm_s * 0.001;
     const int32_t c    = floor_i32(-s_travel_mm / (double)ML_MM_PER_CNT);
     const int32_t diff = c - s_read_cnt;
     s_read_cnt = c;
-    s_cnt += (uint32_t)diff;
-    const float dist_mm = (float)diff * -ML_MM_PER_CNT;
-    s_meters += dist_mm * 0.001f;
+    s_odo += diff;
+    s_cnt = (uint32_t)s_odo;
+}
+
+// ---- adapted from Motion_control.cpp: the meters reported to the printer ----
+// ---- anchor: Motion_control_filament_meters ----
+// 1.0 at boot; computed from the odometer each time it is sent (kAS5600_M_PER_CNT = ML_MM_PER_CNT
+// / 1000), so no float sum loses the 1 ms steps of a slow move.
+static float printer_meters(void)
+{
+    return 1.0f - (float)s_odo * (ML_MM_PER_CNT * 0.001f);
+}
+
+// The odometer at which printer_meters() reads m.
+static int64_t odo_at_m(double m)
+{
+    return (int64_t)((1.0 - m) / ((double)ML_MM_PER_CNT * 0.001));
 }
 
 void setUp(void)
 {
-    now = 5000000ull;                // well after boot
-    gear_reset(PULL_CNT0, 1.2345f);  // meters starts at 1.0 and moves with every feed and pull
+    now = 5000000ull;      // well after boot
+    gear_reset(PULL_ODO0); // 23.6 mm of pull from the wrap of encoder_count
 }
 
 void tearDown(void) {}
@@ -281,7 +300,7 @@ static void test_blocked_pull_stops_1s_after_reaching_800_pwm(void)
 }
 
 // ---- adapted from Motion_control.cpp: the pull back's and the redetect's guard calls ----
-// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /const ml_result pb_end =/ to /MC_ONLINE_key_stu\[i\]\);/ ----
+// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /const ml_result pb_end =/ to /pb_key\);/ ----
 // ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /ml_redetect_start\(/ to /ml_redetect_start\(/ ----
 // ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /if \(ml_redetect_check\(/ to /== ML_OK\)/ ----
 // One guard check of the state under test, as Motion_control.cpp makes it every pass. The pull
@@ -380,45 +399,110 @@ static void test_stall_threshold_is_1mm_per_s(void)
     TEST_ASSERT_EQUAL(ML_TIME, s_end);
 }
 
-static void test_pull_at_5000m_odometer_is_not_a_false_stall(void)
+static void test_pull_at_5000m_odometer_ends_at_target_and_meters_follows_it(void)
 {
-    // meters is 5000 m after a long uptime. Its float32 step there is 0.49 mm, so the 0.06 mm of
-    // each 1 ms read of a 60 mm/s pull is lost and meters stands still. The pull's target check and
-    // the guard count AS5600 steps: a heavy-drag pull at 1000 PWM is no stall and ends at 95 mm, as
-    // at a small odometer. (Measured with meters, it never reached its target, and the time budget
-    // ended it after 595 mm of gear travel.)
-    gear_reset(PULL_CNT0, 5000.0f);
+    // meters is 5000 m after a long uptime. Its float32 step there is 0.49 mm: a per-read float sum
+    // (V10.5, the fork before the merge) lost the 0.06 mm of each 1 ms read of a 60 mm/s pull and
+    // stood still. Since V11 meters is computed from the integer odometer when it is sent, and the
+    // pull's target check and the guard use encoder_count differences: a heavy-drag pull at 1000 PWM
+    // is no stall and ends at 95 mm, as at a small odometer, and meters drops by the 95 mm pulled.
+    gear_reset(odo_at_m(5000.0));
+    const uint32_t start_cnt = s_cnt;
+    const float meters0 = printer_meters();
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 5000.0f, meters0);
     const uint32_t t = run_pull(SOLO_RETRACT_M, 0.0f, 1000.0f, 60000u, true);
-    TEST_ASSERT_EQUAL_FLOAT(5000.0f, s_meters);
     TEST_ASSERT_UINT32_WITHIN(20u, 1836u, t);
     TEST_ASSERT_EQUAL(ML_END, s_end);
-    TEST_ASSERT_EQUAL_UINT32(16516u, ml_cnt_dist(s_cnt, PULL_CNT0));  // 95 mm, across the wrap
+    TEST_ASSERT_EQUAL_UINT32(16516u, ml_cnt_dist(s_cnt, start_cnt));  // 95 mm
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, meters0 - 0.095f, printer_meters());
 
     // The same pull that is then held stops ML_STALL_MS after the block, as at a small odometer.
-    gear_reset(PULL_CNT0, 5000.0f);
+    gear_reset(odo_at_m(5000.0));
     ml_pull_back_start(&g, now, s_cnt, SOLO_RETRACT_M);
     TEST_ASSERT_EQUAL_UINT32(680u + ML_STALL_MS, run_move_then_block(check_pull, -60.0f, 680u, 1000.0f));
     TEST_ASSERT_EQUAL(ML_STALL, s_end);
-    TEST_ASSERT_EQUAL_FLOAT(5000.0f, s_meters);
 }
 
 static void test_pull_end_does_not_depend_on_the_odometer(void)
 {
     // The same SOLO pull (the firmware's speed command, from near the count wrap) ends in the same
-    // pass at the same count at any odometer. Measured with meters it ended 0.5 mm long at 20 m,
-    // 1.0-2.1 mm short at 50-300 m, and not at its target at 600 m or more.
+    // pass after the same count at any odometer, also where encoder_count, the odometer's low 32
+    // bits, wraps mid-pull 74 km from boot either way. (Measured with a float32 meters sum it ended
+    // 0.5 mm long at 20 m, 1.0-2.1 mm short at 50-300 m, and not at its target at 600 m or more.)
     const uint32_t t_ref = run_pull(SOLO_RETRACT_M, 0.0f, 650.0f, 20000u, true);
     const uint32_t cnt_ref = ml_cnt_dist(s_cnt, PULL_CNT0);
     TEST_ASSERT_EQUAL(ML_END, s_end);
 
-    const float odometers_m[] = {20.0f, 50.0f, 130.0f, 300.0f, 600.0f, 5000.0f};
-    for (uint32_t i = 0; i < sizeof(odometers_m) / sizeof(odometers_m[0]); i++)
+    const int64_t odometers[] = {
+        odo_at_m(20.0), odo_at_m(50.0), odo_at_m(130.0), odo_at_m(300.0), odo_at_m(600.0),
+        odo_at_m(5000.0), ((int64_t)3 << 32) - 4096, -((int64_t)3 << 32) - 4096,
+    };
+    for (uint32_t i = 0; i < sizeof(odometers) / sizeof(odometers[0]); i++)
     {
-        gear_reset(PULL_CNT0, odometers_m[i]);
+        gear_reset(odometers[i]);
+        const uint32_t start_cnt = s_cnt;
         TEST_ASSERT_EQUAL_UINT32(t_ref, run_pull(SOLO_RETRACT_M, 0.0f, 650.0f, 20000u, true));
         TEST_ASSERT_EQUAL(ML_END, s_end);
-        TEST_ASSERT_EQUAL_UINT32(cnt_ref, ml_cnt_dist(s_cnt, PULL_CNT0));
+        TEST_ASSERT_EQUAL_UINT32(cnt_ref, ml_cnt_dist(s_cnt, start_cnt));
     }
+}
+
+// ---- adapted from Motion_control.cpp: the pull back's empty-switch confirmation (V11) ----
+// ---- anchor: kKeyEmptyPublications ----
+// ---- anchor: motor_motion_run from /for \(uint8_t ch = 0; ch < kChCount; ch\+\+\)/ to /\+\+g_key_empty\[ch\];/ ----
+// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /const uint8_t pb_key =/ to /const uint8_t pb_key =/ ----
+// motor_motion_run counts, first thing on each pass, the fresh ADC publications in a row
+// (g_key_sample_fresh) on which a channel in filament_pulling_back read key 'none' (g_key_empty,
+// reset by motor_motion_switch when the pull back starts); the pull back then hands its guard key
+// 'none' (pb_key 0) only from kKeyEmptyPublications on. A pass without a new publication neither
+// counts nor resets; filament at the switches, ADC_DMA_ready() false or another position resets.
+#define KEY_EMPTY_PUBLICATIONS 5u  // kKeyEmptyPublications: ADC_DMA_FILTER_BLOCKS (4) + 1
+
+static uint8_t pb_key_pass(uint8_t *key_empty, uint8_t ks, bool fresh, bool adc_ready, bool pulling_back)
+{
+    if ((ks != 0u) || !adc_ready || !pulling_back)
+        *key_empty = 0u;
+    else if (fresh && (*key_empty < KEY_EMPTY_PUBLICATIONS))
+        ++*key_empty;
+    return (*key_empty >= KEY_EMPTY_PUBLICATIONS) ? 0u : 1u;
+}
+
+static void test_pull_back_ends_on_empty_switches_after_5_fresh_publications(void)
+{
+    // The filament leaves the switches 100 ms into a 60 mm/s pull, with one 'both' blip at 103 ms;
+    // a new ADC publication comes every second pass. 'none' on the publications of 100 and 102 ms,
+    // the blip starts the count over, then 104 to 112 ms: the pull back ends in pass 112, 6.7 mm
+    // in, as ML_END (no limit). One 'none' reading no longer ends it.
+    uint8_t key_empty = 0u;  // motor_motion_switch: g_key_empty[num] = 0 at the pull back's start
+    const uint32_t start_cnt = s_cnt;
+    ml_pull_back_start(&g, now, s_cnt, SOLO_RETRACT_M);
+    uint32_t t_end = 0u;
+    for (uint32_t t = 1; t <= 300u && !t_end; t++)
+    {
+        now++;
+        gear_step(-60.0f);
+        const uint8_t ks = ((t < 100u) || (t == 103u)) ? 1u : 0u;
+        const uint8_t pb_key = pb_key_pass(&key_empty, ks, (t % 2u) == 0u, true, true);
+        const ml_result r = ml_pull_back_check(&g, now, s_cnt, 1000.0f, SOLO_RETRACT_M,
+                                               ml_travel_m(s_cnt, start_cnt), pb_key);
+        if (r != ML_OK)
+        {
+            TEST_ASSERT_EQUAL(ML_END, r);
+            t_end = t;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(112u, t_end);
+
+    // Readings with no new publication never confirm 'none'; with the ADC not ready, or the channel
+    // out of the pull back, the count stays 0. Then five fresh 'none' in a row: empty.
+    key_empty = 0u;
+    for (int i = 0; i < 100; i++) TEST_ASSERT_EQUAL_UINT8(1u, pb_key_pass(&key_empty, 0u, false, true, true));
+    for (int i = 0; i < 10; i++) TEST_ASSERT_EQUAL_UINT8(1u, pb_key_pass(&key_empty, 0u, true, false, true));
+    for (int i = 0; i < 10; i++) TEST_ASSERT_EQUAL_UINT8(1u, pb_key_pass(&key_empty, 0u, true, true, false));
+    for (int i = 0; i < 4; i++) TEST_ASSERT_EQUAL_UINT8(1u, pb_key_pass(&key_empty, 0u, true, true, true));
+    TEST_ASSERT_EQUAL_UINT8(0u, pb_key_pass(&key_empty, 0u, true, true, true));
+    TEST_ASSERT_EQUAL_UINT8(0u, pb_key_pass(&key_empty, 0u, false, true, true));  // stays confirmed
+    TEST_ASSERT_EQUAL_UINT8(1u, pb_key_pass(&key_empty, 2u, false, true, true));  // filament back
 }
 
 static void test_bus_offline_gap_is_not_counted(void)
@@ -464,7 +548,7 @@ static void test_bus_offline_gap_is_not_counted(void)
 }
 
 // ---- adapted from Motion_control.cpp: a pull back pass while the ADC stream is stale ----
-// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /const ml_result pb_end =/ to /MC_ONLINE_key_stu\[i\]\);/ ----
+// ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /const ml_result pb_end =/ to /pb_key\);/ ----
 // ---- anchor: motor_motion_filamnet_pull_back_to_online_key from /g_pull_speed_set\[i\] = -v;/ to /filament_motion_pull, 100/ ----
 // ---- anchor: _MOTOR_CONTROL from /if \(motion == _motion\) return;/ to /if \(motion == _motion\) return;/ ----
 // ---- anchor: motor_brake_hold ----
@@ -537,7 +621,7 @@ static void test_redetect_on_empty_channel_stops_after_retract_length(void)
 {
     // Filament pulled out of the BMCU mid-unload: the gear spins free (120 mm/s) and never finds
     // it. It stops after 95 mm of gear travel (16515 counts) instead of spinning for good.
-    gear_reset(FEED_CNT0, 1.2345f);
+    gear_reset(FEED_ODO0);
     const uint32_t t = run_redetect(120.0f, 900.0f, 0u, 60000u);
     TEST_ASSERT_EQUAL_UINT32(792u, t);  // 95 mm / 120 mm/s = 791.7 ms
     TEST_ASSERT_EQUAL(ML_DIST, s_end);
@@ -569,7 +653,7 @@ static void test_redetect_that_moves_then_blocks_stops_1s_after_the_block(void)
     // The gear turns 40.8 mm at 60 mm/s and is then blocked at the redetect's 900 PWM (it caught
     // filament that no switch sees, and that jams): the stall comes ML_STALL_MS after the block,
     // long before the 95 mm distance cap or the 9.9 s budget.
-    gear_reset(FEED_CNT0, 1.2345f);
+    gear_reset(FEED_ODO0);
     ml_redetect_start(&g, now, s_cnt, SOLO_RETRACT_M);
     TEST_ASSERT_EQUAL_UINT32(680u + ML_STALL_MS, run_move_then_block(check_redetect, 60.0f, 680u, 900.0f));
     TEST_ASSERT_EQUAL(ML_STALL, s_end);
@@ -611,7 +695,7 @@ static uint32_t run_dm_s2(float speed_mm_s, float pwm, uint32_t max_ms)
 static void test_dm_s2_normal_push_is_not_limited(void)
 {
     // 120 mm at 60 mm/s (2 s) ends on its own distance in the firmware; the guard stays quiet.
-    gear_reset(FEED_CNT0, 1.2345f);
+    gear_reset(FEED_ODO0);
     TEST_ASSERT_EQUAL_UINT32(0u, run_dm_s2(60.0f, 900.0f, 2000u));
     // A retract (negative travel) of the same kind as well.
     TEST_ASSERT_EQUAL_UINT32(0u, run_dm_s2(-60.0f, -900.0f, 2000u));
@@ -626,7 +710,7 @@ static void test_dm_s2_blocked_gear_stops(void)
 static void test_dm_s2_push_that_moves_then_blocks_stops_1s_after_the_block(void)
 {
     // Stage-2 push, blocked after 40.8 mm (the buffer does not rise): ML_STALL_MS after the block.
-    gear_reset(FEED_CNT0, 1.2345f);
+    gear_reset(FEED_ODO0);
     ml_dm_s2_start(&g, now, s_cnt, DM_S2_LEN_M);
     TEST_ASSERT_EQUAL_UINT32(680u + ML_STALL_MS, run_move_then_block(check_dm_s2, 60.0f, 680u, 900.0f));
     TEST_ASSERT_EQUAL(ML_STALL, s_end);
@@ -666,16 +750,16 @@ static uint32_t run_dm_s2_countdown(float speed_mm_s, uint32_t max_ms)
 static void test_dm_s2_countdown_is_120mm_at_any_odometer(void)
 {
     // 120 mm (20861 counts) at 60 mm/s: 2000 passes, through the count wrap 11.8 mm in.
-    gear_reset(FEED_CNT0, 1.2345f);
+    gear_reset(FEED_ODO0);
     TEST_ASSERT_EQUAL_UINT32(2000u, run_dm_s2_countdown(60.0f, 20000u));
     TEST_ASSERT_EQUAL_UINT32(20861u, ml_cnt_dist(s_cnt, FEED_CNT0));
 
-    // At a 5000 m odometer meters stands still (see above); the countdown is the same. Counted from
-    // meters it pushed 118.0-120.7 mm at odometers up to 600 m and never ended at 5000 m.
-    gear_reset(FEED_CNT0, 5000.0f);
+    // At a 5000 m odometer the countdown is the same (encoder_count differences). Counted from a
+    // float32 meters sum it pushed 118.0-120.7 mm at odometers up to 600 m and never ended at 5000 m.
+    gear_reset(odo_at_m(5000.0));
+    const uint32_t start_cnt = s_cnt;
     TEST_ASSERT_EQUAL_UINT32(2000u, run_dm_s2_countdown(60.0f, 20000u));
-    TEST_ASSERT_EQUAL_UINT32(20861u, ml_cnt_dist(s_cnt, FEED_CNT0));
-    TEST_ASSERT_EQUAL_FLOAT(5000.0f, s_meters);
+    TEST_ASSERT_EQUAL_UINT32(20861u, ml_cnt_dist(s_cnt, start_cnt));
 }
 
 // ---- Send (filament_motion_send) ----
@@ -748,7 +832,7 @@ static void test_send_cap_is_10m_of_gear_travel_as_before(void)
     // on time, although 10 m take 83 s. From near the count wrap. (The count cap is one count short
     // of where the float comparison tripped, 1738397: a pass would have to land on 1738396.)
     TEST_ASSERT_EQUAL_FLOAT(10.0f, ML_SEND_MAX_M);
-    gear_reset(FEED_CNT0, 1.2345f);
+    gear_reset(FEED_ODO0);
     const uint32_t start_cnt = s_cnt;
     ml_send_start(&g, now, s_cnt);
     uint32_t t_done = 0u;
@@ -830,7 +914,7 @@ static void test_blocked_send_stops_1s_after_reaching_800_pwm(void)
 static void test_send_that_feeds_then_blocks_stops_1s_after_the_block(void)
 {
     // 40.8 mm at 60 mm/s, then the spool catches and the gear stops at 1000 PWM.
-    gear_reset(FEED_CNT0, 1.2345f);
+    gear_reset(FEED_ODO0);
     ml_send_start(&g, now, s_cnt);
     TEST_ASSERT_EQUAL_UINT32(680u + ML_STALL_MS, run_move_then_block(check_send, 60.0f, 680u, 1000.0f));
     TEST_ASSERT_EQUAL(ML_STALL, s_end);
@@ -848,7 +932,7 @@ static void test_send_that_feeds_then_blocks_stops_1s_after_the_block(void)
 static void test_normal_a1_load_is_not_limited(void)
 {
     // A whole load on the A1, with the guard checked on every pass as the firmware does it:
-    gear_reset(FEED_CNT0, 1.2345f);
+    gear_reset(FEED_ODO0);
     ml_send_start(&g, now, s_cnt);
 
     // the 300 ms soft start (10 to 60 mm/s) and 20 s at 60 mm/s through the tubes (1.2 m, more than
@@ -913,7 +997,7 @@ static void test_a1_hold_at_800_pwm_or_more_with_jitter_is_a_stall(void)
     for (uint32_t i = 0u; i < sizeof(pwm_stall) / sizeof(pwm_stall[0]); i++)
     {
         setUp();
-        gear_reset(FEED_CNT0, 1.2345f);
+        gear_reset(FEED_ODO0);
         ml_send_start(&g, now, s_cnt);
         TEST_ASSERT_EQUAL_UINT32(0u, run_send(60.0f, 1000.0f, 2000u));
         const uint32_t hold_cnt = s_cnt;
@@ -1400,6 +1484,79 @@ static void test_unload_fault_stays_until_filament_out_or_next_move(void)
     TEST_ASSERT_FALSE(ml_unload_fault_kept(false, 1u, false));
 }
 
+// ---- adapted from Motion_control.cpp: a printer pull_back (motor_motion_switch) on a channel with or without a valid calibration, and the main-loop dispatch around it ----
+// ---- anchor: motor_motion_switch from /case _filament_motion::pull_back:/ to /filament_now_position\[num\] = filament_pulling_back;/ ----
+// ---- anchor: motor_motion_run from /if \(!motor_motion_filamnet_pull_back_to_online_key/ to /motor_motion_switch\(time_now\);/ ----
+// motor_motion_filamnet_pull_back_to_online_key keeps motor_motion_switch from running (for every
+// channel) while a channel pulls back or redetects. A pull_back on a channel without a valid
+// calibration (run() keeps it braked at PWM 0) ends in motor_motion_switch at once, the way the
+// redetect ends: motor stopped, channel idle, the printer's motion idle, and the unload fault set.
+typedef enum { PB_POS_IDLE, PB_POS_PULLING, PB_POS_REDETECT } pb_pos_t;
+typedef enum { PB_HOST_IDLE, PB_HOST_PULL_BACK } pb_host_t;
+typedef struct
+{
+    pb_pos_t pos;
+    pb_host_t host;      // A.filament[num].motion
+    uint8_t use_flag;    // A.filament_use_flag
+    bool motor_pulling;  // set_motion(filament_motion_pull) rather than stop
+    bool fault;          // pb_unload_fault
+    uint32_t switch_runs;
+} pb_ch_t;
+
+static void pb_pass(pb_ch_t *c, bool cal_valid, uint8_t ks)
+{
+    const bool wait = (c->pos == PB_POS_PULLING) || (c->pos == PB_POS_REDETECT);
+    if (!wait)
+    {
+        c->switch_runs++;
+        if ((ks != 0u) && (c->host == PB_HOST_PULL_BACK))
+        {
+            if (!cal_valid)
+            {
+                c->motor_pulling = false;
+                c->pos = PB_POS_IDLE;
+                c->fault = true;
+                c->use_flag = 0u;
+                c->host = PB_HOST_IDLE;
+            }
+            else
+            {
+                c->pos = PB_POS_PULLING;
+                c->motor_pulling = true;
+            }
+        }
+    }
+    const bool busy = (c->pos != PB_POS_IDLE) && (c->pos != PB_POS_REDETECT);
+    c->fault = ml_unload_fault_kept(c->fault, ks, busy);
+}
+
+static void test_pull_back_without_a_valid_calibration_ends_at_once(void)
+{
+    // Without the check the pull back waited out its time budget at PWM 0 (about 9.9 s at 0.095 m),
+    // holding motor_motion_switch back for every channel, and then set the unload fault anyway.
+    pb_ch_t c = {PB_POS_IDLE, PB_HOST_PULL_BACK, 1u, false, false, 0u};
+    pb_pass(&c, false, 1u);
+    TEST_ASSERT_EQUAL(PB_POS_IDLE, c.pos);
+    TEST_ASSERT_EQUAL(PB_HOST_IDLE, c.host); // the printer sees the pull back finish
+    TEST_ASSERT_EQUAL_UINT8(0u, c.use_flag);
+    TEST_ASSERT_FALSE(c.motor_pulling);
+    TEST_ASSERT_TRUE(c.fault);
+    pb_pass(&c, false, 1u);
+    TEST_ASSERT_EQUAL_UINT32(2u, c.switch_runs); // the next pass serves the printer again
+    TEST_ASSERT_TRUE(c.fault);                   // red blink while the filament is still in
+    pb_pass(&c, false, 0u);
+    TEST_ASSERT_FALSE(c.fault);                  // filament out
+
+    // A valid channel pulls back, and motor_motion_switch waits for it.
+    pb_ch_t v = {PB_POS_IDLE, PB_HOST_PULL_BACK, 1u, false, false, 0u};
+    pb_pass(&v, true, 1u);
+    TEST_ASSERT_EQUAL(PB_POS_PULLING, v.pos);
+    TEST_ASSERT_TRUE(v.motor_pulling);
+    pb_pass(&v, true, 1u);
+    TEST_ASSERT_EQUAL_UINT32(1u, v.switch_runs);
+    TEST_ASSERT_FALSE(v.fault);
+}
+
 static void test_stalled_pull_sets_the_fault_and_a_good_retry_clears_it(void)
 {
     // The firmware's sequence: pb_unload_fault = ml_is_limit(end of the pull), then the keep rule
@@ -1439,8 +1596,9 @@ int main(void)
     RUN_TEST(test_creeping_pull_stops_at_time_budget);
     RUN_TEST(test_long_retract_time_budget);
     RUN_TEST(test_stall_threshold_is_1mm_per_s);
-    RUN_TEST(test_pull_at_5000m_odometer_is_not_a_false_stall);
+    RUN_TEST(test_pull_at_5000m_odometer_ends_at_target_and_meters_follows_it);
     RUN_TEST(test_pull_end_does_not_depend_on_the_odometer);
+    RUN_TEST(test_pull_back_ends_on_empty_switches_after_5_fresh_publications);
     RUN_TEST(test_bus_offline_gap_is_not_counted);
     RUN_TEST(test_stale_adc_during_a_pull_back_is_not_a_stall);
     RUN_TEST(test_budget_is_not_cut_by_32bit_ms);
@@ -1474,5 +1632,6 @@ int main(void)
     RUN_TEST(test_only_a_limit_is_an_unload_fault);
     RUN_TEST(test_unload_fault_stays_until_filament_out_or_next_move);
     RUN_TEST(test_stalled_pull_sets_the_fault_and_a_good_retry_clears_it);
+    RUN_TEST(test_pull_back_without_a_valid_calibration_ends_at_once);
     return UNITY_END();
 }

@@ -43,7 +43,7 @@ static inline bus_link_state_t bus_link_poll(bus_link_t *l, uint32_t now_ticks, 
     if (!l->seen) return BUS_LINK_NOT_SEEN;
     if (l->lost) return BUS_LINK_LOST;
 
-    // Signed, so a heartbeat the RX IRQ stamped just after now_ticks was sampled still counts as fresh.
+    // Signed, so a heartbeat stamped (bus_rx_poll) just after now_ticks was sampled still counts as fresh.
     if ((int32_t)(now_ticks - l->last_hb_ticks) > (int32_t)timeout_ticks)
     {
         l->lost = true;

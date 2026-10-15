@@ -6,7 +6,7 @@
 // Stage-2 pushes the filament 120 mm (DM_AUTO_S2_TARGET_M) open-loop at 900 PWM once the key
 // reads 'both' on a channel that is not loaded. It counts the length down from the gear travel
 // (dm_auto_remain_m; its retract after a buffer abort adds back what it undoes), counts the buffer
-// aborts (dm_auto_try; the third sets the fail latch) and bounds each stage with a time and stall
+// aborts (dm_auto_try; the third sets the fail latch and starts V11's fail retract) and bounds each stage with a time and stall
 // guard (dm_s2_guard, motion_limits.h). One pass with the key away from 'both' used to start all
 // of it over at the next 'both': during S2_PUSH (external only -> S1_DEBOUNCE -> IDLE, or the other
 // state -> IDLE) and during S2_RETRACT (external only). So key dips (noise, supply ripple, a
@@ -74,12 +74,19 @@
 //   starts from IDLE only once, dm_autoload_gate, and goes on with its start after a shorter
 //   'none'). There is one run (it cannot finish, and a new one needs key 'none' or a change of the
 //   loaded state), and it drives until its stall window has
-//   counted ML_STALL_MS: with 1 ms passes at most 5.998 s of 900 PWM in all (4.999 s of Stage-1,
-//   then 0.999 s of push or retract; test/test_dm_stage2), however often the buffer aborts. The fail
-//   latch then keeps the motor off;
+//   counted ML_STALL_MS: with 1 ms passes at most 5.998 s of 900 PWM push (4.999 s of Stage-1, then
+//   up to 0.999 s of the run's push or retract until its stall window trips; test/test_dm_stage2),
+//   however often the buffer aborts. Once failed it pushes no more and drives only in V11's fail
+//   retracts, at 900 PWM: S1_FAIL_RETRACT, up to 1.5 s after a Stage-1 timeout, or S2_FAIL_RETRACT,
+//   up to 1.5 s, then S2_FAIL_EXTRA, up to 1.5 s more if the key reads 'external only' (outside the
+//   run's guard), after the third buffer abort, capped at the 120 mm Stage-2 length. Drive in all is
+//   at most 5.998 s + 3 s (BLOCKED_PUSH_MAX_MS + FAIL_RETRACT_MAX_MS in test_dm_stage2). Once the fail
+//   retract, if any, has ended, the fail latch keeps the motor off;
 // - any gear: each stage ends at most 12 s after its start (its time budget counts every pass, an
 //   auto-unload's included), and a run has at most five stages (three pushes, two retracts): the
-//   third buffer abort fails it. A run that stays interrupted for the rest of its stage's budget
+//   third buffer abort fails it with V11's fail retract (S2_FAIL_RETRACT, at most 1.5 s or 120 mm,
+//   whose passes still count in the run's guard, then S2_FAIL_EXTRA, up to 1.5 s, on key 'external
+//   only'). A guard limit fails it at once, with no fail retract. A run that stays interrupted for the rest of its stage's budget
 //   fails too (red, motor off, until key 'none' or a finished printer load): for example with the key
 //   at the other state for 12 s.
 // The auto-unload's own 850 PWM retract is not the autoload's drive and is not in these figures: each
@@ -87,7 +94,7 @@
 // 'both', 15 s).
 // The stall window charges each pass that drives with the time since the pass before it. That is
 // the time the motor drives when the passes are evenly spaced (a main-loop pass takes under 1 ms,
-// about 36 ms at worst: watchdog_cfg.h); a pass more than ML_STEP_MAX_MS after the one before it is
+// about 56 ms at worst, a flash erase step plus an ADC restart: watchdog_cfg.h); a pass more than ML_STEP_MAX_MS after the one before it is
 // a gap and is left out. Key 'none' for less than DM_REARM_AWAY_MS does not end the insertion: the
 // autoload drives nothing on its passes, a Stage-2 stage it interrupts is kept as for any other key
 // excursion, and Stage-1 goes on after it, its push with its start (dm_none_hold and dm_s1_resume in
@@ -141,7 +148,7 @@ static inline void dm_s2_leave(dm_s2_run_t *r, uint8_t stage, uint64_t now_ms)
 // The key reads 'both' where Stage-2 starts (IDLE, or S1_PUSH). remain_m / tries / last_cnt:
 // dm_auto_remain_m, dm_auto_try and dm_auto_last_cnt; a new run gets s2_len_m and 0, an interrupted
 // one keeps them, less the forward gear travel since last_cnt. *last_cnt becomes pos_cnt
-// (as5600_count, which falls while the gear pushes). Returns the stage to run (DM_S2_STAGE_PUSH or
+// (encoder_count, which falls while the gear pushes). Returns the stage to run (DM_S2_STAGE_PUSH or
 // _RETRACT); *guard: DM_S2_GUARD_* for it.
 static inline uint8_t dm_s2_enter(dm_s2_run_t *r, float *remain_m, uint8_t *tries, uint32_t *last_cnt,
                                   float s2_len_m, uint32_t pos_cnt, uint64_t now_ms, uint8_t *guard)

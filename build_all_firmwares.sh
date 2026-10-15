@@ -14,10 +14,18 @@ OUT_DIR="${OUT_DIR:-build/firmwares}"
 OUT_DIR="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "${OUT_DIR}")"
 PIO_ENV="fw"
 
-# BUILD_ONLY_SOLO=1 builds just the SOLO image of every mode/AUTOLOAD/RGB combination (12 builds).
-BUILD_ONLY_SOLO="${BUILD_ONLY_SOLO:-0}"
+# BUILD_ONLY_MIN=1 builds only the two 9.5 cm images that replaced V10.5's SOLO folder, AMS_AUTO and
+# AMS_A (ams_auto_0.095f.bin, ams_a_0.095f.bin), for every mode/AUTOLOAD/RGB combination (24 builds).
+BUILD_ONLY_MIN="${BUILD_ONLY_MIN:-0}"
+MIN_RETRACT="0.095"
 # FORCE=1 lets the run replace an OUT_DIR (or OUT_DIR.new / OUT_DIR.old) that holds something else.
 FORCE="${FORCE:-0}"
+
+# Refused loudly: with V11's matrix a stale BUILD_ONLY_SOLO=1 would otherwise start all 1020 builds.
+if [[ -n "${BUILD_ONLY_SOLO:-}" ]]; then
+  echo "ERROR: BUILD_ONLY_SOLO is gone (V11 has no SOLO folder); use BUILD_ONLY_MIN=1 (24 images)"
+  exit 1
+fi
 
 # Build into a staging dir and only replace ${OUT_DIR} once every variant has been built,
 # so a failed build no longer leaves the previous output deleted.
@@ -62,8 +70,8 @@ if [[ -n "${HOME:-}" ]] && is_or_above "${OUT_DIR}" "${HOME}"; then
   echo "ERROR: OUT_DIR=${OUT_DIR} is \$HOME or a directory above it"
   exit 1
 fi
-if [[ "${BUILD_ONLY_SOLO}" == "1" ]] && is_or_above "${OUT_DIR}" firmwares; then
-  echo "ERROR: BUILD_ONLY_SOLO=1 would replace firmwares/ with a 12-image subset; use another OUT_DIR"
+if [[ "${BUILD_ONLY_MIN}" == "1" ]] && is_or_above "${OUT_DIR}" firmwares; then
+  echo "ERROR: BUILD_ONLY_MIN=1 would replace firmwares/ with a 24-image subset; use another OUT_DIR"
   exit 1
 fi
 for d in "${OUT_DIR}" "${STAGE_DIR}" "${OUT_DIR}.old"; do
@@ -94,19 +102,19 @@ OUT_GUIDE="which_to_choose.txt"
 [[ -f "${TXT_RGB}" ]]      || { echo "ERROR: brak ${TXT_RGB}"; exit 1; }
 [[ -f "${TXT_SLOTS}" ]]    || { echo "ERROR: brak ${TXT_SLOTS}"; exit 1; }
 
-# mode dir : DBMCU_P1S : BMCU_SOFT_LOAD
-MODES=(
-  "standard(A1):0:0"
-  "soft_load(A1):0:1"
-  "high_force_load(P1S):1:0"
-)
-
-SOLO_RETRACT="0.095f"
 RETRACTS=(
+  "0.095"
   "0.10"
   "0.20" "0.25" "0.30" "0.35" "0.40"
   "0.45" "0.50" "0.55" "0.60" "0.65"
   "0.70" "0.75" "0.80" "0.85" "0.90"
+)
+
+# dir|P1S|SOFT_LOAD
+MODES=(
+  "soft_load(A1)|0|1"
+  "standard(A1)|0|0"
+  "high_force_load(P1S)|1|0"
 )
 
 build_and_copy() {
@@ -116,16 +124,16 @@ build_and_copy() {
   local dm="$4"
   local rgb="$5"
   local p1s="$6"
-  local soft="$7"
+  local soft_load="$7"
 
-  echo "=== BUILD: P1S=${p1s} SOFT=${soft} DM=${dm} RGB=${rgb} AMS_NUM=${ams_num} RETRACT=${retract_len} -> ${out_path}"
+  echo "=== BUILD: P1S=${p1s} SOFT_LOAD=${soft_load} DM=${dm} RGB=${rgb} AMS_NUM=${ams_num} RETRACT=${retract_len} -> ${out_path}"
 
   BAMBU_BUS_AMS_NUM="${ams_num}" \
   AMS_RETRACT_LEN="${retract_len}" \
   BMCU_DM_TWO_MICROSWITCH="${dm}" \
   BMCU_ONLINE_LED_FILAMENT_RGB="${rgb}" \
   DBMCU_P1S="${p1s}" \
-  BMCU_SOFT_LOAD="${soft}" \
+  BMCU_SOFT_LOAD="${soft_load}" \
   pio run -e "${PIO_ENV}"
 
   local src=".pio/build/${PIO_ENV}/firmware.bin"
@@ -140,10 +148,8 @@ mkdir -p "$(dirname "${OUT_DIR}")" "${STAGE_DIR}"
 
 cp -f "${TXT_MODE}" "${STAGE_DIR}/${OUT_GUIDE}"
 
-for mode in "${MODES[@]}"; do
-  mode_dir="${mode%%:*}"
-  p1s="$(echo "${mode}" | cut -d: -f2)"
-  soft="$(echo "${mode}" | cut -d: -f3)"
+for mode_spec in "${MODES[@]}"; do
+  IFS='|' read -r mode_dir p1s soft_load <<< "${mode_spec}"
 
   mode_base="${STAGE_DIR}/${mode_dir}"
   mkdir -p "${mode_base}"
@@ -168,33 +174,33 @@ for mode in "${MODES[@]}"; do
       fi
 
       base="${dm_base}/${rgb_dir}"
-      mkdir -p "${base}"/{SOLO,AMS_A,AMS_B,AMS_C,AMS_D}
+      mkdir -p "${base}"/{AMS_AUTO,AMS_A,AMS_B,AMS_C,AMS_D}
       cp -f "${TXT_SLOTS}" "${base}/${OUT_GUIDE}"
 
-      build_and_copy "${base}/SOLO/solo_${SOLO_RETRACT}.bin" 0 "${SOLO_RETRACT}" "${dm}" "${rgb}" "${p1s}" "${soft}"
-
-      [[ "${BUILD_ONLY_SOLO}" == "1" ]] && continue
-
-      for slot in A B C D; do
+      for slot in AUTO A B C D; do
+        if [[ "${BUILD_ONLY_MIN}" == "1" && "${slot}" != "AUTO" && "${slot}" != "A" ]]; then
+          continue
+        fi
         case "${slot}" in
-          A) ams_num=0 ;;
-          B) ams_num=1 ;;
-          C) ams_num=2 ;;
-          D) ams_num=3 ;;
+          AUTO) ams_num=4; slot_dir="AMS_AUTO"; file_prefix="ams_auto" ;;
+          A)    ams_num=0; slot_dir="AMS_A";    file_prefix="ams_a" ;;
+          B)    ams_num=1; slot_dir="AMS_B";    file_prefix="ams_b" ;;
+          C)    ams_num=2; slot_dir="AMS_C";    file_prefix="ams_c" ;;
+          D)    ams_num=3; slot_dir="AMS_D";    file_prefix="ams_d" ;;
         esac
 
-        # tr instead of ${slot,,}: macOS ships bash 3.2
-        slot_lc="$(echo "${slot}" | tr 'A-Z' 'a-z')"
-
         for r in "${RETRACTS[@]}"; do
+          if [[ "${BUILD_ONLY_MIN}" == "1" && "${r}" != "${MIN_RETRACT}" ]]; then
+            continue
+          fi
           build_and_copy \
-            "${base}/AMS_${slot}/ams_${slot_lc}_${r}f.bin" \
+            "${base}/${slot_dir}/${file_prefix}_${r}f.bin" \
             "${ams_num}" \
             "${r}f" \
             "${dm}" \
             "${rgb}" \
             "${p1s}" \
-            "${soft}"
+            "${soft_load}"
         done
       done
     done
@@ -203,7 +209,7 @@ done
 
 # Written outside the tree first: redirecting straight into ${OUT_DIR}/manifest.txt truncated it
 # before the walk, so the manifest listed itself as an empty file.
-python3 - "${STAGE_DIR}" "${MANIFEST_HEADER}" > "${MANIFEST_TMP}" <<'PY'
+python3 - "${STAGE_DIR}" "${MANIFEST_HEADER}" > "${MANIFEST_TMP}" <<'PYMAN'
 import sys, os, zlib, hashlib
 
 root = sys.argv[1]
@@ -235,7 +241,7 @@ out = sys.stdout
 out.write(sys.argv[2] + "\n")
 for rel, sha256_hex, crc32_hex, size in entries:
     out.write(f"{sha256_hex} {crc32_hex} {size} {rel}\n")
-PY
+PYMAN
 
 mv "${MANIFEST_TMP}" "${STAGE_DIR}/manifest.txt"
 

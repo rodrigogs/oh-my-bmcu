@@ -3,7 +3,7 @@
 
 Usage: apply_platform_pins.py SOURCE_INI TARGET_INI
 
-CI rebuilds the upstream V10.5 sources with upstream's own platformio.ini, so fork changes
+CI rebuilds the upstream V11 sources (5b8e235) with upstream's own platformio.ini, so fork changes
 to build flags cannot be mistaken for toolchain drift; only `platform` and
 `platform_packages` are taken from this branch. TARGET_INI is rewritten in place
 (comments are dropped, which is fine for the throwaway CI copy).

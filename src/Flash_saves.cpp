@@ -1,9 +1,10 @@
 #include "Flash_saves.h"
-#include "mc_pull_cal_range.h"
 #include "hal/irq_wch.h"
+#include "hal/time_hw.h"
 #include "nvm_journal.h"
 #include "nvm_records.h"
 #include <string.h>
+#include "_bus_hardware.h"
 
 #include "ch32v20x_rcc.h"
 #include "ch32v20x_crc.h"
@@ -25,60 +26,92 @@ static inline uint32_t ams_fil_page(uint8_t filament_idx)
     return FLASH_NVM_AMS_ADDR + (uint32_t)filament_idx * FLASH_NVM256_PAGE_SIZE;
 }
 
+class Flash_clock_guard
+{
+    const uint32_t was_slow;
+public:
+    Flash_clock_guard() : was_slow(time_hw_slow) {
+        if (!was_slow) time_hw_flash_clock(1u);
+    }
+    ~Flash_clock_guard() {
+        if (!was_slow && !(FLASH->STATR & FLASH_FLAG_BSY)) time_hw_flash_clock(0u);
+    }
+};
+
+// Erase verification (flash256_erase, Flash_background_run): erased, or 0xFFFFFFFF (V11).
+// Whether a slot is free to program is the strict nvm_words_erased() (nvm_journal.h).
 static bool flash_range_is_erased(uint32_t base_addr, uint32_t bytes)
 {
-    return nvm_words_erased((const uint32_t*)base_addr, bytes >> 2);
+    Flash_clock_guard clock;
+    const uint32_t* p = (const uint32_t*)base_addr;
+
+    for (uint32_t i = 0u; i < (bytes >> 2); i++)
+    {
+        if (!nvm_word_is_blank(p[i])) return false;
+    }
+
+    return true;
 }
 
-static bool flash256_prog(uint32_t page_addr, const uint32_t w[64])
+static constexpr uint32_t FLASH_ERASE_TIMEOUT_US = 32000u;
+static constexpr uint32_t FLASH_PROGRAM_TIMEOUT_US = 4000u;
+static bool g_flash_fault = false;
+
+static bool flash_wait_ready(uint32_t timeout_us)
 {
-    if (page_addr & (FLASH_NVM256_PAGE_SIZE - 1u)) return false;
-
-    if (memcmp((const void*)page_addr, (const void*)w, FLASH_NVM256_PAGE_SIZE) == 0)
-        return true;
-
-    const uint32_t irq = irq_save_wch();
-    FLASH_Unlock_Fast();
-    FLASH_ClearFlag(FLASH_FLAG_BSY | FLASH_FLAG_EOP | FLASH_FLAG_WRPRTERR);
-    FLASH_ErasePage_Fast(page_addr);
-    FLASH_ProgramPage_Fast(page_addr, (uint32_t*)w);
-    FLASH_Lock_Fast();
-    FLASH_Lock();
-    irq_restore_wch(irq);
-
-    return (memcmp((const void*)page_addr, (const void*)w, FLASH_NVM256_PAGE_SIZE) == 0);
+    const uint32_t started = time_ticks32();
+    const uint32_t timeout = us_to_ticks32(timeout_us);
+    while (FLASH->STATR & FLASH_FLAG_BSY)
+        if ((uint32_t)(time_ticks32() - started) >= timeout) return false;
+    return (FLASH->STATR & FLASH_FLAG_WRPRTERR) == 0u;
 }
 
 static bool flash256_erase(uint32_t page_addr)
 {
     if (page_addr & (FLASH_NVM256_PAGE_SIZE - 1u)) return false;
-
+    if (g_flash_fault || !Flash_background_idle()) return false;
+    Flash_clock_guard clock;
     const uint32_t irq = irq_save_wch();
     FLASH_Unlock_Fast();
-    FLASH_ClearFlag(FLASH_FLAG_BSY | FLASH_FLAG_EOP | FLASH_FLAG_WRPRTERR);
-    FLASH_ErasePage_Fast(page_addr);
-    FLASH_Lock_Fast();
-    FLASH_Lock();
+    FLASH_ClearFlag(FLASH_FLAG_EOP | FLASH_FLAG_WRPRTERR);
+    FLASH->CTLR |= 0x00020000u;
+    FLASH->ADDR = page_addr;
+    FLASH->CTLR |= 0x00000040u;
+    const bool ok = flash_wait_ready(FLASH_ERASE_TIMEOUT_US);
+    if (!(FLASH->STATR & FLASH_FLAG_BSY)) {
+        FLASH->CTLR &= ~0x00020000u;
+        FLASH_Lock_Fast();
+        FLASH_Lock();
+    }
     irq_restore_wch(irq);
-
-    return flash_range_is_erased(page_addr, FLASH_NVM256_PAGE_SIZE);
+    const bool verified = ok && flash_range_is_erased(page_addr, FLASH_NVM256_PAGE_SIZE);
+    if (!verified) g_flash_fault = true;
+    return verified;
 }
 
 static bool flash_word_prog_std(uint32_t addr, uint32_t data)
 {
-    if (addr & 3u) return false;
-
-    const uint32_t cur = *(const volatile uint32_t*)addr;
-    if (cur == data) return true;
-
+    if ((addr & 3u) || g_flash_fault || !Flash_background_idle()) return false;
+    Flash_clock_guard clock;
+    if (*(const volatile uint32_t*)addr == data) return true;
     const uint32_t irq = irq_save_wch();
     FLASH_Unlock();
-    FLASH_ClearFlag(FLASH_FLAG_BSY | FLASH_FLAG_EOP | FLASH_FLAG_WRPRTERR);
-    const FLASH_Status st = FLASH_ProgramWord(addr, data);
-    FLASH_Lock();
+    FLASH_ClearFlag(FLASH_FLAG_EOP | FLASH_FLAG_WRPRTERR);
+    FLASH->CTLR |= 1u;
+    *(volatile uint16_t*)addr = (uint16_t)data;
+    bool ok = flash_wait_ready(FLASH_PROGRAM_TIMEOUT_US);
+    if (ok) {
+        *(volatile uint16_t*)(addr + 2u) = (uint16_t)(data >> 16);
+        ok = flash_wait_ready(FLASH_PROGRAM_TIMEOUT_US);
+    }
+    if (!(FLASH->STATR & FLASH_FLAG_BSY)) {
+        FLASH->CTLR &= ~1u;
+        FLASH_Lock();
+    }
     irq_restore_wch(irq);
-
-    return (st == FLASH_COMPLETE) && (*(const volatile uint32_t*)addr == data);
+    const bool verified = ok && *(const volatile uint32_t*)addr == data;
+    if (!verified) g_flash_fault = true;
+    return verified;
 }
 
 static bool flash_prog_words(uint32_t base_addr, const uint32_t* words, uint32_t count)
@@ -98,6 +131,8 @@ static bool nvm256_write(uint32_t page_addr, uint32_t magic, uint16_t ver, uint3
                          const void* payload, uint16_t len)
 {
     if (len > (uint16_t)(NVM256_CRC_OFF - sizeof(NVM256_HDR))) return false;
+    if (g_flash_fault || !Flash_background_idle()) return false;
+    Flash_clock_guard clock;
 
     alignas(4) uint32_t w[64];
     uint8_t* b = (uint8_t*)w;
@@ -115,12 +150,16 @@ static bool nvm256_write(uint32_t page_addr, uint32_t magic, uint16_t ver, uint3
     const uint32_t crc = crc32_hw_words(b, NVM256_CRC_OFF);
     memcpy(b + NVM256_CRC_OFF, &crc, 4u);
 
-    return flash256_prog(page_addr, w);
+    if (!flash256_erase(page_addr)) return false;
+    if (!flash_prog_words(page_addr + 4u, w + 1u, 63u)) return false;
+    return flash_word_prog_std(page_addr, w[0]);
 }
 
 static bool nvm256_read(uint32_t page_addr, uint32_t magic, uint16_t ver,
                         void* out, uint16_t max_len, uint16_t* got_len, uint32_t* rsv_out)
 {
+    if (FLASH->STATR & FLASH_FLAG_BSY) return false;
+    Flash_clock_guard clock;
     const uint8_t* b = (const uint8_t*)page_addr;
 
     const uint32_t stored = *(const uint32_t*)(b + NVM256_CRC_OFF);
@@ -145,6 +184,8 @@ static bool nvm256_read(uint32_t page_addr, uint32_t magic, uint16_t ver,
 static constexpr uint32_t FIL_SLOT_WORDS = 10u;
 static constexpr uint32_t FIL_SLOT_BYTES = FIL_SLOT_WORDS * 4u;
 static constexpr uint32_t FIL_SLOTS_PER_PAGE = 6u;
+static constexpr uint32_t FIL_SCRATCH_ADDR = FLASH_NVM_BASE_ADDR + 14u * FLASH_NVM256_PAGE_SIZE;
+static constexpr uint32_t FIL_SCRATCH_MAGIC = 0x32524340u;
 
 static_assert(FIL_SLOT_BYTES * FIL_SLOTS_PER_PAGE <= FLASH_NVM256_PAGE_SIZE, "FIL journal too large");
 static_assert(FIL_SLOT_WORDS == NVM_FIL_SLOT_WORDS && FIL_SLOTS_PER_PAGE == NVM_FIL_SLOTS_PER_PAGE,
@@ -161,6 +202,7 @@ static Flash_FilamentInfo g_fil_last[4];
 
 static void fil_cache_load_one(uint8_t filament_idx)
 {
+    Flash_clock_guard clock;
     uint32_t next_slot = 0u;
     const bool have = nvm_fil_load((const uint32_t*)fil_page_addr(filament_idx), &g_fil_last[filament_idx],
                                    &next_slot, crc32_hw_words);
@@ -174,14 +216,22 @@ static constexpr uint32_t STA_PAGE_COUNT = NVM_STA_LOG_PAGES;
 static constexpr uint32_t STA_SLOT_BYTES = 8u;
 static constexpr uint32_t STA_SLOTS_PER_PAGE = (FLASH_NVM256_PAGE_SIZE / STA_SLOT_BYTES);
 static constexpr uint32_t STA_TOTAL_SLOTS = (STA_PAGE_COUNT * STA_SLOTS_PER_PAGE);
+static constexpr uint32_t CAL_BACKUP_ADDR = FLASH_NVM_BASE_ADDR + 15u * FLASH_NVM256_PAGE_SIZE;
 static_assert(STA_SLOT_BYTES == NVM_STA_SLOT_WORDS * 4u && STA_SLOTS_PER_PAGE == NVM_STA_SLOTS_PER_PAGE,
               "nvm_journal.h loaded-channel geometry out of date");
 static_assert(STA_SLOTS_PER_PAGE * STA_SLOT_BYTES == FLASH_NVM256_PAGE_SIZE, "STA slots must fill the pages");
+static_assert(FLASH_NVM_BASE_ADDR + (STA_PAGE_FIRST + STA_PAGE_COUNT) * FLASH_NVM256_PAGE_SIZE == FIL_SCRATCH_ADDR,
+              "the loaded-channel log must end where the filament scratch page starts");
+static_assert(FIL_SCRATCH_ADDR + FLASH_NVM256_PAGE_SIZE == CAL_BACKUP_ADDR &&
+              CAL_BACKUP_ADDR + FLASH_NVM256_PAGE_SIZE == FLASH_NVM_BASE_ADDR + FLASH_NVM_TOTAL_SIZE,
+              "NVM layout: scratch page 14, CAL backup page 15");
 
 static uint16_t g_sta_seq = 0u;
 static uint16_t g_sta_slot = 0u;
+static uint16_t g_sta_saved_slot = 0u;
 static uint8_t g_sta_have_saved = 0u;
 static uint8_t g_sta_saved_loaded = 0xFFu;
+static bool g_sta_scanned = false;
 
 static void flash_runtime_cache_clear(void)
 {
@@ -191,22 +241,18 @@ static void flash_runtime_cache_clear(void)
 
     g_sta_seq = 0u;
     g_sta_slot = 0u;
+    g_sta_saved_slot = 0u;
     g_sta_have_saved = 0u;
     g_sta_saved_loaded = 0xFFu;
+    g_sta_scanned = false;
 }
 
 bool Flash_NVM_full_clear(void)
 {
-    const uint32_t irq = irq_save_wch();
-
-    FLASH_Unlock();
-    FLASH_ClearFlag(FLASH_FLAG_BSY | FLASH_FLAG_EOP | FLASH_FLAG_WRPRTERR);
-    const FLASH_Status st = FLASH_ErasePage(FLASH_NVM_BASE_ADDR);
-    FLASH_Lock();
-    irq_restore_wch(irq);
-
-    if (st != FLASH_COMPLETE) return false;
-    if (!flash_range_is_erased(FLASH_NVM_BASE_ADDR, FLASH_NVM_TOTAL_SIZE)) return false;
+    if (!Flash_background_idle()) return false;
+    Flash_clock_guard clock;
+    for (uint32_t i = 0u; i < FLASH_NVM_PAGE_COUNT; i++)
+        if (!flash256_erase(FLASH_NVM_BASE_ADDR + i * FLASH_NVM256_PAGE_SIZE)) return false;
 
     flash_runtime_cache_clear();
     return true;
@@ -224,53 +270,198 @@ static inline uint32_t sta_slot_addr(uint32_t slot)
     return sta_page_addr(page_i) + slot_i * STA_SLOT_BYTES;
 }
 
+struct Flash_job
+{
+    uint32_t words[FIL_SLOT_WORDS];
+    uint32_t addr;
+    uint32_t started;
+    uint16_t slot;
+    uint8_t kind;
+    uint8_t channel;
+    uint8_t halfwords;
+    uint8_t index;
+    uint8_t phase;
+    bool erase;
+    bool rollover;
+};
+
+static Flash_job g_flash_job = {};
+
+static uint8_t flash_job_halfword(const Flash_job& job)
+{
+    const uint8_t index = job.index + 2u;
+    return index < job.halfwords ? index : index - job.halfwords;
+}
+
+bool Flash_background_idle(void)
+{
+    return !g_flash_job.kind && !(FLASH->STATR & FLASH_FLAG_BSY);
+}
+
+void Flash_background_run(void)
+{
+    Flash_job &job = g_flash_job;
+    if (!job.kind) {
+        if (time_hw_slow && !(FLASH->STATR & FLASH_FLAG_BSY)) {
+            FLASH->CTLR &= ~(0x00020000u | 1u);
+            FLASH_Lock_Fast();
+            FLASH_Lock();
+            time_hw_flash_clock(0u);
+        }
+        return;
+    }
+    if (job.phase) {
+        if (FLASH->STATR & FLASH_FLAG_BSY) {
+            const uint32_t timeout = job.phase == 1u ? FLASH_ERASE_TIMEOUT_US : FLASH_PROGRAM_TIMEOUT_US;
+            if ((uint32_t)(time_ticks32() - job.started) >= us_to_ticks32(timeout)) g_flash_fault = true;
+            return;
+        }
+        FLASH->CTLR &= ~(0x00020000u | 1u);
+        FLASH_Lock_Fast();
+        FLASH_Lock();
+        bool ok = !g_flash_fault && !(FLASH->STATR & FLASH_FLAG_WRPRTERR);
+        if (job.phase == 1u) {
+            ok = ok && flash_range_is_erased(job.addr & ~(FLASH_NVM256_PAGE_SIZE - 1u), FLASH_NVM256_PAGE_SIZE);
+            job.erase = false;
+        } else {
+            const uint8_t index = flash_job_halfword(job);
+            const uint16_t expected = (uint16_t)(job.words[index >> 1] >> ((index & 1u) * 16u));
+            ok = ok && *(const volatile uint16_t*)(job.addr + (uint32_t)index * 2u) == expected;
+            ++job.index;
+        }
+        job.phase = 0u;
+        time_hw_flash_clock(0u);
+        if (!ok) {
+            g_flash_fault = true;
+            job.kind = 0u;
+            return;
+        }
+        if (job.index == job.halfwords) {
+            if (job.kind == 3u) {
+                job.kind = 1u;
+                job.addr = fil_page_addr(job.channel);
+                job.words[0] = MAGIC_FIL;
+                job.words[FIL_SLOT_WORDS - 1u] = crc32_hw_words(job.words, (FIL_SLOT_WORDS - 1u) * 4u);
+                job.index = 0u;
+                job.erase = true;
+                return;
+            }
+            if (job.kind == 1u && job.rollover) {
+                job.kind = 4u;
+                job.addr = FIL_SCRATCH_ADDR;
+                job.index = job.halfwords = 0u;
+                job.erase = true;
+                return;
+            }
+            if (job.kind == 1u || job.kind == 4u) {
+                memcpy(&g_fil_last[job.channel], &job.words[1], sizeof(Flash_FilamentInfo));
+                g_fil_have[job.channel] = 1u;
+            } else {
+                g_sta_seq = (uint16_t)(g_sta_seq + 1u);
+                g_sta_saved_slot = job.slot;
+                g_sta_saved_loaded = job.channel;
+                g_sta_have_saved = 1u;
+            }
+            job.kind = 0u;
+            return;
+        }
+    }
+    if (g_flash_fault || !bus_background_ready()) return;
+    const uint32_t irq = irq_save_wch();
+    time_hw_flash_clock(1u);
+    job.started = time_ticks32();
+    if (job.erase) {
+        FLASH_Unlock_Fast();
+        FLASH_ClearFlag(FLASH_FLAG_EOP | FLASH_FLAG_WRPRTERR);
+        FLASH->CTLR |= 0x00020000u;
+        FLASH->ADDR = job.addr & ~(FLASH_NVM256_PAGE_SIZE - 1u);
+        job.phase = 1u;
+        FLASH->CTLR |= 0x00000040u;
+    } else {
+        const uint8_t index = flash_job_halfword(job);
+        FLASH_Unlock();
+        FLASH_ClearFlag(FLASH_FLAG_EOP | FLASH_FLAG_WRPRTERR);
+        FLASH->CTLR |= 1u;
+        job.phase = 2u;
+        *(volatile uint16_t*)(job.addr + (uint32_t)index * 2u) =
+            (uint16_t)(job.words[index >> 1] >> ((index & 1u) * 16u));
+    }
+    irq_restore_wch(irq);
+}
+
+static bool fil_scratch_recover(void)
+{
+    if (g_flash_fault || !Flash_background_idle()) return false;
+    Flash_clock_guard clock;
+    const uint32_t* saved = (const uint32_t*)FIL_SCRATCH_ADDR;
+    if ((saved[0] & ~3u) != FIL_SCRATCH_MAGIC ||
+        crc32_hw_words(saved, (FIL_SLOT_WORDS - 1u) * 4u) != saved[FIL_SLOT_WORDS - 1u])
+        return true;
+    const uint8_t channel = saved[0] & 3u;
+    Flash_FilamentInfo info;
+    memcpy(&info, &saved[1], sizeof(info));
+    const bool restored = g_fil_have[channel] && memcmp(&g_fil_last[channel], &info, sizeof(info)) == 0;
+    g_fil_last[channel] = info;
+    g_fil_have[channel] = 1u;
+    if (!restored) {
+        uint32_t words[FIL_SLOT_WORDS];
+        nvm_fil_pack(words, &info, crc32_hw_words);
+        const uint32_t addr = fil_page_addr(channel);
+        if (!flash256_erase(addr) || !flash_prog_words(addr + 4u, words + 1u, FIL_SLOT_WORDS - 1u) ||
+            !flash_word_prog_std(addr, words[0])) return false;
+        g_fil_first_empty[channel] = 1u;
+    }
+    return flash256_erase(FIL_SCRATCH_ADDR);
+}
+
 void Flash_saves_init(void)
 {
     RCC_AHBPeriphClockCmd(RCC_AHBPeriph_CRC, ENABLE);
 
     flash_runtime_cache_clear();
+    g_flash_job = {};
+    g_flash_fault = false;
+    Flash_clock_guard clock;
+    FLASH_Unlock();
+    FLASH_Unlock_Fast();
+    FLASH_Access_Clock_Cfg(FLASH_Access_SYSTEM_HALF);
+    FLASH_Lock_Fast();
+    FLASH_Lock();
 
     for (uint8_t i = 0u; i < 4u; i++)
         fil_cache_load_one(i);
+    uint8_t loaded;
+    if (!Flash_AMS_state_read(&loaded)) g_flash_fault = true;
+    if (!fil_scratch_recover()) g_flash_fault = true;
 }
 
 bool Flash_AMS_filament_write(uint8_t filament_idx, const Flash_FilamentInfo* info)
 {
     if (!info || filament_idx >= 4u) return false;
+    if (g_flash_fault || !Flash_background_idle()) return false;
 
     if (g_fil_have[filament_idx] &&
         memcmp(&g_fil_last[filament_idx], info, sizeof(*info)) == 0)
         return true;
 
-    uint32_t first_empty = g_fil_first_empty[filament_idx];
-    const uint32_t base = fil_page_addr(filament_idx);
-
-    // Erase first when the page is full, and also when the slot is not erased (a torn record,
-    // another layout's data, an earlier failed write here): programming over it fails its
-    // read-back on every retry. A page with no valid record gives slot 0 (fil_cache_load_one).
-    if (nvm_fil_needs_erase((const uint32_t*)base, first_empty))
-    {
-        if (!flash256_erase(base)) return false;
-        // The page no longer holds g_fil_last: if the program below fails, the retry must start
-        // again at slot 0 of this page instead of the stale slot, and reverting to the old info
-        // must not look already saved.
-        g_fil_have[filament_idx] = 0u;
-        g_fil_first_empty[filament_idx] = 0u;
-        first_empty = 0u;
+    uint32_t slot = g_fil_first_empty[filament_idx];
+    const bool erase = slot >= FIL_SLOTS_PER_PAGE;
+    if (erase) slot = 0u;
+    Flash_job &job = g_flash_job;
+    job = {};
+    job.kind = erase ? 3u : 1u;
+    job.channel = filament_idx;
+    job.addr = erase ? FIL_SCRATCH_ADDR : fil_page_addr(filament_idx) + slot * FIL_SLOT_BYTES;
+    job.erase = erase;
+    job.rollover = erase;
+    job.halfwords = FIL_SLOT_WORDS * 2u;
+    nvm_fil_pack(job.words, info, crc32_hw_words);
+    if (erase) {
+        job.words[0] = FIL_SCRATCH_MAGIC | filament_idx;
+        job.words[FIL_SLOT_WORDS - 1u] = crc32_hw_words(job.words, (FIL_SLOT_WORDS - 1u) * 4u);
     }
-
-    alignas(4) uint32_t w[FIL_SLOT_WORDS];
-    nvm_fil_pack(w, info, crc32_hw_words);
-
-    if (!flash_prog_words(base + first_empty * FIL_SLOT_BYTES, w, FIL_SLOT_WORDS))
-        return false;
-
-    memcpy(&g_fil_last[filament_idx], info, sizeof(*info));
-    g_fil_have[filament_idx] = 1u;
-    g_fil_first_empty[filament_idx] =
-        (uint8_t)(((first_empty + 1u) < FIL_SLOTS_PER_PAGE) ? (first_empty + 1u) : FIL_SLOTS_PER_PAGE);
-
-    return true;
+    g_fil_first_empty[filament_idx] = (uint8_t)(slot + 1u);
+    return false;
 }
 
 bool Flash_AMS_filament_read(uint8_t filament_idx, Flash_FilamentInfo* out)
@@ -293,9 +484,22 @@ bool Flash_AMS_filament_clear(uint8_t filament_idx)
     return true;
 }
 
+// The slot for the next record: strict erased test (nvm_journal.h), V11's choice of slot and erase.
+static uint32_t sta_find_slot(bool* erase)
+{
+    return nvm_sta_find_slot((const uint32_t*)sta_page_addr(0u), STA_TOTAL_SLOTS, g_sta_slot,
+                             g_sta_have_saved != 0u, g_sta_saved_slot, erase);
+}
+
 bool Flash_AMS_state_read(uint8_t* loaded_ch)
 {
     if (!loaded_ch) return false;
+    if (g_sta_scanned) {
+        *loaded_ch = g_sta_saved_loaded;
+        return true;
+    }
+    if (g_flash_fault || !Flash_background_idle()) return false;
+    Flash_clock_guard clock;
 
     // The log pages are contiguous and full of slots, so slot n is at sta_page_addr(0) + n * 8.
     uint8_t ch = 0xFFu;
@@ -304,53 +508,34 @@ bool Flash_AMS_state_read(uint8_t* loaded_ch)
                                    &next_slot);
 
     g_sta_slot = (uint16_t)next_slot;
+    g_sta_saved_slot = have ? (uint16_t)((next_slot + STA_TOTAL_SLOTS - 1u) % STA_TOTAL_SLOTS) : 0u;
     g_sta_have_saved = have ? 1u : 0u;
     g_sta_saved_loaded = ch;
-
+    g_sta_scanned = true;
     *loaded_ch = ch;
     return true;
 }
 
 bool Flash_AMS_state_write(uint8_t loaded_ch)
 {
-    if (g_sta_have_saved && g_sta_saved_loaded == loaded_ch)
-        return true;
-
-    const uint16_t seq = g_sta_seq;
-    uint32_t slot = (uint32_t)g_sta_slot;
-
-    // A slot that is not erased is never programmed over. In the page that holds the newest record
-    // (a torn record after it, from a power loss between its two words) it is skipped; the page the
-    // log moves on to is erased first when it is not erased (the log has wrapped onto older records,
-    // or it holds another layout's data). A program that still fails erases the page and retries
-    // once, as before.
-    const bool erase = nvm_sta_next_slot((const uint32_t*)sta_page_addr(0u), STA_TOTAL_SLOTS, &slot);
-    const uint32_t addr = sta_slot_addr(slot);
-    uint32_t buf[NVM_STA_SLOT_WORDS];
-    nvm_sta_pack(buf, seq, loaded_ch);
-    const uint32_t page_i = slot / STA_SLOTS_PER_PAGE;
-    const uint32_t page = sta_page_addr(page_i);
-
-    if (erase)
-    {
-        if (!flash256_erase(page)) return false;
-    }
-
-    if (!flash_prog_words(addr, buf, NVM_STA_SLOT_WORDS))
-    {
-        // The erase can take the newest record with it (it is in this page unless slot is the
-        // page's first): until a write succeeds, the cached channel must not look already saved.
-        g_sta_have_saved = 0u;
-        if (!flash256_erase(page)) return false;
-        if (!flash_prog_words(addr, buf, NVM_STA_SLOT_WORDS)) return false;
-    }
-
-    g_sta_seq = (uint16_t)(seq + 1u);
+    if (loaded_ch >= 4u && loaded_ch != 0xFFu) return false;
+    if (g_flash_fault || !Flash_background_idle()) return false;
+    if (g_sta_have_saved && g_sta_saved_loaded == loaded_ch) return true;
+    if (!bus_background_ready()) return false;
+    Flash_clock_guard clock;
+    bool erase;
+    const uint32_t slot = sta_find_slot(&erase);
+    Flash_job &job = g_flash_job;
+    job = {};
+    job.kind = 2u;
+    job.channel = loaded_ch;
+    job.slot = (uint16_t)slot;
+    job.addr = sta_slot_addr(slot);
+    job.erase = erase;
+    job.halfwords = 4u;
+    nvm_sta_pack(job.words, g_sta_seq, loaded_ch);
     g_sta_slot = (uint16_t)((slot + 1u) % STA_TOTAL_SLOTS);
-    g_sta_have_saved = 1u;
-    g_sta_saved_loaded = loaded_ch;
-
-    return true;
+    return false;
 }
 
 struct alignas(4) Flash_CAL_payload
@@ -358,50 +543,77 @@ struct alignas(4) Flash_CAL_payload
     float offs[4];
     float vmin[4];
     float vmax[4];
+    float dm_none[4];
 };
 
-bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4],
-                                 uint8_t fallback_mask)
+// The rsv word's layout and the two-slot choice are nvm_records.h's (tested on the host); slot 0 is
+// FLASH_NVM_CAL_ADDR, slot 1 CAL_BACKUP_ADDR.
+static bool cal_latest(Flash_CAL_payload* out, uint32_t* rsv, uint8_t* slot)
+{
+    bool have = false;
+    for (uint8_t i = 0u; i < 2u; i++) {
+        const uint32_t page = i ? CAL_BACKUP_ADDR : FLASH_NVM_CAL_ADDR;
+        Flash_CAL_payload p;
+        uint16_t got = 0u;
+        uint32_t candidate = 0u;
+        if (!nvm256_read(page, MAGIC_CAL, 2u, &p, sizeof(p), &got, &candidate) || got != sizeof(p)) continue;
+        if (nvm_cal_take(have, candidate, *rsv)) {
+            if (out) *out = p;
+            *rsv = candidate;
+            *slot = i;
+            have = true;
+        }
+    }
+    return have;
+}
+
+static bool cal_commit(const Flash_CAL_payload& p, uint32_t flags)
+{
+    if (g_flash_fault || !Flash_background_idle()) return false;
+    uint32_t rsv = 0u;
+    uint8_t slot = 0u;
+    const bool have = cal_latest(nullptr, &rsv, &slot);
+    return nvm256_write(nvm_cal_write_slot(have, slot) ? CAL_BACKUP_ADDR : FLASH_NVM_CAL_ADDR,
+        MAGIC_CAL, 2u, nvm_cal_rsv(nvm_cal_next_seq(have, rsv), flags), &p, sizeof(p));
+}
+
+bool Flash_MC_PULL_cal_write_all(const float offs[4], const float vmin[4], const float vmax[4], const int8_t pol[4], const float dm_none[4], uint8_t valid_mask)
 {
     Flash_CAL_payload p;
     memcpy(p.offs, offs, sizeof(p.offs));
     memcpy(p.vmin, vmin, sizeof(p.vmin));
     memcpy(p.vmax, vmax, sizeof(p.vmax));
+    memcpy(p.dm_none, dm_none, sizeof(p.dm_none));
 
-    const uint32_t rsv = mc_pull_cal_rsv_pack(pol, fallback_mask);
-
-    return nvm256_write(FLASH_NVM_CAL_ADDR, MAGIC_CAL, VER_1, rsv, &p, (uint16_t)sizeof(p));
+    return cal_commit(p, nvm_cal_rsv_flags(pol, valid_mask));
 }
 
-bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4], uint8_t* fallback_mask)
+bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4], int8_t pol[4], float dm_none[4], uint8_t* valid_mask)
 {
     Flash_CAL_payload p;
-    uint16_t got = 0u;
     uint32_t rsv = 0u;
-
-    if (!nvm256_read(FLASH_NVM_CAL_ADDR, MAGIC_CAL, VER_1,
-                     &p, (uint16_t)sizeof(p), &got, &rsv))
-        return false;
-
-    if (got != sizeof(p)) return false;
+    uint8_t slot = 0u;
+    if (!cal_latest(&p, &rsv, &slot)) return false;
+    if (valid_mask) *valid_mask = nvm_cal_rsv_valid(rsv);
 
     memcpy(offs, p.offs, sizeof(p.offs));
     memcpy(vmin, p.vmin, sizeof(p.vmin));
     memcpy(vmax, p.vmax, sizeof(p.vmax));
+    memcpy(dm_none, p.dm_none, sizeof(p.dm_none));
 
     if (pol)
     {
         for (uint8_t ch = 0u; ch < 4u; ch++)
-            pol[ch] = mc_pull_cal_rsv_pol(rsv, ch);
+            pol[ch] = nvm_cal_rsv_pol(rsv, ch);
     }
-    if (fallback_mask) *fallback_mask = mc_pull_cal_rsv_fallback(rsv);
 
     return true;
 }
 
 bool Flash_MC_PULL_cal_clear(void)
 {
-    return flash256_erase(FLASH_NVM_CAL_ADDR);
+    const Flash_CAL_payload p = {};
+    return cal_commit(p, 0u);
 }
 
 bool Flash_Motion_write(const void* in, uint16_t bytes)

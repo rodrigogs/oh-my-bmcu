@@ -13,19 +13,24 @@ env:
   # platform.py installs the Linux RISC-V toolchain from this branch (not pinned in platformio.ini).
   TOOLCHAIN_REPO: https://github.com/Community-PIO-CH32V/toolchain-riscv-linux.git
   TOOLCHAIN_BRANCH: gcc12
-  # V10.5 release commit: its sources and platformio.ini must still rebuild to its published binaries.
-  UPSTREAM_V10_5: fbff4e3
-  # Fail the A1 build if the image grows past 56 KiB (upload limit is 60 KiB, NVM lives above it).
-  IMAGE_BUDGET_BYTES: "57344"
+  # V11 (tag v11 = 7cba9a7; 5b8e235 rebuilt its firmwares/ and dropped env:fw's -U lines, src/
+  # unchanged): its sources and platformio.ini must still rebuild to its published binaries.
+  UPSTREAM_V11: 5b8e235
+  # Fail the A1 build if the image grows past 58 KiB (upload limit is 60 KiB, NVM lives above it at
+  # 0x0800F000). Raised from 56 KiB with the V11 merge: V11's own AMS_A image is 53660 B before any
+  # fork code, and the merged A1 image measures 59156 B.
+  IMAGE_BUDGET_BYTES: "59392"
   # Fail the A1 build if free RAM (between _ebss and the stack, see the linker script) drops
-  # below 4 KiB. RAM is 20480 B total; the step summary reports the current headroom.
-  RAM_HEADROOM_FLOOR_BYTES: "4096"
+  # below 2 KiB. RAM is 20480 B total; the step summary reports the current headroom. V11 alone
+  # leaves 3572 B (its 2 KiB RX DMA ring); the 2 KiB stack is reserved separately. Lowered from
+  # 4 KiB with the V11 merge: the merged A1 image measured 2524 B.
+  RAM_HEADROOM_FLOOR_BYTES: "2048"
 
 jobs:
   a1:
     name: A1 images (a1_solo_autoload_rgboff and the #148 A/B image)
     runs-on: ubuntu-24.04
-    # Flashable images are only published once the host tests, the V10.5 reproduction and the
+    # Flashable images are only published once the host tests, the V11 reproduction and the
     # static analysis pass.
     needs: [unit-tests, reproduce-upstream, static-analysis]
     # Observed runtime is under a minute (the setup-pio cache is warm by the time this job's
@@ -80,14 +85,16 @@ jobs:
             fi
           done
 
-      # Properties the host tests cannot see: the fail-safe trap handlers and both USART handlers
-      # must replace the SDK's weak endless loops, and no soft-double routine may be linked.
+      # Properties the host tests cannot see: the fail-safe trap handlers, both USART handlers and
+      # the bus's DMA RX/TX handlers (V11, _bus_hardware.cpp) must replace the SDK's weak endless
+      # loops, and no soft-double routine may be linked.
       - name: Check ELF symbols
         run: |
           nm=$(ls ~/.platformio/packages/toolchain-riscv/bin/*-nm | head -1)
           for e in $ENVS; do
             syms=$("$nm" .pio/build/$e/firmware.elf)
-            for s in HardFault_Handler NMI_Handler Break_Point_Handler USART1_IRQHandler USART3_IRQHandler; do
+            for s in HardFault_Handler NMI_Handler Break_Point_Handler USART1_IRQHandler USART3_IRQHandler \
+                     DMA1_Channel4_IRQHandler DMA1_Channel5_IRQHandler; do
               echo "$syms" | grep -q " T $s\$" || { echo "::error::$e: $s is not a strong symbol"; exit 1; }
             done
             if echo "$syms" | grep -E ' __(add|sub|mul|div)df3$| __(extendsfdf2|truncdfsf2|float(un)?sidf|fixuns?dfsi|(eq|ne|gt|ge|lt|le|unord)df2)$'; then
@@ -107,10 +114,14 @@ jobs:
           if-no-files-found: error
 
       # Compile-smoke the variant macros this job's two ENVS never touch: env:moj takes the
-      # BMCU_DM_TWO_MICROSWITCH=0 branch (~11 sites in Motion_control.cpp), and env:fw with each
+      # BMCU_DM_TWO_MICROSWITCH=0 branches in Motion_control.cpp and the AMS_AUTO path
+      # (BAMBU_BUS_AMS_NUM=4; the A1 envs build AMS_A, 0), and env:fw with each
       # of BMCU_SOFT_LOAD, DBMCU_P1S and BMCU_ONLINE_LED_FILAMENT_RGB set once selects the load-mode
-      # branches and the RGB-gated blocks in ws2812.cpp. Same platform pin as ENVS, so this reuses
-      # the cache above; gating (not uploaded, no size check) because a fork refactor that breaks
+      # branches and the RGB-gated blocks in ws2812.cpp and Motion_control.cpp. The RGB line also
+      # builds AMS_AUTO with BMCU_DM_TWO_MICROSWITCH=1, the largest image build_all_firmwares.sh
+      # publishes, so PlatformIO's board_upload.maximum_size check (61440 B) fails this step if it
+      # outgrows the cap. Same platform pin as ENVS, so this reuses
+      # the cache above; gating (not uploaded, no A1 budget check) because a fork refactor that breaks
       # one of these variants must fail CI, not go unnoticed until an upstream user hits it. Runs
       # last in the job: PlatformIO keys .pio/build/ to a single project-wide checksum, and each
       # of these ${sysenv.*}-driven env:fw builds changes that checksum, which makes PlatformIO
@@ -122,7 +133,7 @@ jobs:
           pio run -e moj
           BMCU_DM_TWO_MICROSWITCH=1 BMCU_ONLINE_LED_FILAMENT_RGB=0 DBMCU_P1S=0 BMCU_SOFT_LOAD=1 BAMBU_BUS_AMS_NUM=0 AMS_RETRACT_LEN=0.095f pio run -e fw
           BMCU_DM_TWO_MICROSWITCH=1 BMCU_ONLINE_LED_FILAMENT_RGB=0 DBMCU_P1S=1 BMCU_SOFT_LOAD=0 BAMBU_BUS_AMS_NUM=0 AMS_RETRACT_LEN=0.095f pio run -e fw
-          BMCU_DM_TWO_MICROSWITCH=1 BMCU_ONLINE_LED_FILAMENT_RGB=1 DBMCU_P1S=0 BMCU_SOFT_LOAD=0 BAMBU_BUS_AMS_NUM=0 AMS_RETRACT_LEN=0.095f pio run -e fw
+          BMCU_DM_TWO_MICROSWITCH=1 BMCU_ONLINE_LED_FILAMENT_RGB=1 DBMCU_P1S=0 BMCU_SOFT_LOAD=0 BAMBU_BUS_AMS_NUM=4 AMS_RETRACT_LEN=0.095f pio run -e fw
 
   unit-tests:
     name: Host unit tests (env:native, env:native_asan) and guard checks
@@ -194,9 +205,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   reproduce-upstream:
-    name: Reproduce upstream V10.5 SOLO images
+    name: Reproduce upstream V11 images (AMS_AUTO and AMS_A, 9.5 cm)
     runs-on: ubuntu-24.04
-    # Observed runtime is around 2 min; see unit-tests above for why this is generous.
+    # 24 builds (about 11 s each locally); 20 min is headroom against a hang.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -209,21 +220,21 @@ jobs:
           toolchain-repo: ${{ env.TOOLCHAIN_REPO }}
           toolchain-branch: ${{ env.TOOLCHAIN_BRANCH }}
 
-      - name: Prepare the V10.5 tree with this branch's platform pins
+      - name: Prepare the V11 tree with this branch's platform pins
         run: |
-          git worktree add --detach /tmp/v10.5 HEAD
-          # Replace src/ entirely so files added after V10.5 cannot leak into this build, and use
-          # V10.5's own platformio.ini so fork build-flag changes cannot look like toolchain drift.
-          rm -rf /tmp/v10.5/src
-          git -C /tmp/v10.5 checkout "$UPSTREAM_V10_5" -- src
-          git show "$UPSTREAM_V10_5:platformio.ini" > /tmp/v10.5/platformio.ini
-          python3 scripts/apply_platform_pins.py platformio.ini /tmp/v10.5/platformio.ini
-          git show "$UPSTREAM_V10_5:firmwares/manifest.txt" > /tmp/v10.5-reference-manifest.txt
+          git worktree add --detach /tmp/v11 HEAD
+          # Replace src/ entirely so files added after V11 cannot leak into this build, and use
+          # V11's own platformio.ini so fork build-flag changes cannot look like toolchain drift.
+          rm -rf /tmp/v11/src
+          git -C /tmp/v11 checkout "$UPSTREAM_V11" -- src
+          git show "$UPSTREAM_V11:platformio.ini" > /tmp/v11/platformio.ini
+          python3 scripts/apply_platform_pins.py platformio.ini /tmp/v11/platformio.ini
+          git show "$UPSTREAM_V11:firmwares/manifest.txt" > /tmp/v11-reference-manifest.txt
 
-      - name: Build the 12 SOLO images
-        run: BUILD_ONLY_SOLO=1 bash /tmp/v10.5/build_all_firmwares.sh
+      - name: Build the 24 AMS_AUTO and AMS_A 9.5 cm images
+        run: BUILD_ONLY_MIN=1 bash /tmp/v11/build_all_firmwares.sh
 
-      - name: Compare with the manifest published in V10.5
+      - name: Compare with the manifest published in V11
         run: |
-          python3 scripts/compare_manifest.py /tmp/v10.5/build/firmwares/manifest.txt /tmp/v10.5-reference-manifest.txt --expect-count 12
-          echo "- V10.5 SOLO images reproduced with toolchain-riscv-linux \`$(git -C ~/.platformio/packages/toolchain-riscv rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/compare_manifest.py /tmp/v11/build/firmwares/manifest.txt /tmp/v11-reference-manifest.txt --expect-count 24
+          echo "- V11 AMS_AUTO and AMS_A 9.5 cm images reproduced with toolchain-riscv-linux \`$(git -C ~/.platformio/packages/toolchain-riscv rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"

@@ -1,20 +1,22 @@
-// Host tests for src/mc_pull_cal_range.h: a buffer calibration step that timed out, or a first
-// step too shallow to keep, must not be stored as a range so narrow that Hall noise or
-// rest-position scatter trips the jam latch or the NVM-wiping recalibration gesture; the load stops
-// must stay inside any real buffer's travel; a successful calibration must be stored exactly as
-// before; a channel with a fallback range must be flagged in the calibration record (in bits every
-// older release wrote as 0) and flashed at the end of the run and, briefly, at every later boot;
-// and a run with a fallback must not end with the green success blink.
+// Host tests for src/mc_pull_cal_range.h and the ranges the boot buffer calibration keeps
+// (MC_PULL_calibration.cpp, V11's fail-closed run). A run stores a channel only when both steps
+// counted and the range passes its checks; anything else fails the whole run (nothing saved, every
+// buffer invalid). So the ranges judged here are the captured ends themselves, for every capture a
+// run can produce: a first step whose end is too shallow must fail the run, so that no stored range
+// lets rest-position scatter trip the jam latch or the recalibration gesture; a kept range must still
+// trip the jam latch on a real pull and put the load stops inside the travel the buffer showed; and
+// a record loaded at boot must be accepted exactly when a run would have stored it.
 //
-// MC_PULL_calibration.cpp itself is not built on the host: the capture loops, the LEDs and the
-// flash calls stay there, and everything they decide goes through the functions tested here. The
+// MC_PULL_calibration.cpp itself is not built on the host (capture loops, LEDs, flash). Its accept
+// rules are adapted copies below, locked to their regions by scripts/check_test_copies.py. The
 // ranges are judged with the firmware's own percent mapping and recalibration rule
 // (src/mc_pull_pct.h), jam trip level (src/jam_latch.h), and verbatim copies of the rounding to
-// MC_PULL_pct and of the load stops (scripts/check_test_copies.py keeps them in sync with src/).
+// MC_PULL_pct, of the load stops and of the DM key threshold.
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <string.h>
+#include <stdio.h>
 #include <unity.h>
 
 #include "jam_latch.h"  // JAM_TRIP_PCT: on_use, below it for JAM_TRIP_MS -> jam latch
@@ -22,11 +24,6 @@
 #include "mc_pull_pct.h"
 
 #define CENTER 1.65f  // normalised idle reading (MC_PULL_V_OFFSET)
-
-// ---- Motion_control.cpp at this commit: the range held before a calibration is loaded, verbatim ----
-float MC_PULL_V_MIN[4]         = {1.00f, 1.00f, 1.00f, 1.00f};
-float MC_PULL_V_MAX[4]         = {2.00f, 2.00f, 2.00f, 2.00f};
-// ---- end of the Motion_control.cpp copy ----
 
 // The Stage-1 load stops (percent of the calibrated range) of the three load modes; each image has
 // one of them.
@@ -73,482 +70,358 @@ static bool reset_gesture_pressed(float vmin, float vmax, float v)
     return MC_PULL_CAL_RESET_PRESSED(pct, v, vmin);
 }
 
-static uint32_t float_bits(float f)
+// ---- MC_PULL_calibration.cpp at this commit: finite_voltage, verbatim ----
+static bool finite_voltage(float v)
 {
-    uint32_t u;
-    memcpy(&u, &f, sizeof(u));
-    return u;
+    return isfinite(v) && v >= 0.05f && v <= 3.25f;
+}
+// ---- end of the MC_PULL_calibration.cpp copy ----
+
+// ---- MC_PULL_calibration.cpp at this commit: dm_key_round_up_to_centi and dm_key_none_threshold_from_idle, verbatim ----
+static inline uint8_t dm_key_round_up_to_centi(float v)
+{
+    if (v <= 0.0f) return 0u;
+
+    float x = v * 100.0f - 0.0001f;
+    int iv = (int)x;
+    if ((float)iv < x) iv++;
+
+    if (iv < 0) iv = 0;
+    if (iv > 255) iv = 255;
+    return (uint8_t)iv;
 }
 
-// ---- adapted from MC_PULL_calibration.cpp: capture_minmax_one_ch_event's range before mc_pull_cal_range.h ----
-// For the "unchanged when successful" check; it is not firmware code any more, so it is not checked.
-static mc_pull_cal_range_t old_range(float center_v, float vmin, float vmax, int8_t pol)
+static inline float dm_key_none_threshold_from_idle(float key_value)
 {
-    mc_pull_cal_range_t r;
-    if (vmin > (center_v - 0.050f)) vmin = (center_v - 0.050f);
-    if (vmax < (center_v + 0.050f)) vmax = (center_v + 0.050f);
-    if (vmax <= vmin + 0.10f) { vmin = center_v - 0.10f; vmax = center_v + 0.10f; }
-    r.vmin = vmin;
-    r.vmax = vmax;
-    r.pol = pol;
-    r.fallback = false;
-    return r;
+    const uint8_t key_cv = dm_key_round_up_to_centi(key_value);
+
+    uint8_t thr_cv = (uint8_t)(key_cv + 10u);
+    if (thr_cv < 60u) thr_cv = 60u;
+    if (thr_cv > 139u) thr_cv = 139u;
+
+    return 0.01f * (float)thr_cv;
+}
+// ---- end of the MC_PULL_calibration.cpp copy ----
+
+// ---- adapted from MC_PULL_calibration.cpp: capture_minmax_one_ch_event's accept rule, with the two captures as inputs ----
+// ---- anchor: capture_minmax_one_ch_event ----
+// ok_min/vmin: the first step counted and its normalised end (capture_first_extreme_wait_release),
+// ok_max/vmax: the same for the second step. true = the run keeps vmin..vmax for the channel; false
+// fails the whole run. The yellow acks and the second capture are left out.
+static bool run_keeps(float center_v, bool ok_min, float vmin, bool ok_max, float vmax)
+{
+    if (!mc_pull_cal_low_ok(center_v, ok_min, vmin)) return false;
+
+    if (!ok_max) return false;
+
+    if (!isfinite(vmin) || !isfinite(vmax) ||
+        center_v - vmin < 0.050f || vmax - center_v < 0.050f ||
+        vmax - vmin < 0.120f) return false;
+
+    return true;
 }
 
-// Stored range for two steps given as mV from centre; 0 = the step timed out, which the capture
-// functions report as the centre (and pol = 1 for the first step).
-static mc_pull_cal_range_t outcome(int lo_mv, int hi_mv, int8_t pol)
+// ---- adapted from MC_PULL_calibration.cpp: MC_PULL_calibration_boot's check of each valid channel of a loaded record ----
+// ---- anchor: MC_PULL_calibration_boot from /if \(stored\)/ to /valid &= / ----
+// true = the channel stays valid (its bit is not cleared from valid).
+static bool record_channel_ok(float offs, float vmin, float vmax, float dm_none)
 {
-    const bool ok_min = (lo_mv > 0);
-    const bool ok_max = (hi_mv > 0);
-    return mc_pull_cal_range(CENTER, ok_min, ok_min ? CENTER - 0.001f * (float)lo_mv : CENTER,
-                             ok_min ? pol : (int8_t)1, ok_max, ok_max ? CENTER + 0.001f * (float)hi_mv : CENTER);
+    if (!isfinite(offs) || !finite_voltage(1.65f - offs) ||
+        !isfinite(vmin) || !isfinite(vmax) ||
+        !mc_pull_cal_low_ok(1.65f, true, vmin) || vmax - 1.65f < 0.050f ||
+        vmax - vmin < 0.120f ||
+        !isfinite(dm_none) || dm_none < 0.01f * 60.0f || dm_none > 0.01f * 139.0f)
+        return false;
+    return true;
 }
 
-static mc_pull_cal_range_t first_step_timed_out(float cap_max)
+// Upstream V11's rule without the low-side floor (if (!ok_min) return false;), to show what the
+// floor prevents. Not firmware code here.
+static bool v11_keeps(float center_v, bool ok_min, float vmin, bool ok_max, float vmax)
 {
-    return mc_pull_cal_range(CENTER, false, CENTER, 1, true, cap_max);
+    if (!ok_min || !ok_max) return false;
+    return !(center_v - vmin < 0.050f || vmax - center_v < 0.050f || vmax - vmin < 0.120f);
 }
 
-static mc_pull_cal_range_t second_step_timed_out(float cap_min, int8_t pol)
-{
-    return mc_pull_cal_range(CENTER, true, cap_min, pol, false, CENTER);
-}
-
-static mc_pull_cal_range_t both_steps_timed_out(void)
-{
-    return mc_pull_cal_range(CENTER, false, CENTER, 1, false, CENTER);
-}
-
-// Every first-step result a run can give: a timeout, or any end 100..800 mV below centre (a step
-// needs 100 mV to count); and a spread of second-step results.
+// What the captures can report, in mV from centre. A first step counts once the reading has left the
+// centre by MC_PULL_CAL_PRESS_DELTA_V either way, and its end is the larger side (the polarity puts
+// it below centre), so it spans 100 mV or more; 0 = it timed out. A second step counts only beyond
+// MC_PULL_CAL_PRESS_DELTA_V above centre (a strict '>'), so 101 mV or more; 0 = it timed out.
 #define LO_CASES 702
-static int lo_case(int i) { return (i == 0) ? 0 : 99 + i; }
-static const int HI_CASES[] = {0, 100, 101, 120, 149, 150, 200, 350, 800};
+static int lo_case(int i) { return (i == 0) ? 0 : 99 + i; }  // 0, 100..800
+static const int HI_CASES[] = {0, 101, 110, 120, 149, 150, 200, 350, 800};
 #define N_HI (int)(sizeof(HI_CASES) / sizeof(HI_CASES[0]))
+
+static float lo_v(int lo_mv) { return (lo_mv > 0) ? CENTER - 0.001f * (float)lo_mv : CENTER; }
+static float hi_v(int hi_mv) { return (hi_mv > 0) ? CENTER + 0.001f * (float)hi_mv : CENTER; }
+
+static bool kept(int lo_mv, int hi_mv)
+{
+    return run_keeps(CENTER, lo_mv > 0, lo_v(lo_mv), hi_mv > 0, hi_v(hi_mv));
+}
+
+static uint32_t ranges_kept;
 
 void setUp(void) {}
 void tearDown(void) {}
 
-static void test_successful_steps_are_stored_exactly_as_before(void)
+static void test_floor_constants_keep_the_jam_latch_clear_of_the_rest_window(void)
 {
-    // A kept low side spans at least 150 mV; sweep 151..800 mV below and 100..800 mV above
-    // centre, both polarities: bit-identical to the old code, and not a fallback.
-    for (int lo = 151; lo <= 800; lo += 7)
-    {
-        for (int hi = 100; hi <= 800; hi += 11)
-        {
-            for (int k = 0; k < 2; k++)
-            {
-                const int8_t pol = k ? (int8_t)-1 : (int8_t)1;
-                const float cap_min = CENTER - 0.001f * (float)lo;
-                const float cap_max = CENTER + 0.001f * (float)hi;
+    // V11's capture constants.
+    TEST_ASSERT_EQUAL_FLOAT(0.10f, MC_PULL_CAL_PRESS_DELTA_V);
+    TEST_ASSERT_EQUAL_FLOAT(0.025f, MC_PULL_CAL_CENTER_EPS_V);
 
-                const mc_pull_cal_range_t n = mc_pull_cal_range(CENTER, true, cap_min, pol, true, cap_max);
-                const mc_pull_cal_range_t o = old_range(CENTER, cap_min, cap_max, pol);
+    // The jam latch sits (1 - JAM_TRIP_PCT / 50) of the low side below centre: 0.2 x 190 mV = 38 mV,
+    // at least 1.5 x the 25 mV back-at-rest window (37.5 mV).
+    const float latch_v = (1.0f - JAM_TRIP_PCT / 50.0f) * MC_PULL_CAL_MIN_LOW_SPAN_V;
+    TEST_ASSERT_TRUE(latch_v >= 1.5f * MC_PULL_CAL_CENTER_EPS_V);
+    TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.038f, latch_v);
 
-                TEST_ASSERT_EQUAL_HEX32(float_bits(o.vmin), float_bits(n.vmin));
-                TEST_ASSERT_EQUAL_HEX32(float_bits(o.vmax), float_bits(n.vmax));
-                TEST_ASSERT_EQUAL_INT8(o.pol, n.pol);
-                TEST_ASSERT_FALSE(n.fallback);
-            }
-        }
-    }
-
-    // The normalised end of a pol = -1 first step comes from 3.30 - raw (cal_apply_polarity).
-    const float raw_max = CENTER + 0.200f;
-    const mc_pull_cal_range_t n = mc_pull_cal_range(CENTER, true, 3.30f - raw_max, -1, true, CENTER + 0.3f);
-    TEST_ASSERT_EQUAL_FLOAT(3.30f - raw_max, n.vmin);
-    TEST_ASSERT_EQUAL_INT8(-1, n.pol);
-    TEST_ASSERT_FALSE(n.fallback);
+    // Wider than the smallest step, so the floor is what decides between 100 and 189 mV.
+    TEST_ASSERT_TRUE(MC_PULL_CAL_MIN_LOW_SPAN_V > MC_PULL_CAL_PRESS_DELTA_V);
 }
 
-static void test_shallow_first_step_falls_back_like_a_timed_out_one(void)
+static void test_shallow_or_timed_out_first_step_fails_the_run(void)
 {
-    // 100..149 mV counted as a step but is too shallow to keep: the low side is the same fallback
-    // as for a timeout, the channel is flagged, the measured high side and polarity are kept.
-    for (int lo = 100; lo <= 149; lo++)
+    // 100..189 mV counted as a step but is too shallow to keep: the run fails, before the yellow ack.
+    for (int lo = 100; lo <= 189; lo++)
     {
-        for (int k = 0; k < 2; k++)
-        {
-            const int8_t pol = k ? (int8_t)-1 : (int8_t)1;
-            const float cap_min = CENTER - 0.001f * (float)lo;
-            const mc_pull_cal_range_t r = mc_pull_cal_range(CENTER, true, cap_min, pol, true, 2.00f);
-
-            TEST_ASSERT_FALSE(mc_pull_cal_low_ok(CENTER, true, cap_min));
-            TEST_ASSERT_EQUAL_FLOAT(MC_PULL_CAL_FALLBACK_V_MIN, r.vmin);
-            TEST_ASSERT_EQUAL_FLOAT(first_step_timed_out(2.00f).vmin, r.vmin);
-            TEST_ASSERT_EQUAL_FLOAT(2.00f, r.vmax);
-            TEST_ASSERT_EQUAL_INT8(pol, r.pol);  // a >= 100 mV move is still a measured direction
-            TEST_ASSERT_TRUE(r.fallback);
-        }
+        TEST_ASSERT_FALSE(mc_pull_cal_low_ok(CENTER, true, lo_v(lo)));
+        for (int j = 0; j < N_HI; j++) TEST_ASSERT_FALSE(kept(lo, HI_CASES[j]));
+        // V11 alone kept it whenever the second step counted.
+        TEST_ASSERT_TRUE(v11_keeps(CENTER, true, lo_v(lo), true, hi_v(200)));
     }
 
-    // pol = -1: the shallow end also comes from 3.30 - raw.
-    const mc_pull_cal_range_t n = mc_pull_cal_range(CENTER, true, 3.30f - (CENTER + 0.120f), -1, true, 2.0f);
-    TEST_ASSERT_EQUAL_FLOAT(MC_PULL_CAL_FALLBACK_V_MIN, n.vmin);
-    TEST_ASSERT_EQUAL_INT8(-1, n.pol);
-    TEST_ASSERT_TRUE(n.fallback);
+    // 190 mV and more is kept once the second step counted too.
+    for (int lo = 190; lo <= 800; lo++)
+    {
+        TEST_ASSERT_TRUE(mc_pull_cal_low_ok(CENTER, true, lo_v(lo)));
+        TEST_ASSERT_TRUE(kept(lo, 101));
+        TEST_ASSERT_TRUE(kept(lo, 800));
+        TEST_ASSERT_FALSE(kept(lo, 0));  // the second step timed out
+    }
 
-    // The floor is the audit's 150 mV: 151 mV is kept.
-    TEST_ASSERT_TRUE(mc_pull_cal_low_ok(CENTER, true, CENTER - 0.151f));
+    // A timed-out first step fails whatever its reported end.
     TEST_ASSERT_FALSE(mc_pull_cal_low_ok(CENTER, false, CENTER - 0.300f));
-}
+    TEST_ASSERT_FALSE(run_keeps(CENTER, false, CENTER - 0.300f, true, CENTER + 0.300f));
+    TEST_ASSERT_FALSE(kept(0, 300));
 
-static void test_shallow_second_step_is_kept(void)
-{
-    // The high side's safe fallback (1.75 V) is the least a step captures: a shallow push is kept,
-    // since falling back could only narrow it.
-    for (int hi = 100; hi <= 149; hi++)
+    // pol = -1: the normalised end of the first step is 3.30 - raw (cal_apply_polarity), the same
+    // span below centre.
+    for (int lo = 100; lo <= 800; lo++)
     {
-        const float cap_max = CENTER + 0.001f * (float)hi;
-        const mc_pull_cal_range_t r = mc_pull_cal_range(CENTER, true, 1.20f, 1, true, cap_max);
-        TEST_ASSERT_EQUAL_FLOAT(cap_max, r.vmax);
-        TEST_ASSERT_TRUE(r.vmax >= MC_PULL_CAL_FALLBACK_V_MAX - 1e-6f);
-        TEST_ASSERT_FALSE(r.fallback);
+        const float raw_max = CENTER + 0.001f * (float)lo;
+        const float vmin = 3.30f - raw_max;
+        if (lo <= 189) TEST_ASSERT_FALSE(run_keeps(CENTER, true, vmin, true, hi_v(200)));
+        if (lo >= 191) TEST_ASSERT_TRUE(run_keeps(CENTER, true, vmin, true, hi_v(200)));
     }
 }
 
-static void test_timed_out_first_step_stores_the_nominal_low_side(void)
+static void test_rest_scatter_never_trips_the_jam_latch_on_any_kept_range(void)
 {
-    const mc_pull_cal_range_t r = first_step_timed_out(2.10f);
-    TEST_ASSERT_EQUAL_FLOAT(MC_PULL_CAL_FALLBACK_V_MIN, r.vmin);
-    TEST_ASSERT_EQUAL_FLOAT(1.00f, r.vmin);
-    TEST_ASSERT_EQUAL_FLOAT(MC_PULL_V_MIN[0], r.vmin);  // the range held before a calibration is loaded
-    TEST_ASSERT_EQUAL_FLOAT(2.10f, r.vmax);  // the measured side is kept
-    TEST_ASSERT_EQUAL_INT8(1, r.pol);
-    TEST_ASSERT_TRUE(r.fallback);
-}
-
-static void test_timed_out_second_step_stores_the_minimum_real_high_side(void)
-{
-    const mc_pull_cal_range_t r = second_step_timed_out(1.20f, -1);
-    TEST_ASSERT_EQUAL_FLOAT(1.20f, r.vmin);
-    TEST_ASSERT_EQUAL_FLOAT(MC_PULL_CAL_FALLBACK_V_MAX, r.vmax);
-    TEST_ASSERT_EQUAL_FLOAT(CENTER + MC_PULL_CAL_PRESS_DELTA_V, r.vmax);
-    TEST_ASSERT_EQUAL_INT8(-1, r.pol);  // learned by the first step
-    TEST_ASSERT_TRUE(r.fallback);
-}
-
-static void test_both_steps_timed_out_keep_the_unmeasured_polarity_at_plus_one(void)
-{
-    const mc_pull_cal_range_t r = both_steps_timed_out();
-    TEST_ASSERT_EQUAL_FLOAT(MC_PULL_CAL_FALLBACK_V_MIN, r.vmin);
-    TEST_ASSERT_EQUAL_FLOAT(MC_PULL_CAL_FALLBACK_V_MAX, r.vmax);
-    TEST_ASSERT_EQUAL_INT8(1, r.pol);  // never measured: the pre-V10.3 stock orientation
-    TEST_ASSERT_TRUE(r.fallback);
-}
-
-static void test_unmeasured_first_step_never_stores_an_inverted_polarity(void)
-{
-    TEST_ASSERT_EQUAL_INT8(1, mc_pull_cal_range(CENTER, false, CENTER, -1, true, 2.0f).pol);
-    TEST_ASSERT_EQUAL_INT8(1, mc_pull_cal_range(CENTER, false, CENTER, -1, false, CENTER).pol);
-}
-
-static void test_rest_scatter_never_trips_the_jam_latch_on_any_stored_range(void)
-{
-    // Whatever the steps gave, the jam latch stays clear of 1.5x the rest scatter (30 mV): true for
-    // a kept low side from 150 mV and for the fallback; a kept 100 mV side put it at 20 mV.
+    // 1.5 x the back-at-rest window below centre (37.4 mV) stays at or above JAM_TRIP_PCT on every
+    // range a run keeps.
     const float v = CENTER - (1.5f * MC_PULL_CAL_CENTER_EPS_V - 0.0001f);
 
-    for (int i = 0; i < LO_CASES; i++)
-    {
-        for (int j = 0; j < N_HI; j++)
-        {
-            const mc_pull_cal_range_t r = outcome(lo_case(i), HI_CASES[j], 1);
-            TEST_ASSERT_TRUE(mc_pull_v_to_pct(r.vmin, r.vmax, v) >= JAM_TRIP_PCT);
-        }
-    }
-}
-
-static void test_jam_latch_needs_a_deliberate_pull_and_still_trips_on_a_real_one(void)
-{
-    const mc_pull_cal_range_t a = first_step_timed_out(2.0f);
-    const mc_pull_cal_range_t b = outcome(120, 300, 1);  // shallow: the same fallback
-
-    // Nothing up to CAL_PRESS_DELTA_V (100 mV), the move the firmware treats as deliberate.
-    for (int mv = 0; mv <= 100; mv++)
-    {
-        TEST_ASSERT_TRUE(mc_pull_v_to_pct(a.vmin, a.vmax, CENTER - 0.001f * (float)mv) >= JAM_TRIP_PCT);
-        TEST_ASSERT_TRUE(mc_pull_v_to_pct(b.vmin, b.vmax, CENTER - 0.001f * (float)mv) >= JAM_TRIP_PCT);
-    }
-
-    // Trips at 0.2 * 650 mV = 130 mV, so a real jam pulling the buffer to its end is still seen.
-    TEST_ASSERT_TRUE(mc_pull_v_to_pct(a.vmin, a.vmax, CENTER - 0.132f) < JAM_TRIP_PCT);
-    TEST_ASSERT_TRUE(mc_pull_v_to_pct(a.vmin, a.vmax, CENTER - 0.300f) < JAM_TRIP_PCT);
-    TEST_ASSERT_TRUE(mc_pull_v_to_pct(b.vmin, b.vmax, CENTER - 0.132f) < JAM_TRIP_PCT);
-
-    // A kept 150 mV side trips at 0.2 * 150 = 30 mV.
-    const mc_pull_cal_range_t c = outcome(151, 300, 1);
-    TEST_ASSERT_TRUE(mc_pull_v_to_pct(c.vmin, c.vmax, CENTER - 0.032f) < JAM_TRIP_PCT);
-}
-
-static void test_recalibration_gesture_keeps_its_absolute_100mV_rule(void)
-{
-    // With every slot empty, held 5 s this wipes the NVM: whatever the steps gave, never less than
-    // 100 mV below centre (a kept 100 mV side let the 15 % rule fire at 69 mV).
-    for (int i = 0; i < LO_CASES; i++)
-    {
-        for (int j = 0; j < N_HI; j++)
-        {
-            const mc_pull_cal_range_t r = outcome(lo_case(i), HI_CASES[j], 1);
-            for (int mv = 0; mv < 100; mv++)
-                TEST_ASSERT_FALSE(reset_gesture_pressed(r.vmin, r.vmax, CENTER - 0.001f * (float)mv));
-        }
-    }
-
-    // ...and the user can still do it on a channel that fell back.
-    const mc_pull_cal_range_t a = first_step_timed_out(2.0f);
-    const mc_pull_cal_range_t b = both_steps_timed_out();
-    const mc_pull_cal_range_t c = outcome(120, 300, 1);
-    TEST_ASSERT_TRUE(reset_gesture_pressed(a.vmin, a.vmax, CENTER - 0.101f));
-    TEST_ASSERT_TRUE(reset_gesture_pressed(b.vmin, b.vmax, CENTER - 0.101f));
-    TEST_ASSERT_TRUE(reset_gesture_pressed(c.vmin, c.vmax, CENTER - 0.101f));
-}
-
-static void test_load_stops_stay_within_the_minimum_real_travel(void)
-{
-    const mc_pull_cal_range_t a = second_step_timed_out(1.20f, 1);
-    const mc_pull_cal_range_t b = both_steps_timed_out();
-    const float v = CENTER + MC_PULL_CAL_PRESS_DELTA_V;
-
-    // Any buffer the calibration can measure moves at least CAL_PRESS_DELTA_V: every hard stop
-    // (A1 95 %, P1S 97 %, soft_load 90 %) trips within that travel, A1's by +90 mV, and each mode's
-    // slower approach (MC_LOAD_S1_FAST_PCT) starts before its stop.
-    const int stops[] = {a1::MC_LOAD_S1_HARD_STOP_PCT, p1s::MC_LOAD_S1_HARD_STOP_PCT,
-                         soft_load::MC_LOAD_S1_HARD_STOP_PCT};
-    const int fast[] = {a1::MC_LOAD_S1_FAST_PCT, p1s::MC_LOAD_S1_FAST_PCT, soft_load::MC_LOAD_S1_FAST_PCT};
-    for (unsigned k = 0; k < sizeof(stops) / sizeof(stops[0]); k++)
-    {
-        TEST_ASSERT_TRUE(mc_pull_v_to_pct(a.vmin, a.vmax, v) >= (float)stops[k]);
-        TEST_ASSERT_TRUE(mc_pull_v_to_pct(b.vmin, b.vmax, v) >= (float)stops[k]);
-        TEST_ASSERT_TRUE(fast[k] < stops[k]);
-    }
-    TEST_ASSERT_TRUE(mc_pull_v_to_pct(a.vmin, a.vmax, CENTER + 0.090f) >= (float)a1::MC_LOAD_S1_HARD_STOP_PCT - 0.01f);
-}
-
-static void test_no_stored_side_is_narrower_than_its_floor(void)
-{
-    // Whatever the steps gave: the low side spans at least 150 mV, the high side at least
-    // CAL_PRESS_DELTA_V, the smallest move a step accepts (the old code stored 50 mV for a failed
-    // side and kept a 100 mV low side).
-    for (int i = 0; i < LO_CASES; i++)
-    {
-        for (int j = 0; j < N_HI; j++)
-        {
-            const mc_pull_cal_range_t r = outcome(lo_case(i), HI_CASES[j], 1);
-            TEST_ASSERT_TRUE(CENTER - r.vmin >= MC_PULL_CAL_MIN_LOW_SPAN_V - 1e-6f);
-            TEST_ASSERT_TRUE(r.vmax - CENTER >= MC_PULL_CAL_PRESS_DELTA_V - 1e-6f);
-        }
-    }
-}
-
-static void test_fallback_flag_is_set_exactly_when_a_side_is_a_fallback(void)
-{
+    ranges_kept = 0u;
     for (int i = 0; i < LO_CASES; i++)
     {
         for (int j = 0; j < N_HI; j++)
         {
             const int lo = lo_case(i);
             const int hi = HI_CASES[j];
-            const mc_pull_cal_range_t r = outcome(lo, hi, 1);
-            const float cap_min = CENTER - 0.001f * (float)lo;
-            const bool low_kept = mc_pull_cal_low_ok(CENTER, lo > 0, cap_min);
-            TEST_ASSERT_EQUAL(!(low_kept && hi > 0), r.fallback);
-            TEST_ASSERT_EQUAL_HEX32(float_bits(low_kept ? cap_min : MC_PULL_CAL_FALLBACK_V_MIN), float_bits(r.vmin));
+            if (!kept(lo, hi)) continue;
+            ranges_kept++;
+            TEST_ASSERT_TRUE(mc_pull_v_to_pct(lo_v(lo), hi_v(hi), v) >= JAM_TRIP_PCT);
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT32(611u * (N_HI - 1), ranges_kept);  // 190..800 mV x every counted second step
+
+    // V11 alone kept a 100 mV low side, which put the latch 20 mV below centre: tripped here.
+    TEST_ASSERT_TRUE(v11_keeps(CENTER, true, lo_v(100), true, hi_v(200)));
+    TEST_ASSERT_TRUE(mc_pull_v_to_pct(lo_v(100), hi_v(200), v) < JAM_TRIP_PCT);
+}
+
+static void test_jam_latch_still_trips_on_a_real_pull(void)
+{
+    // The narrowest kept low side (190 mV) trips at 0.2 x 190 = 38 mV.
+    TEST_ASSERT_TRUE(kept(190, 200));
+    TEST_ASSERT_TRUE(mc_pull_v_to_pct(lo_v(190), hi_v(200), CENTER - 0.037f) >= JAM_TRIP_PCT);
+    TEST_ASSERT_TRUE(mc_pull_v_to_pct(lo_v(190), hi_v(200), CENTER - 0.039f) < JAM_TRIP_PCT);
+
+    // On every kept range a buffer pulled to its calibrated end, or 21 % of its low side below
+    // centre (the latch sits at 20 %), is below the trip level.
+    for (int i = 0; i < LO_CASES; i++)
+    {
+        for (int j = 0; j < N_HI; j++)
+        {
+            const int lo = lo_case(i);
+            const int hi = HI_CASES[j];
+            if (!kept(lo, hi)) continue;
+            TEST_ASSERT_TRUE(mc_pull_v_to_pct(lo_v(lo), hi_v(hi), lo_v(lo)) < JAM_TRIP_PCT);
+            TEST_ASSERT_TRUE(mc_pull_v_to_pct(lo_v(lo), hi_v(hi), CENTER - 0.21f * 0.001f * (float)lo) < JAM_TRIP_PCT);
         }
     }
 }
 
-static void test_run_records_each_channel_and_its_fallback(void)
+static void test_recalibration_gesture_keeps_its_absolute_100mV_rule(void)
 {
-    mc_pull_cal_run_t run = {0u, 0u};
-
-    // ch 0 calibrated, ch 1 shallow first step, ch 2 has no buffer, ch 3 second step timed out.
-    const mc_pull_cal_range_t r0 = mc_pull_cal_run_channel(&run, 0, CENTER, true, 1.20f, -1, true, 2.0f);
-    const mc_pull_cal_range_t r1 = mc_pull_cal_run_channel(&run, 1, CENTER, true, CENTER - 0.12f, 1, true, 2.0f);
-    const mc_pull_cal_range_t r3 = mc_pull_cal_run_channel(&run, 3, CENTER, true, 1.30f, 1, false, CENTER);
-
-    TEST_ASSERT_EQUAL_HEX8(0x0Bu, run.inserted_mask);
-    TEST_ASSERT_EQUAL_HEX8(0x0Au, run.fallback_mask);
-
-    // The returned range is the one mc_pull_cal_range() gives for the same steps.
-    const mc_pull_cal_range_t e0 = mc_pull_cal_range(CENTER, true, 1.20f, -1, true, 2.0f);
-    TEST_ASSERT_EQUAL_HEX32(float_bits(e0.vmin), float_bits(r0.vmin));
-    TEST_ASSERT_EQUAL_HEX32(float_bits(e0.vmax), float_bits(r0.vmax));
-    TEST_ASSERT_EQUAL_INT8(-1, r0.pol);
-    TEST_ASSERT_FALSE(r0.fallback);
-    TEST_ASSERT_EQUAL_FLOAT(MC_PULL_CAL_FALLBACK_V_MIN, r1.vmin);
-    TEST_ASSERT_TRUE(r1.fallback);
-    TEST_ASSERT_EQUAL_FLOAT(1.30f, r3.vmin);
-    TEST_ASSERT_EQUAL_FLOAT(MC_PULL_CAL_FALLBACK_V_MAX, r3.vmax);
-    TEST_ASSERT_TRUE(r3.fallback);
-}
-
-static void test_green_end_blink_only_when_every_buffer_and_write_succeeded(void)
-{
-    const mc_pull_cal_run_t clean = {0x0Fu, 0x00u};
-    const mc_pull_cal_run_t empty = {0x00u, 0x00u};
-    const mc_pull_cal_run_t failed = {0x0Fu, 0x02u};
-
-    TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_END_GREEN, mc_pull_cal_end(true, &clean));
-    TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_END_GREEN, mc_pull_cal_end(true, &empty));
-    TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_END_NONE, mc_pull_cal_end(true, &failed));
-    TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_END_FLASH_ERROR, mc_pull_cal_end(false, &clean));
-    TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_END_FLASH_ERROR, mc_pull_cal_end(false, &failed));
-
-    // The fallback flash follows whenever a buffer fell back, also after the flash-error blink.
-    TEST_ASSERT_EQUAL_UINT32(MC_PULL_CAL_END_FLASHES, mc_pull_cal_flashes(&failed, false));
-    TEST_ASSERT_EQUAL_UINT32(0u, mc_pull_cal_flashes(&clean, false));
-}
-
-static void test_end_flash_marks_the_fallback_buffers(void)
-{
-    const mc_pull_cal_run_t run = {0x0Bu, 0x02u};  // buffers on 0, 1, 3; channel 1 fell back
-
-    for (int k = 0; k < 2; k++)
+    // Held 5 s with every slot empty it clears the calibration: on no kept range does it fire less
+    // than 100 mV below centre, and at 101 mV it always does.
+    for (int i = 0; i < LO_CASES; i++)
     {
-        const bool on = (k == 0);
-        TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_LED_GREEN, mc_pull_cal_flash_led(&run, 0, on, false));
-        TEST_ASSERT_EQUAL_INT(on ? MC_PULL_CAL_LED_RED : MC_PULL_CAL_LED_OFF, mc_pull_cal_flash_led(&run, 1, on, false));
-        TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_LED_OFF, mc_pull_cal_flash_led(&run, 2, on, false));
-        TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_LED_GREEN, mc_pull_cal_flash_led(&run, 3, on, false));
-    }
-
-    // Every buffer fell back: no channel shows green at all.
-    const mc_pull_cal_run_t all = {0x0Fu, 0x0Fu};
-    for (uint8_t ch = 0; ch < 4; ch++)
-    {
-        TEST_ASSERT_NOT_EQUAL(MC_PULL_CAL_LED_GREEN, mc_pull_cal_flash_led(&all, ch, true, false));
-        TEST_ASSERT_NOT_EQUAL(MC_PULL_CAL_LED_GREEN, mc_pull_cal_flash_led(&all, ch, false, false));
-    }
-
-    // 2.4 s, as before.
-    TEST_ASSERT_EQUAL_UINT32(2400u, 2u * MC_PULL_CAL_END_FLASHES * MC_PULL_CAL_FLASH_MS);
-}
-
-static void test_boot_flash_is_brief_and_only_on_connected_fallback_buffers(void)
-{
-    const bool inserted[4] = {true, true, false, true};
-
-    // Record: channels 1 and 2 fell back; channel 2 has no buffer now.
-    const mc_pull_cal_run_t run = mc_pull_cal_run_loaded(inserted, 0x06u);
-    TEST_ASSERT_EQUAL_HEX8(0x0Bu, run.inserted_mask);
-    TEST_ASSERT_EQUAL_HEX8(0x06u, run.fallback_mask);
-
-    TEST_ASSERT_EQUAL_UINT32(MC_PULL_CAL_BOOT_FLASHES, mc_pull_cal_flashes(&run, true));
-    // Delays the bus start by less than a second, and visibly: several flashes.
-    TEST_ASSERT_TRUE(2u * MC_PULL_CAL_BOOT_FLASHES * MC_PULL_CAL_FLASH_MS <= 1000u);
-    TEST_ASSERT_TRUE(MC_PULL_CAL_BOOT_FLASHES >= 3u);
-
-    for (int k = 0; k < 2; k++)
-    {
-        const bool on = (k == 0);
-        TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_LED_OFF, mc_pull_cal_flash_led(&run, 0, on, true));
-        TEST_ASSERT_EQUAL_INT(on ? MC_PULL_CAL_LED_RED : MC_PULL_CAL_LED_OFF, mc_pull_cal_flash_led(&run, 1, on, true));
-        TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_LED_OFF, mc_pull_cal_flash_led(&run, 2, on, true));
-        TEST_ASSERT_EQUAL_INT(MC_PULL_CAL_LED_OFF, mc_pull_cal_flash_led(&run, 3, on, true));
-    }
-
-    // Nothing to show: no flash, so the boot is not delayed at all.
-    const mc_pull_cal_run_t clean = mc_pull_cal_run_loaded(inserted, 0x00u);
-    const mc_pull_cal_run_t gone = mc_pull_cal_run_loaded(inserted, 0x04u);  // only the absent buffer
-    TEST_ASSERT_EQUAL_UINT32(0u, mc_pull_cal_flashes(&clean, true));
-    TEST_ASSERT_EQUAL_UINT32(0u, mc_pull_cal_flashes(&gone, true));
-
-    // Only the four channel bits of the record count.
-    TEST_ASSERT_EQUAL_HEX8(0x00u, mc_pull_cal_run_loaded(inserted, 0xF0u).fallback_mask);
-}
-
-// ---- adapted from Flash_saves.cpp: Flash_MC_PULL_cal_write_all's rsv and its reader in V10.3..V10.5 ----
-// V6..V10.2 wrote 0. Older releases' code, not checked.
-static uint32_t v105_rsv_pack(const int8_t pol[4])
-{
-    uint32_t rsv = 0u;
-    for (uint8_t ch = 0u; ch < 4u; ch++)
-    {
-        if (pol && pol[ch] < 0) rsv |= (1u << ch);
-    }
-    return rsv;
-}
-
-static int8_t v105_rsv_pol(uint32_t rsv, uint8_t ch)
-{
-    return (rsv & (1u << ch)) ? -1 : 1;
-}
-
-static void pol_from_bits(unsigned bits, int8_t pol[4])
-{
-    for (uint8_t ch = 0u; ch < 4u; ch++) pol[ch] = (bits & (1u << ch)) ? (int8_t)-1 : (int8_t)1;
-}
-
-static void test_record_from_an_older_release_reads_as_no_fallback(void)
-{
-    TEST_ASSERT_EQUAL_HEX8(0u, mc_pull_cal_rsv_fallback(0u));  // V6..V10.2
-
-    for (unsigned bits = 0u; bits < 16u; bits++)
-    {
-        int8_t pol[4];
-        pol_from_bits(bits, pol);
-        const uint32_t rsv = v105_rsv_pack(pol);
-
-        TEST_ASSERT_EQUAL_HEX8(0u, mc_pull_cal_rsv_fallback(rsv));
-        for (uint8_t ch = 0u; ch < 4u; ch++) TEST_ASSERT_EQUAL_INT8(pol[ch], mc_pull_cal_rsv_pol(rsv, ch));
-
-        // With no fallback the new writer stores exactly what V10.5 stored.
-        TEST_ASSERT_EQUAL_HEX32(rsv, mc_pull_cal_rsv_pack(pol, 0u));
-    }
-}
-
-static void test_fallback_bits_round_trip_and_older_firmware_reads_the_same_polarity(void)
-{
-    for (unsigned bits = 0u; bits < 16u; bits++)
-    {
-        for (unsigned fb = 0u; fb < 16u; fb++)
+        for (int j = 0; j < N_HI; j++)
         {
-            int8_t pol[4];
-            pol_from_bits(bits, pol);
-            const uint32_t rsv = mc_pull_cal_rsv_pack(pol, (uint8_t)fb);
+            const int lo = lo_case(i);
+            const int hi = HI_CASES[j];
+            if (!kept(lo, hi)) continue;
+            for (int mv = 0; mv < 100; mv++)
+                TEST_ASSERT_FALSE(reset_gesture_pressed(lo_v(lo), hi_v(hi), CENTER - 0.001f * (float)mv));
+            TEST_ASSERT_TRUE(reset_gesture_pressed(lo_v(lo), hi_v(hi), CENTER - 0.101f));
+        }
+    }
 
-            TEST_ASSERT_EQUAL_HEX32(0u, rsv & ~0xFFu);  // rsv bits 8..31 stay 0
-            TEST_ASSERT_EQUAL_HEX8(fb, mc_pull_cal_rsv_fallback(rsv));
-            for (uint8_t ch = 0u; ch < 4u; ch++)
+    // On the narrowest kept side the 15 % rule (pct < 15.5 %: 0.69 x span) needs 131 mV.
+    TEST_ASSERT_TRUE(pct_rounded(mc_pull_v_to_pct(lo_v(190), hi_v(200), CENTER - 0.130f)) > 15);
+    TEST_ASSERT_TRUE(pct_rounded(mc_pull_v_to_pct(lo_v(190), hi_v(200), CENTER - 0.132f)) <= 15);
+
+    // V11 alone kept a 100 mV side, where the 15 % rule fired 70 mV below centre.
+    TEST_ASSERT_TRUE(reset_gesture_pressed(lo_v(100), hi_v(200), CENTER - 0.070f));
+}
+
+// ---- adapted from Motion_control.cpp: Motion_control_run's recalibration gesture, the channel it finds held (the per-channel state as arguments) ----
+// ---- anchor: Motion_control_run from /int pressed = -1;/ to /if \(hard_blue\) \{ pressed/ ----
+static int gesture_held_channel(const bool *inserted, const bool *valid, const int *pct, const float *v,
+                                const float *vmin)
+{
+    int pressed = -1;
+    for (uint8_t ch = 0; ch < 4u; ch++)
+    {
+        if (!inserted[ch] || !valid[ch]) continue;
+        const bool hard_blue = MC_PULL_CAL_RESET_PRESSED(pct[ch], v[ch], vmin[ch]);
+        if (hard_blue) { pressed = (int)ch; break; }
+    }
+    return pressed;
+}
+
+static void test_recalibration_gesture_skips_a_channel_whose_calibration_failed(void)
+{
+    // A channel whose boot calibration failed keeps V_OFFSET 0, V_MIN 1.00 and polarity 1, so its
+    // reading is the raw voltage: a buffer idling at 1.55 V or less reads as held, and the gesture
+    // fired 5 s after every boot (clear, reboot, a failed calibration again). It is skipped (a fork
+    // deviation from V11); a valid channel held at the same time still fires it.
+    const float raw_idle = 1.50f;
+    const int raw_pct = pct_rounded(mc_pull_v_to_pct(1.00f, 2.30f, raw_idle));
+    TEST_ASSERT_TRUE(MC_PULL_CAL_RESET_PRESSED(raw_pct, raw_idle, 1.00f));
+
+    bool inserted[4] = {true, true, false, true};
+    bool valid[4] = {false, true, true, true};
+    int pct[4] = {raw_pct, 50, 0, 50};
+    float v[4] = {raw_idle, CENTER, 0.0f, CENTER};
+    const float vmin[4] = {1.00f, lo_v(400), lo_v(400), lo_v(400)};
+    TEST_ASSERT_EQUAL_INT(-1, gesture_held_channel(inserted, valid, pct, v, vmin));
+
+    pct[3] = 0;
+    v[3] = CENTER - 0.30f;
+    TEST_ASSERT_EQUAL_INT(3, gesture_held_channel(inserted, valid, pct, v, vmin));
+
+    valid[0] = true; // V11: the uncalibrated channel fired it first
+    TEST_ASSERT_EQUAL_INT(0, gesture_held_channel(inserted, valid, pct, v, vmin));
+}
+
+static void test_load_stops_trip_within_the_travel_the_buffer_showed(void)
+{
+    // The second step's end is where the buffer was pushed during calibration: every hard stop
+    // (A1 95 %, P1S 97 %, soft_load 90 %) trips by then, and each mode's slower approach
+    // (MC_LOAD_S1_FAST_PCT) starts before its stop and outside 1.5 x the back-at-rest window.
+    const int stops[] = {a1::MC_LOAD_S1_HARD_STOP_PCT, p1s::MC_LOAD_S1_HARD_STOP_PCT,
+                         soft_load::MC_LOAD_S1_HARD_STOP_PCT};
+    const int fast[] = {a1::MC_LOAD_S1_FAST_PCT, p1s::MC_LOAD_S1_FAST_PCT, soft_load::MC_LOAD_S1_FAST_PCT};
+    const float rest_hi = CENTER + 1.5f * MC_PULL_CAL_CENTER_EPS_V;
+
+    for (int i = 0; i < LO_CASES; i++)
+    {
+        for (int j = 0; j < N_HI; j++)
+        {
+            const int lo = lo_case(i);
+            const int hi = HI_CASES[j];
+            if (!kept(lo, hi)) continue;
+            TEST_ASSERT_TRUE(hi_v(hi) - CENTER > MC_PULL_CAL_PRESS_DELTA_V);
+            for (unsigned k = 0; k < sizeof(stops) / sizeof(stops[0]); k++)
             {
-                TEST_ASSERT_EQUAL_INT8(pol[ch], mc_pull_cal_rsv_pol(rsv, ch));
-                TEST_ASSERT_EQUAL_INT8(pol[ch], v105_rsv_pol(rsv, ch));
+                TEST_ASSERT_TRUE(mc_pull_v_to_pct(lo_v(lo), hi_v(hi), hi_v(hi)) >= (float)stops[k]);
+                TEST_ASSERT_TRUE(mc_pull_v_to_pct(lo_v(lo), hi_v(hi), rest_hi) < (float)fast[k]);
+                TEST_ASSERT_TRUE(fast[k] < stops[k]);
             }
         }
     }
+}
 
-    // No polarity array (as the old writer allowed), and stray upper bits of the mask dropped.
-    TEST_ASSERT_EQUAL_HEX32(0x50u, mc_pull_cal_rsv_pack(NULL, 0x05u));
-    TEST_ASSERT_EQUAL_HEX32(0x00u, mc_pull_cal_rsv_pack(NULL, 0xF0u));
+static void test_loaded_record_is_kept_exactly_when_a_run_would_store_it(void)
+{
+    // Every range the captures can report, with a baseline the run accepts: the loaded record keeps
+    // the channel exactly when the run kept it, so a record written without the floor (V11 alone)
+    // makes the channel calibrate again.
+    const float offs = 0.03f;
+    const float dm_none = dm_key_none_threshold_from_idle(0.30f);
+    for (int i = 1; i < LO_CASES; i++)
+    {
+        for (int j = 1; j < N_HI; j++)
+        {
+            const int lo = lo_case(i);
+            const int hi = HI_CASES[j];
+            TEST_ASSERT_EQUAL(kept(lo, hi), record_channel_ok(offs, lo_v(lo), hi_v(hi), dm_none));
+        }
+    }
 
-    // Only bits 4..7 are fallback bits, whatever a record holds above them.
-    TEST_ASSERT_EQUAL_HEX8(0x0Au, mc_pull_cal_rsv_fallback(0xFFFFFFA5u));
+    TEST_ASSERT_FALSE(record_channel_ok(offs, lo_v(150), hi_v(200), dm_none));
+    TEST_ASSERT_TRUE(record_channel_ok(offs, lo_v(190), hi_v(200), dm_none));
+    TEST_ASSERT_FALSE(record_channel_ok(NAN, lo_v(400), hi_v(200), dm_none));
+    TEST_ASSERT_FALSE(record_channel_ok(offs, lo_v(400), INFINITY, dm_none));
+}
+
+static void test_every_baseline_a_run_accepts_passes_the_record_check(void)
+{
+    // The baseline keeps a channel only if every key reading is below 1.40 V and every Hall reading
+    // inside finite_voltage(); the record check then sees dm_none = the threshold of the mean key
+    // level and offs = 1.65 - the mean Hall level.
+    const float vmin = lo_v(400);
+    const float vmax = hi_v(300);
+    char msg[96];
+    float thr_lo = 2.0f, thr_hi = 0.0f;
+
+    for (int mv = 0; mv < 1400; mv++)
+    {
+        const float dm_none = dm_key_none_threshold_from_idle(0.001f * (float)mv);
+        if (dm_none < thr_lo) thr_lo = dm_none;
+        if (dm_none > thr_hi) thr_hi = dm_none;
+        TEST_ASSERT_TRUE(record_channel_ok(0.0f, vmin, vmax, dm_none));
+    }
+    snprintf(msg, sizeof(msg), "key idle 0..1.399 V: dm_none %.2f..%.2f V", (double)thr_lo, (double)thr_hi);
+    TEST_MESSAGE(msg);
+
+    // Hall idle means from 60 mV to 3.249 V. (At exactly 50 mV, 1.65 - (1.65 - 0.05) rounds one step
+    // below 0.05 in float and the record is refused, and at exactly 3.25 V 1.65 - (1.65 - 3.25) rounds
+    // one step above 3.25 under strict IEEE single arithmetic (the x86_64 CI runner; an arm64 build
+    // that fuses the multiply-add into an FMA happened to land on 3.25); a Hall sensor idles near 1.65 V.)
+    for (int mv = 60; mv <= 3249; mv++)
+    {
+        const float offs = 1.65f - 0.001f * (float)mv;
+        TEST_ASSERT_TRUE(record_channel_ok(offs, vmin, vmax, dm_key_none_threshold_from_idle(0.30f)));
+    }
 }
 
 int main(void)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_successful_steps_are_stored_exactly_as_before);
-    RUN_TEST(test_shallow_first_step_falls_back_like_a_timed_out_one);
-    RUN_TEST(test_shallow_second_step_is_kept);
-    RUN_TEST(test_timed_out_first_step_stores_the_nominal_low_side);
-    RUN_TEST(test_timed_out_second_step_stores_the_minimum_real_high_side);
-    RUN_TEST(test_both_steps_timed_out_keep_the_unmeasured_polarity_at_plus_one);
-    RUN_TEST(test_unmeasured_first_step_never_stores_an_inverted_polarity);
-    RUN_TEST(test_rest_scatter_never_trips_the_jam_latch_on_any_stored_range);
-    RUN_TEST(test_jam_latch_needs_a_deliberate_pull_and_still_trips_on_a_real_one);
+    RUN_TEST(test_floor_constants_keep_the_jam_latch_clear_of_the_rest_window);
+    RUN_TEST(test_shallow_or_timed_out_first_step_fails_the_run);
+    RUN_TEST(test_rest_scatter_never_trips_the_jam_latch_on_any_kept_range);
+    RUN_TEST(test_jam_latch_still_trips_on_a_real_pull);
     RUN_TEST(test_recalibration_gesture_keeps_its_absolute_100mV_rule);
-    RUN_TEST(test_load_stops_stay_within_the_minimum_real_travel);
-    RUN_TEST(test_no_stored_side_is_narrower_than_its_floor);
-    RUN_TEST(test_fallback_flag_is_set_exactly_when_a_side_is_a_fallback);
-    RUN_TEST(test_run_records_each_channel_and_its_fallback);
-    RUN_TEST(test_green_end_blink_only_when_every_buffer_and_write_succeeded);
-    RUN_TEST(test_end_flash_marks_the_fallback_buffers);
-    RUN_TEST(test_boot_flash_is_brief_and_only_on_connected_fallback_buffers);
-    RUN_TEST(test_record_from_an_older_release_reads_as_no_fallback);
-    RUN_TEST(test_fallback_bits_round_trip_and_older_firmware_reads_the_same_polarity);
+    RUN_TEST(test_recalibration_gesture_skips_a_channel_whose_calibration_failed);
+    RUN_TEST(test_load_stops_trip_within_the_travel_the_buffer_showed);
+    RUN_TEST(test_loaded_record_is_kept_exactly_when_a_run_would_store_it);
+    RUN_TEST(test_every_baseline_a_run_accepts_passes_the_record_check);
     return UNITY_END();
 }

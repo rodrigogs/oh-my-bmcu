@@ -17,7 +17,8 @@
 // - header, written at boot: a magic that also holds the layout version, the RCC_RSTSCKR flags of
 //   the reset that started this run, the resets in a row without a power-on, and a check word;
 // - the run's phase (blackbox_phase), rewritten as main() goes from one step to the next;
-// - the longest main-loop pass so far, in SysTick ticks (HCLK/8, 18 MHz), when it grows;
+// - the longest main-loop pass so far, in 18 MHz ticks (time_ticks32: SysTick at HCLK/8, compensated
+//   while the flash clock is slowed), when it grows;
 // - on a trap, failsafe_stop writes mepc, mcause and their check, the check last. Before
 //   blackbox_boot turns the backup domain on (startup code, SystemInit, time_hw_init) the record
 //   is skipped: failsafe_stop reads the clocks and DBP back first (blackbox_bkp_clocked, _writable).
@@ -55,21 +56,27 @@
 #define BLACKBOX_PWR_DBP   (1u << 8)  // PWR_CTLR
 
 // What main() was doing. Interrupt handlers have no phase of their own: a hang or trap in one shows
-// the phase it interrupted (mepc tells the handler).
+// the phase it interrupted (mepc tells the handler). New phases are appended, so a stored value keeps
+// its meaning.
+//
+// bus_background_ready() runs bus_rx_poll() (the BambuBus/AHUB RX parser) before it answers, so the
+// parser also runs inside the NVM, FLASH and RGB phases: a hang there can be the parser.
 typedef enum
 {
     BLACKBOX_PHASE_NONE = 0,    // never written
     BLACKBOX_PHASE_BOOT,        // main() up to the first-boot calibration: LEDs, NVM and ADC init
     BLACKBOX_PHASE_CALIBRATION, // MC_PULL_calibration_boot (the watchdog does not run yet: only a trap resets)
     BLACKBOX_PHASE_NVM_READ,    // watchdog_start, the filament and loaded-channel records
-    BLACKBOX_PHASE_MOTION_INIT, // Motion_control_init: AS5600, PWM, the motor-direction test
+    BLACKBOX_PHASE_MOTION_INIT, // Motion_control_init (AS5600, PWM, the motor-direction test), then
+                                // the check that unloads a restored channel with no filament or calibration
     BLACKBOX_PHASE_BUS_INIT,    // bambubus_init, bus_init
-    BLACKBOX_PHASE_AHUB,        // main loop from the feed: ahubus_run
+    BLACKBOX_PHASE_AHUB,        // main loop from the feed: bus_rx_poll (the RX parser), ahubus_run
     BLACKBOX_PHASE_BAMBUBUS,    // bambubus_run
-    BLACKBOX_PHASE_SEND,        // send_package, the host-link decision and the SYS LED
-    BLACKBOX_PHASE_NVM,         // ams_nvm_save_run
+    BLACKBOX_PHASE_SEND,        // send_package, the host-type decision and the SYS LED
+    BLACKBOX_PHASE_NVM,         // ams_state_save_run, ams_datas_save_run: queue a flash job (also the RX parser)
     BLACKBOX_PHASE_MOTION,      // Motion_control_run (also the recalibration hold and its reboot)
-    BLACKBOX_PHASE_RGB,         // RGB_update
+    BLACKBOX_PHASE_RGB,         // RGB_update (also the RX parser)
+    BLACKBOX_PHASE_FLASH,       // Flash_background_run: one step of a background flash job (also the RX parser)
 } blackbox_phase;
 
 typedef struct

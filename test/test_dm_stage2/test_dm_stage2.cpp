@@ -19,6 +19,14 @@
 // failed channel failed; Stage-1 goes on after it, its push with its start. Nor may auto-unloads the buffer-lift gesture starts meanwhile give a blocked
 // gear more push, or a stage more time: their passes count as time for the run's guard. Nor may an
 // ADC stream that stops on a short 'none' unload a loaded channel: its frozen readings do not count.
+//
+// Merged from V11: after a failure the motor first retracts (S1_FAIL_RETRACT, S2_FAIL_RETRACT and
+// S2_FAIL_EXTRA, each at most 1.5 s, the Stage-2 ones together at most 120 mm, ending on key
+// 'none'), then stays off and red; no auto-unload or manual pull drives a failed channel; Stage-1
+// is closed from boot and while the channel is not idle (the printer or an auto-unload moves it),
+// counts as used once it pushes, and opens again only once the filament counts as out on an idle
+// pass; 'both' during Stage-1's debounce goes on with Stage-2 at once. Stage-2 itself is not gated
+// (the fork's run resume and the dm_rearm.h re-arm need it).
 
 #include <math.h>
 #include <stdint.h>
@@ -55,8 +63,12 @@ static filament_now_position_enum filament_now_position[4];
 static bool     filament_channel_inserted[4];
 static uint8_t  MC_ONLINE_key_stu[4];
 static float    MC_PULL_pct_f[4];
-static uint32_t as5600_count[4];
+static uint32_t gear_cnt[4];  // encoder_count(ch): the low 32 bits of the AS5600 odometer
+static inline uint32_t encoder_count(uint8_t ch) { return gear_cnt[ch]; }
 static bool     g_dm_key_old; // the key readings are older than DM_REARM_KEY_FRESH_MS (pass())
+static auto_unload_t g_auto_unload[4]; // the auto-unload state (auto_unload.h; motor_motion_run's DM pass reads .active)
+static bool     cal_valid[4]; // MC_PULL_calibration_is_valid(ch)
+static inline bool MC_PULL_calibration_is_valid(uint8_t ch) { return cal_valid[ch]; }
 
 static uint8_t led_r, led_g; // red and green of channel 0's last status LED colour
 static void MC_STU_RGB_set(uint8_t ch, uint8_t r, uint8_t g, uint8_t b)
@@ -98,11 +110,11 @@ enum : uint8_t
 static uint8_t  dm_loaded[4]            = {1,1,1,1};   // 1=loaded (after stage2 success)
 static uint8_t  dm_fail_latch[4]        = {0,0,0,0};   // latch until key 'none' for DM_REARM_AWAY_MS
 static uint8_t  dm_auto_state[4]        = {0,0,0,0};
-static uint8_t  dm_autoload_gate[4]     = {0,0,0,0}; // 0=allow Stage1, 1=block Stage1 until idle+key out
+static uint8_t  dm_autoload_gate[4]     = {1,1,1,1}; // 0=allow Stage-1, 1=block until the filament is out (DM_REARM_EMPTY) with the channel idle
 static uint8_t  dm_auto_try[4]          = {0,0,0,0};   // abort count (stage2)
 static uint64_t dm_auto_t0_ms[4]        = {0ull,0ull,0ull,0ull};
 static float    dm_auto_remain_m[4]     = {0,0,0,0};
-static uint32_t dm_auto_last_cnt[4]     = {0,0,0,0};   // as5600_count at the last Stage-2 update
+static uint32_t dm_auto_last_cnt[4]     = {0,0,0,0};   // encoder_count at the last Stage-2 update
 
 // A loaded channel's key away from 'both' (dm_rearm.h): first pass (0 = none), gear position then.
 static uint64_t dm_loaded_drop_t0_ms[4] = {0ull,0ull,0ull,0ull};
@@ -136,9 +148,11 @@ static inline uint8_t dm_s2_enter_state(uint8_t ch, uint32_t cur_cnt, uint64_t n
     return st;
 }
 
-// A limit of the run's guard fails the autoload the way three buffer aborts do: the run is over, and
-// the fail latch keeps the motor off and the LED red until the key is out (key 'none' for
-// DM_REARM_AWAY_MS, dm_rearm.h) or a printer load finishes.
+// A limit of the run's guard fails the autoload at once, with no fail retract: the run is over, the
+// motor is off, and the fail latch keeps it off and the LED red until the key is out (key 'none' for
+// DM_REARM_AWAY_MS, dm_rearm.h) or a printer load finishes. Three buffer aborts set the same latch but
+// first run V11's fail retract (S2_FAIL_RETRACT, at most 1.5 s or 120 mm, then S2_FAIL_EXTRA up to
+// 1.5 s at key 'external only').
 static inline void dm_s2_guard_fail(uint8_t ch)
 {
     dm_s2_end(&dm_s2_run[ch]);
@@ -200,7 +214,7 @@ static inline void dm_s2_auto_unload_pass(uint8_t ch, bool idle_ctrl, uint64_t n
     const bool s2_stage = (st == DM_AUTO_S2_PUSH) || (st == DM_AUTO_S2_RETRACT) || (st == DM_AUTO_S2_FAIL_RETRACT);
     if (!s2_stage && (dm_s2_run[ch].stage == DM_S2_STAGE_NONE)) return;
 
-    if (dm_s2_guard_pass(&dm_s2_guard[ch], now_ms, as5600_count[ch], 0.0f, false) != ML_OK) dm_s2_guard_fail(ch);
+    if (dm_s2_guard_pass(&dm_s2_guard[ch], now_ms, encoder_count(ch), 0.0f, false) != ML_OK) dm_s2_guard_fail(ch);
 }
 // ---- end of the Motion_control.cpp copy ----
 
@@ -221,9 +235,12 @@ static float dm_run(int CHx, uint64_t now_ms)
                     if (filament_channel_inserted[CHx] && (dm_loaded[CHx] == 0u))
                     {
                         const uint8_t ks = MC_ONLINE_key_stu[CHx];
-                        const uint32_t cur_cnt = as5600_count[CHx];
+                        const uint32_t cur_cnt = encoder_count(CHx);
 
-                        if (dm_fail_latch[CHx])
+                        if (dm_fail_latch[CHx] &&
+                            dm_auto_state[CHx] != DM_AUTO_S1_FAIL_RETRACT &&
+                            dm_auto_state[CHx] != DM_AUTO_S2_FAIL_RETRACT &&
+                            dm_auto_state[CHx] != DM_AUTO_S2_FAIL_EXTRA)
                         {
                             dm_autoload_active = true;
                             dm_autoload_x = 0.0f;
@@ -242,13 +259,13 @@ static float dm_run(int CHx, uint64_t now_ms)
                                     // Stage-1 once per insertion, and for a run the key interrupted (dm_stage2.h)
                                     if ((dm_autoload_gate[CHx] == 0u) || (dm_s2_run[CHx].stage != DM_S2_STAGE_NONE))
                                     {
-                                        dm_autoload_gate[CHx] = 1u;
                                         dm_auto_state[CHx] = DM_AUTO_S1_DEBOUNCE;
                                         dm_auto_t0_ms[CHx] = now_ms;
                                     }
                                 }
                                 else if (ks == 1u)
                                 {
+                                    dm_autoload_gate[CHx] = 1u;
                                     dm_auto_state[CHx] =
                                         dm_s2_enter_state(CHx, cur_cnt, now_ms, &dm_s2_resumed, &dm_s2_new_run);
                                 }
@@ -265,13 +282,20 @@ static float dm_run(int CHx, uint64_t now_ms)
                                 dm_autoload_active = true;
                                 MC_STU_RGB_set(CHx, 0xFF, 0xFF, 0x00);
 
-                                if (ks != 2u)
+                                if (ks == 1u)
+                                {
+                                    dm_autoload_gate[CHx] = 1u;
+                                    dm_auto_state[CHx] =
+                                        dm_s2_enter_state(CHx, cur_cnt, now_ms, &dm_s2_resumed, &dm_s2_new_run);
+                                }
+                                else if (ks != 2u)
                                 {
                                     dm_auto_state[CHx] = DM_AUTO_IDLE;
                                     dm_auto_t0_ms[CHx] = 0ull;
                                 }
                                 else if ((now_ms - dm_auto_t0_ms[CHx]) >= DM_AUTO_S1_DEBOUNCE_MS)
                                 {
+                                    dm_autoload_gate[CHx] = 1u;
                                     dm_auto_state[CHx] = DM_AUTO_S1_PUSH;
                                     dm_auto_t0_ms[CHx] = now_ms;
                                 }
@@ -288,6 +312,7 @@ static float dm_run(int CHx, uint64_t now_ms)
                                 }
                                 else if (ks == 1u)
                                 {
+                                    dm_autoload_gate[CHx] = 1u;
                                     dm_auto_state[CHx] =
                                         dm_s2_enter_state(CHx, cur_cnt, now_ms, &dm_s2_resumed, &dm_s2_new_run);
                                 }
@@ -367,6 +392,8 @@ static float dm_run(int CHx, uint64_t now_ms)
                                     {
                                         dm_fail_latch[CHx] = 1u;
                                         dm_auto_state[CHx] = DM_AUTO_S2_FAIL_RETRACT;
+                                        dm_auto_remain_m[CHx] = DM_AUTO_S2_TARGET_M;
+                                        dm_auto_t0_ms[CHx] = now_ms;
                                     }
                                     else
                                     {
@@ -446,17 +473,30 @@ static float dm_run(int CHx, uint64_t now_ms)
                                 break;
 
                             case DM_AUTO_S2_FAIL_RETRACT:
+                            case DM_AUTO_S2_FAIL_EXTRA:
+                            {
                                 dm_autoload_active = true;
                                 MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
 
-                                if (ks == 0u)
+                                // V11: the fail retract and its extra are bounded by time and by the
+                                // Stage-2 length (S2_FAIL_RETRACT starts with DM_AUTO_S2_TARGET_M).
+                                const float moved = ml_travel_m(cur_cnt, dm_auto_last_cnt[CHx]);
+                                dm_auto_last_cnt[CHx] = cur_cnt;
+                                float r = dm_auto_remain_m[CHx] - moved;
+                                if (r < 0.0f) r = 0.0f;
+                                dm_auto_remain_m[CHx] = r;
+                                const bool extra = dm_auto_state[CHx] == DM_AUTO_S2_FAIL_EXTRA;
+                                const uint64_t limit_ms = extra ? DM_AUTO_FAIL_EXTRA_MS : DM_AUTO_S1_FAIL_RETRACT_MS;
+
+                                if (ks == 0u || dm_auto_remain_m[CHx] <= 0.0f ||
+                                    (now_ms - dm_auto_t0_ms[CHx]) >= limit_ms)
                                 {
                                     dm_auto_state[CHx]    = DM_AUTO_IDLE;
                                     dm_auto_try[CHx]      = 0u;
                                     dm_auto_remain_m[CHx] = 0.0f;
                                     dm_auto_t0_ms[CHx]    = 0ull;
                                 }
-                                else if (ks == 2u)
+                                else if (!extra && ks == 2u)
                                 {
                                     dm_auto_state[CHx] = DM_AUTO_S2_FAIL_EXTRA;
                                     dm_auto_t0_ms[CHx] = now_ms;
@@ -466,30 +506,7 @@ static float dm_run(int CHx, uint64_t now_ms)
                                     dm_autoload_x = dir * DM_AUTO_PWM_PULL;
                                 }
                                 break;
-
-                            case DM_AUTO_S2_FAIL_EXTRA:
-                                dm_autoload_active = true;
-                                MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
-
-                                if (ks == 0u)
-                                {
-                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                    dm_auto_try[CHx]      = 0u;
-                                    dm_auto_remain_m[CHx] = 0.0f;
-                                    dm_auto_t0_ms[CHx]    = 0ull;
-                                }
-                                else if ((now_ms - dm_auto_t0_ms[CHx]) >= DM_AUTO_FAIL_EXTRA_MS)
-                                {
-                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
-                                    dm_auto_try[CHx]      = 0u;
-                                    dm_auto_remain_m[CHx] = 0.0f;
-                                    dm_auto_t0_ms[CHx]    = 0ull;
-                                }
-                                else
-                                {
-                                    dm_autoload_x = dir * DM_AUTO_PWM_PULL;
-                                }
-                                break;
+                            }
 
                             case DM_AUTO_IDLE:
                                 // Before Stage-1 or Stage-2, or a Stage-2 run the key interrupted: its
@@ -516,9 +533,11 @@ static float dm_run(int CHx, uint64_t now_ms)
                             // on on every pass as well (IDLE, S1_DEBOUNCE, and Stage-1's push back to 'both'),
                             // so no round of Stage-1 restarts it (dm_stage2.h), and so it does on the passes an
                             // auto-unload drives instead of run() (dm_s2_auto_unload_pass). A limit fails the
-                            // autoload the way three buffer aborts do (dm_s2_guard_fail): motor off, red, until
-                            // the key is out (dm_rearm.h) or a printer load finishes. (S2_FAIL_RETRACT does not
-                            // run today: the fail latch set with it skips this state machine.)
+                            // autoload at once, with no fail retract (dm_s2_guard_fail): motor off, red, until
+                            // the key is out (dm_rearm.h) or a printer load finishes. The third buffer abort runs
+                            // V11's fail retract first: S2_FAIL_RETRACT, bounded by 1.5 s and the Stage-2 length,
+                            // whose passes count for the run's guard; then S2_FAIL_EXTRA (key 'external only'),
+                            // up to 1.5 s, outside the guard.
                             const uint8_t st = dm_auto_state[CHx];
                             const bool s2_stage =
                                 (st == DM_AUTO_S2_PUSH) || (st == DM_AUTO_S2_RETRACT) || (st == DM_AUTO_S2_FAIL_RETRACT);
@@ -526,10 +545,10 @@ static float dm_run(int CHx, uint64_t now_ms)
                             const bool s2_entered = s2_stage && (st != dm_state_at_entry) && (st != dm_s2_resumed);
                             if (s2_entered && dm_s2_new_run)
                             {
-                                ml_dm_s2_start(&dm_s2_guard[CHx], now_ms, as5600_count[CHx], DM_AUTO_S2_TARGET_M);
+                                ml_dm_s2_start(&dm_s2_guard[CHx], now_ms, encoder_count(CHx), DM_AUTO_S2_TARGET_M);
                             }
                             else if ((s2_stage || s2_interrupted) &&
-                                     (dm_s2_guard_pass(&dm_s2_guard[CHx], now_ms, as5600_count[CHx], dm_autoload_x,
+                                     (dm_s2_guard_pass(&dm_s2_guard[CHx], now_ms, encoder_count(CHx), dm_autoload_x,
                                                        s2_entered) != ML_OK))
                             {
                                 dm_s2_guard_fail(CHx);
@@ -562,27 +581,35 @@ static void dm_motor_motion_run(uint64_t time_now)
             dm_loaded_drop_t0_ms[ch] = 0ull;
             dm_none_t0_ms[ch]        = 0ull;
             dm_s1_held[ch]           = DM_AUTO_IDLE;
-            dm_autoload_gate[ch]     = 0u;
+            dm_autoload_gate[ch]     = 1u;
             dm_s2_end(&dm_s2_run[ch]);
             continue;
         }
 
         const uint8_t ks = MC_ONLINE_key_stu[ch];
+        const filament_now_position_enum pos = filament_now_position[ch];
+
+        // V11: Stage-1 from IDLE is blocked while the printer or the BMCU moves the channel (a printer
+        // unload or an auto-unload must not be pushed back in), and allowed again only once the
+        // filament counts as out (DM_REARM_EMPTY) with the channel idle.
+        const bool idle = (pos == filament_idle) &&
+                          (A.filament[ch].motion == _filament_motion::idle) &&
+                          !g_auto_unload[ch].active;
+        if (!idle) dm_autoload_gate[ch] = 1u;
 
         // dm_loaded (dm_rearm.h): a loaded channel is unloaded, which arms Stage-2 again, only once
         // the filament left both switches (key 'none' for DM_REARM_AWAY_MS) or the gear retracted it
         // out of 'both'; a finished printer load marks it loaded. Key readings from a stream that
         // stopped (g_dm_key_old) only end the key's run of 'none' and its excursion.
-        const filament_now_position_enum pos = filament_now_position[ch];
         const dm_host_t host = dm_host_from_motion(A.now_filament_num == ch, A.filament[ch].motion,
                                                    (pos == filament_pulling_back) || (pos == filament_redetect));
         const dm_rearm_event ev = dm_rearm_pass(&dm_loaded[ch], &dm_loaded_drop_t0_ms[ch], &dm_loaded_drop_cnt[ch],
                                                 &dm_none_t0_ms[ch], ks, g_dm_key_old, host, time_now,
-                                                as5600_count[ch]);
+                                                encoder_count(ch));
 
         if (ev == DM_REARM_EMPTY)
         {
-            if (filament_now_position[ch] == filament_idle)
+            if (idle)
                 dm_autoload_gate[ch] = 0u;
 
             dm_fail_latch[ch]        = 0u;
@@ -644,7 +671,7 @@ static void dm_init(void)
 
             const uint8_t ks = MC_ONLINE_key_stu[ch];
 
-            dm_autoload_gate[ch] = (ks != 0u) ? 1u : 0u;
+            dm_autoload_gate[ch] = 1u;
             dm_loaded[ch] = (ks == 1u) ? 1u : 0u;
 
             dm_fail_latch[ch]        = 0u;
@@ -677,7 +704,6 @@ static constexpr float    MANUAL_EMPTY_PULL_PWM      = 700.0f;
 // x_prev for the PWM the last pass drove.
 static bool printer_idle;   // the printer commands idle: the channel runs its idle control
 
-static auto_unload_t g_auto_unload[4];
 static float   x_prev[4];          // _MOTOR_CONTROL::x_prev
 static uint8_t pb_unload_fault[4]; // the unload fault (red blink)
 
@@ -685,12 +711,13 @@ static au_drive_t au_pass(uint8_t i, uint64_t time_now)
 {
         au_in_t au;
         au.online    = true;
-        au.inserted  = filament_channel_inserted[i];
+        au.inserted  = filament_channel_inserted[i] && MC_PULL_calibration_is_valid(i)
+                       && !dm_fail_latch[i];  // V11: a failed autoload keeps the motor off until the filament is out
         au.idle_ctrl = printer_idle;
         au.pct       = MC_PULL_pct_f[i];
         au.ks        = MC_ONLINE_key_stu[i];
         au.now_ms    = time_now;
-        au.pos_cnt   = as5600_count[i];
+        au.pos_cnt   = encoder_count(i);
         au.pwm       = x_prev[i];
         const au_drive_t drive = auto_unload_pass(&g_auto_unload[i], &au);
         if (g_auto_unload[i].limit) pb_unload_fault[i] = 1u;
@@ -714,8 +741,8 @@ static au_drive_t au_pass(uint8_t i, uint64_t time_now)
 
 static uint64_t now;        // ms
 static double tip_mm;       // filament tip, mm past the inner switch (< 0: behind it)
-static double gear_mm;      // gear travel, + = retract (as5600_count rises on a retract)
-static uint32_t cnt0;       // as5600_count at gear_mm = 0
+static double gear_mm;      // gear travel, + = retract (encoder_count rises on a retract)
+static uint32_t cnt0;       // encoder_count at gear_mm = 0
 static double v_mm_s;       // gear speed at 900 PWM (0: gear blocked)
 static double block_mm;     // the path ahead is blocked where the tip reaches this
 static double backlash_mm;  // buffer slider friction: it follows a retract only this much later
@@ -811,7 +838,7 @@ static void pass(void)
         MC_PULL_pct_f[0] = (forced_pct >= 0.0f) ? forced_pct : pct;
     }
     none_run = (MC_ONLINE_key_stu[0] == KS_NONE) ? none_run + 1u : 0u;
-    as5600_count[0] = cnt0 + (uint32_t)(int32_t)llround(gear_mm / (double)ML_MM_PER_CNT);
+    gear_cnt[0] = cnt0 + (uint32_t)(int32_t)llround(gear_mm / (double)ML_MM_PER_CNT);
 // ---- adapted from Motion_control.cpp: Motion_control_run's key age and motor_motion_run's stale block ----
 // ---- anchor: Motion_control_run from /g_adc_stale = adc_stream_stale/ to /g_dm_key_old = dm_rearm_key_old/ ----
 // ---- anchor: motor_motion_run from /if \(g_adc_stale\)/ to /return;/ ----
@@ -991,7 +1018,8 @@ void setUp(void)
         filament_channel_inserted[ch] = (ch == 0u);
         MC_ONLINE_key_stu[ch] = 0u;
         MC_PULL_pct_f[ch] = 50.0f;
-        as5600_count[ch] = 0u;
+        gear_cnt[ch] = 0u;
+        cal_valid[ch] = true;
         dm_loaded_drop_cnt[ch] = 0u;
         x_prev[ch] = 0.0f;
         pb_unload_fault[ch] = 0u;
@@ -999,9 +1027,13 @@ void setUp(void)
     memset(dm_s2_guard, 0, sizeof(dm_s2_guard));
     ams[0].init();
 
-    // Boot with no filament at the channel.
+    // Boot with no filament at the channel. Motion_control_init leaves Stage-1 closed (V11:
+    // dm_autoload_gate 1); the key reading 'none' for DM_REARM_AWAY_MS with the channel idle opens it.
     MC_ONLINE_key_stu[0] = key_from_tip();
     dm_init();
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_autoload_gate[0]);
+    run_for(DM_REARM_AWAY_MS + 1u);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_autoload_gate[0]);
 }
 
 void tearDown(void) {}
@@ -1021,7 +1053,7 @@ static void insert_and_start_stage2(void)
 
 // ---- dm_stage2.h ----
 
-// 10 mm of gear travel in AS5600 counts (as5600_count falls while the gear pushes).
+// 10 mm of gear travel in AS5600 counts (encoder_count falls while the gear pushes).
 #define CNT_10MM 1739u
 
 static void test_enter_without_an_interrupted_run_starts_a_new_one(void)
@@ -1346,9 +1378,175 @@ static void test_three_buffer_aborts_fail_as_before(void)
     TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
     TEST_ASSERT_EQUAL_INT(3, aborts);
     TEST_ASSERT_EQUAL_UINT8(0xFFu, led_r);
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S2_FAIL_RETRACT, dm_auto_state[0]);
+}
+
+static void test_a_failed_run_retracts_the_filament_out_then_the_channel_rearms(void)
+{
+    // V11: after the third abort the motor retracts (S2_FAIL_RETRACT, then S2_FAIL_EXTRA once the key
+    // reads 'external only'), each for at most 1.5 s and both together for at most the 120 mm of a
+    // run, until the key reads 'none'; the fork's fail latch used to skip both, with the motor off.
+    // Path blocked 30 mm in, gear free: the retract takes the tip from 40 mm past the inner switch,
+    // where the third push aborted, to 30 mm behind it in 1.2 s, never pushes, and stops (S2_FAIL_RETRACT
+    // 0.7 s, then S2_FAIL_EXTRA from 'external only' on). The key at 'none' for 100 ms with the channel
+    // idle then ends the insertion: latch, red and the Stage-1 gate cleared; the next insertion loads.
+    insert_and_start_stage2();
+    block_mm = 30.0;
+    TEST_ASSERT_TRUE(until_done(20000u) > 0);
+    const double pushed0 = pushed_mm;
+    const double retracted0 = retracted_mm;
+    const uint32_t d0 = drive_ms;
+    bool extra = false;
+    for (int n = 0; (n < 5000) && (dm_auto_state[0] != DM_AUTO_IDLE); n++)
+    {
+        pass();
+        if (dm_auto_state[0] == DM_AUTO_S2_FAIL_EXTRA) extra = true;
+    }
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+    TEST_ASSERT_TRUE(extra);
+    TEST_ASSERT_TRUE(pushed_mm == pushed0);
+    ASSERT_MM_WITHIN(0.5, 70.0, retracted_mm - retracted0);
+    TEST_ASSERT_TRUE(drive_ms - d0 <= (uint32_t)(DM_AUTO_S1_FAIL_RETRACT_MS + DM_AUTO_FAIL_EXTRA_MS));
+    TEST_ASSERT_EQUAL_UINT8(KS_NONE, MC_ONLINE_key_stu[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);  // until the key has read 'none' for 100 ms
     const double moved = pushed_mm + retracted_mm;
+    run_for(DM_REARM_AWAY_MS + 1u);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_autoload_gate[0]);
+    TEST_ASSERT_EQUAL_UINT8(0u, led_r);
     run_for(5000u);
     TEST_ASSERT_TRUE(pushed_mm + retracted_mm == moved); // motor off
+    block_mm = 1.0e9;
+    insert_and_start_stage2();
+    TEST_ASSERT_TRUE(until_done(10000u) > 0);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+    ASSERT_MM_WITHIN(0.1, S2_LEN_MM, pushed_s2_mm);
+}
+
+static void test_a_failed_run_whose_filament_stays_in_retracts_at_most_1_5s_then_stays_red(void)
+{
+    // The same, but the filament jams in the blocked path once the run has failed (the gear stops):
+    // S2_FAIL_RETRACT drives 900 PWM back at most 1.5 s (the run's stall window, which goes on into
+    // it, may end it sooner: dm_s2_guard_fail), the key stays at 'both', so no S2_FAIL_EXTRA; then
+    // the motor is off and the LED red for good, with no push.
+    insert_and_start_stage2();
+    block_mm = 30.0;
+    TEST_ASSERT_TRUE(until_done(20000u) > 0);
+    v_mm_s = 0.0;
+    const uint32_t p0 = push_ms;
+    const uint32_t d0 = drive_ms;
+    run_for(2000u);
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+    TEST_ASSERT_TRUE(drive_ms - d0 <= (uint32_t)DM_AUTO_S1_FAIL_RETRACT_MS);
+    const uint32_t d1 = drive_ms;
+    run_for(60000u);
+    TEST_ASSERT_EQUAL_UINT32(d1, drive_ms);
+    TEST_ASSERT_EQUAL_UINT32(p0, push_ms);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
+    TEST_ASSERT_EQUAL_UINT8(0xFFu, led_r);
+}
+
+static void test_a_failed_runs_retract_stops_after_the_120mm_of_a_run(void)
+{
+    // The filament slips in the gear, which turns at 100 mm/s, and the key stays at 'both': the fail
+    // retract ends on the Stage-2 length, 120 mm, after 1.2 s, before its 1.5 s.
+    insert_and_start_stage2();
+    block_mm = 30.0;
+    TEST_ASSERT_TRUE(until_done(20000u) > 0);
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S2_FAIL_RETRACT, dm_auto_state[0]);
+    forced_ks = KS_BOTH;
+    v_mm_s = 100.0;
+    const double retracted0 = retracted_mm;
+    const uint32_t d0 = drive_ms;
+    for (int n = 0; (n < 5000) && (dm_auto_state[0] != DM_AUTO_IDLE); n++) pass();
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+    ASSERT_MM_WITHIN(0.2, S2_LEN_MM, retracted_mm - retracted0);
+    TEST_ASSERT_UINT32_WITHIN(2u, 1200u, drive_ms - d0);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
+    const uint32_t d1 = drive_ms;
+    run_for(5000u);
+    TEST_ASSERT_EQUAL_UINT32(d1, drive_ms);
+}
+
+static void test_no_auto_unload_or_manual_pull_on_a_failed_channel(void)
+{
+    // V11: with the fail latch set neither the buffer-lift auto-unload nor the manual empty pull
+    // drives (au.inserted is false): the motor stays off until the filament counts as out.
+    insert_and_start_stage2();
+    block_mm = 30.0;
+    TEST_ASSERT_TRUE(until_done(20000u) > 0);
+    v_mm_s = 0.0;   // jammed: the fail retract cannot take it out
+    run_for(2000u); // the fail retract is over
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
+    forced_pct = 85.0f; // the gesture: lifted, then back to the neutral band
+    run_for(20u);
+    forced_pct = 50.0f;
+    run_for(2000u);
+    forced_ks = KS_NONE; // the key at 'none' with the buffer held up: the manual pull's condition,
+    forced_pct = 90.0f;  // for the 100 ms the latch is kept
+    run_for(DM_REARM_AWAY_MS);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, au_starts);
+    TEST_ASSERT_EQUAL_UINT32(0u, au_ms);
+    // Out: the latch ends, and the manual pull runs again as before.
+    run_for(2u);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
+    TEST_ASSERT_TRUE(au_ms > 0u);
+}
+
+static void test_both_during_stage1s_debounce_resumes_the_interrupted_run_at_once(void)
+{
+    // V11's shortcut: 'both' while Stage-1's debounce waits goes on with Stage-2 on that pass, through
+    // dm_s2_enter_state: the interrupted run's length, aborts and guard, no new run.
+    insert_and_start_stage2();
+    run_for(500u); // 30 mm in
+    const float remain = dm_auto_remain_m[0];
+    forced_ks = KS_EXT;
+    run_for(50u);
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S1_DEBOUNCE, dm_auto_state[0]);
+    TEST_ASSERT_EQUAL_UINT8(DM_S2_STAGE_PUSH, dm_s2_run[0].stage);
+    forced_ks = -1;
+    const uint32_t runs0 = runs;
+    pass();
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S2_PUSH, dm_auto_state[0]);
+    TEST_ASSERT_EQUAL_UINT8(DM_S2_STAGE_NONE, dm_s2_run[0].stage);
+    TEST_ASSERT_EQUAL_UINT32(runs0, runs);
+    TEST_ASSERT_FLOAT_WITHIN(0.0005f, remain, dm_auto_remain_m[0]);
+    TEST_ASSERT_TRUE(until_done(10000u) > 0);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+    ASSERT_MM_WITHIN(0.1, S2_LEN_MM, pushed_s2_mm);
+}
+
+static void test_stage1_is_closed_while_the_printer_moves_the_channel(void)
+{
+    // V11: Stage-1 is closed on every pass the channel is not idle (here the printer unloads it), and
+    // reopens only once the filament counts as out (the key at 'none' for 100 ms) on an idle pass.
+    // With no filament the first idle pass reopens it; with the filament left at 'external only' by
+    // the printer's move nothing reopens it, and no Stage-1 pushes it back in.
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_autoload_gate[0]);
+    ams[0].now_filament_num = 0u;
+    ams[0].filament[0].motion = _filament_motion::pull_back;
+    printer_idle = false;
+    pass();
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_autoload_gate[0]);
+    run_for(1000u); // the key reads 'none' all along
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_autoload_gate[0]);
+    ams[0].filament[0].motion = _filament_motion::idle;
+    printer_idle = true;
+    pass();
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_autoload_gate[0]);
+
+    ams[0].filament[0].motion = _filament_motion::pull_back;
+    printer_idle = false;
+    tip_mm = -10.0; // 'external only' while the printer has the channel
+    run_for(2000u);
+    ams[0].filament[0].motion = _filament_motion::idle;
+    printer_idle = true;
+    run_for(20000u);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_autoload_gate[0]);
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+    TEST_ASSERT_EQUAL_UINT32(0u, drive_ms);
 }
 
 // ---- Key excursions ----
@@ -1635,6 +1833,15 @@ static void test_a_slow_gear_runs_out_of_time_despite_dips(void)
 // a run has at most five stages (three pushes, two retracts).
 #define STAGE_FAIL_MAX_MS 12000u
 #define RUN_STAGES_MAX 5u
+// V11's fail retracts: once failed, the channel pushes no more and drives only in S1_FAIL_RETRACT,
+// S2_FAIL_RETRACT and S2_FAIL_EXTRA, each at most 1.5 s, at most two of them after one fail.
+#define FAIL_RETRACT_MAX_MS ((uint32_t)(DM_AUTO_S1_FAIL_RETRACT_MS + DM_AUTO_FAIL_EXTRA_MS))
+
+static bool in_fail_retract(void)
+{
+    const uint8_t st = dm_auto_state[0];
+    return (st == DM_AUTO_S1_FAIL_RETRACT) || (st == DM_AUTO_S2_FAIL_RETRACT) || (st == DM_AUTO_S2_FAIL_EXTRA);
+}
 
 // xorshift32: every run of the test sees the same patterns.
 static uint32_t rng_state = 1u;
@@ -1655,6 +1862,7 @@ static uint32_t drive_at_none;  // drive_ms then
 static uint32_t worst_push_ms;  // the most push_ms - push_at_none any pass saw
 static uint32_t worst_drive_ms; // the most drive_ms - drive_at_none any pass saw
 static uint32_t au_total;       // auto-unloads started in a sweep
+static uint32_t drive_at_fail;  // drive_ms just before the pass that set the fail latch
 
 // Insertion (from no filament) to a tip at the lever, the gear blocked.
 static void blocked_at_lever(void)
@@ -1665,14 +1873,16 @@ static void blocked_at_lever(void)
     push_at_none = drive_at_none = 0u;
 }
 
-// One pass, checking the bounds of a blocked gear: the push and the drive since the key was last
-// out (key_out) stay within BLOCKED_PUSH_MAX_MS, a stage has failed STAGE_FAIL_MAX_MS after it began,
-// a run has at most RUN_STAGES_MAX stages, one run at most begins per insertion, and a failed
-// channel does not drive until the key is out.
+// One pass, checking the bounds of a blocked gear: the push since the key was last out (key_out)
+// stays within BLOCKED_PUSH_MAX_MS and the drive within that plus FAIL_RETRACT_MAX_MS, a stage has
+// failed STAGE_FAIL_MAX_MS after it began, a run has at most RUN_STAGES_MAX stages, one run at most
+// begins per insertion, and a failed channel pushes no more and drives only in its fail retracts,
+// for at most FAIL_RETRACT_MAX_MS, until the key is out.
 static void blocked_pass(void)
 {
     const bool failed = (fail_t0 != 0u);
     const uint32_t d = drive_ms;
+    const uint32_t p = push_ms;
     pass();
     if (key_out())
     {
@@ -1680,7 +1890,7 @@ static void blocked_pass(void)
         drive_at_none = drive_ms;
     }
     TEST_ASSERT_TRUE(push_ms - push_at_none <= BLOCKED_PUSH_MAX_MS);
-    TEST_ASSERT_TRUE(drive_ms - drive_at_none <= BLOCKED_PUSH_MAX_MS);
+    TEST_ASSERT_TRUE(drive_ms - drive_at_none <= BLOCKED_PUSH_MAX_MS + FAIL_RETRACT_MAX_MS);
     if (push_ms - push_at_none > worst_push_ms) worst_push_ms = push_ms - push_at_none;
     if (drive_ms - drive_at_none > worst_drive_ms) worst_drive_ms = drive_ms - drive_at_none;
     if ((run_t0 != 0u) && (fail_t0 == 0u))
@@ -1689,7 +1899,13 @@ static void blocked_pass(void)
         TEST_ASSERT_TRUE(run_stages <= RUN_STAGES_MAX);
     }
     TEST_ASSERT_TRUE(runs <= 1u);
-    if (failed && (fail_t0 != 0u)) TEST_ASSERT_EQUAL_UINT32(d, drive_ms);
+    if (!failed) drive_at_fail = d;
+    if (failed && (fail_t0 != 0u))
+    {
+        TEST_ASSERT_EQUAL_UINT32(p, push_ms);
+        if (drive_ms != d) TEST_ASSERT_TRUE(in_fail_retract());
+        TEST_ASSERT_TRUE(drive_ms - drive_at_fail <= FAIL_RETRACT_MAX_MS);
+    }
 }
 
 // 'both' for len_lo..len_hi ms, starting every every_lo..every_hi ms, for ms; the tip sets the key
@@ -1719,7 +1935,7 @@ static void check_blocked_failed(void)
     TEST_ASSERT_EQUAL_UINT8(g_auto_unload[0].active ? 0x2Du : 0x00u, led_g);
     TEST_ASSERT_TRUE(fail_t0 != 0u);
     TEST_ASSERT_TRUE(push_ms <= BLOCKED_PUSH_MAX_MS);
-    TEST_ASSERT_TRUE(drive_ms <= BLOCKED_PUSH_MAX_MS);
+    TEST_ASSERT_TRUE(drive_ms <= BLOCKED_PUSH_MAX_MS + FAIL_RETRACT_MAX_MS);
 }
 
 static void test_a_blocked_gear_at_the_lever_stops_despite_both_blips(void)
@@ -1823,7 +2039,8 @@ static void test_an_adaptive_key_and_buffer_pattern_bounds_a_blocked_gear(void)
     // stage driving (50% in S2_PUSH, 78% in S2_RETRACT). With a window per stage that got 4999 ms of
     // Stage-1 and then about 1 s of drive in each of the five stages. Now it gets 998 ms of push after
     // Stage-1, 1 ms under the bound, and then uses its three aborts up without driving (the window
-    // has no time left): the third fails the run.
+    // has no time left): the third fails the run. V11's fail retract after it drives the one pass the
+    // window has left (999 of drive after Stage-1 in all), and the window then fails it.
     blocked_at_lever();
     forced_ks = KS_EXT;
     forced_pct = 50.0f;
@@ -1842,8 +2059,9 @@ static void test_an_adaptive_key_and_buffer_pattern_bounds_a_blocked_gear(void)
     }
     check_blocked_failed();
     TEST_ASSERT_EQUAL_UINT32(BLOCKED_PUSH_MAX_MS - 1u, push_ms);
-    TEST_ASSERT_EQUAL_UINT32(BLOCKED_PUSH_MAX_MS - 1u, drive_ms);
-    TEST_ASSERT_EQUAL_UINT8(3u, dm_auto_try[0]);
+    TEST_ASSERT_EQUAL_UINT32(BLOCKED_PUSH_MAX_MS, drive_ms);
+    TEST_ASSERT_EQUAL_INT(3, aborts);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_auto_try[0]); // the window's fail (dm_s2_guard_fail) ended the fail retract
 }
 
 static void test_periodic_key_patterns_bound_the_push_into_a_blocked_gear(void)
@@ -2117,13 +2335,12 @@ static void test_a_long_auto_unload_runs_the_stage_budget_out(void)
     // buffer at 50%: the run starts from IDLE and pushes for 300 ms. A gesture: 10 ms at 85%, where
     // the push aborts and the retract after it drives, then 50%, and the auto-unload retracts. Its
     // gear turns but the key stays at 'both' (forced: filament that slips in the gear, say), so it
-    // goes on for its 15 s. The retract stage's budget counts the auto-unload's passes and runs out
-    // 12 s after the pass before the abort, during the auto-unload: failed, and the autoload drives
-    // nothing more.
-    // The auto-unload retracts for its 15 s (the person's), then the LED shows red. With the
-    // auto-unload's passes left out, the stage lived on through them and pushed another second after
-    // them. (A gear that does not turn for the auto-unload either stops it ML_STALL_MS in:
-    // test_an_auto_unload_counts_for_the_run_as_time_not_as_drive.)
+    // would go on for its 15 s. The retract stage's budget counts the auto-unload's passes and runs
+    // out 12 s after the pass before the abort, during the auto-unload: failed, and neither the
+    // autoload nor, since V11, the auto-unload drives any more (au.inserted is false with the fail
+    // latch set): the LED shows red. With the auto-unload's passes left out, the stage lived on
+    // through them and pushed another second after them. (A gear that does not turn for the
+    // auto-unload either stops it ML_STALL_MS in: test_an_auto_unload_counts_for_the_run_as_time_not_as_drive.)
     v_mm_s = 0.0;
     tip_mm = 1.0;
     forced_pct = 50.0f;
@@ -2142,13 +2359,14 @@ static void test_a_long_auto_unload_runs_the_stage_budget_out(void)
     const uint64_t au_t0 = now - 1u;
     for (uint32_t n = 0u; (n < AUTO_UNLOAD_MAX_MS) && !dm_fail_latch[0] && g_auto_unload[0].active; n++) blocked_pass();
     TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
-    TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
     TEST_ASSERT_EQUAL_UINT64(abort_t + STAGE_FAIL_MAX_MS - 1u, fail_t0);
-    check_blocked_failed();
-    for (uint32_t n = 0u; (n < AUTO_UNLOAD_MAX_MS) && g_auto_unload[0].active; n++) blocked_pass();
+    // V11: a failed autoload keeps the motor off until the filament is out, the auto-unload too
+    // (au.inserted): it ends on the pass after the one that failed the run.
+    TEST_ASSERT_EQUAL_UINT8(1u, g_auto_unload[0].active);
+    blocked_pass();
     TEST_ASSERT_EQUAL_UINT8(0u, g_auto_unload[0].active);
-    TEST_ASSERT_EQUAL_UINT64(au_t0 + AUTO_UNLOAD_MAX_MS, au_last + 1u);
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)AUTO_UNLOAD_MAX_MS, au_ms);
+    TEST_ASSERT_EQUAL_UINT64(fail_t0, au_last);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(fail_t0 - au_t0 + 1u), au_ms);
     TEST_ASSERT_EQUAL_UINT32(0u, au_limits);
     check_blocked_failed();
     for (int n = 0; n < 20000; n++) blocked_pass();
@@ -2213,6 +2431,10 @@ static void test_an_auto_unload_during_the_autoload_unloads_and_the_next_inserti
     TEST_ASSERT_EQUAL_UINT8(0u, dm_loaded[0]);
     TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
     TEST_ASSERT_EQUAL_UINT8(DM_S2_STAGE_NONE, dm_s2_run[0].stage);
+    // V11: Stage-1 stays closed while the auto-unload runs, and opens on the first idle pass with
+    // the filament out (the key at 'none' for 100 ms).
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_autoload_gate[0]);
+    pass();
     TEST_ASSERT_EQUAL_UINT8(0u, dm_autoload_gate[0]);
     run_for(500u);
     forced_pct = -1.0f;
@@ -2281,13 +2503,14 @@ static void test_any_key_buffer_and_gesture_pattern_bounds_a_blocked_gear(void)
 {
     // 300 patterns of 60 s, and 300 with removals: auto-unloads started in between do not give a
     // blocked gear more than the bound per insertion, or a stage more than 12 s, and a failed channel's
-    // autoload drives no more (the auto-unload still retracts: the person's).
+    // autoload drives no more once its fail retract is over. Since V11 no auto-unload starts on a
+    // failed channel either (au.inserted), so far fewer of them run than before the merge (3000+).
     worst_push_ms = worst_drive_ms = 0u;
     au_total = 0u;
     random_gesture_sweep(20000u, 300u, 0u, 60000u);
     random_gesture_sweep(30000u, 300u, 5u, 60000u);
     TEST_ASSERT_TRUE(worst_push_ms > 5800u);
-    TEST_ASSERT_TRUE(au_total > 3000u);
+    TEST_ASSERT_TRUE(au_total > 1500u);
 }
 
 static void test_gestures_and_key_dips_do_not_take_a_run_past_120mm(void)
@@ -2295,9 +2518,10 @@ static void test_gestures_and_key_dips_do_not_take_a_run_past_120mm(void)
     // A gear that turns (60 or 20 mm/s), the key following the tip but for dips of 1 to 99 ms to
     // 'external only' or the other state (too short for Stage-1 to push), and gestures now and then
     // (an auto-unload that pulls the filament out, or back behind the inner switch when the buffer
-    // drops below 35% during it): whenever the filament is out, it is inserted again at the outer
-    // switch. No run moves the filament more than 120 mm net forward from where it began (plus the
-    // last pass of push), and runs still end loaded.
+    // drops below 35% during it): whenever the filament has been out for 500 ms with no auto-unload
+    // running, it is inserted again at the outer switch (V11: Stage-1 stays closed until the filament
+    // counts as out with the channel idle). No run moves the filament more than 120 mm net forward
+    // from where it began (plus the last pass of push), and runs still end loaded.
     uint32_t loaded = 0u;
     uint32_t starts = 0u;
     for (uint32_t k = 0u; k < 100u; k++)
@@ -2307,6 +2531,7 @@ static void test_gestures_and_key_dips_do_not_take_a_run_past_120mm(void)
         v_mm_s = (k & 1u) ? 20.0 : 60.0;
         tip_mm = -10.0;
         uint32_t dip = 0u;
+        uint32_t out_ms = 0u;
         for (uint32_t n = 0u; n < 60000u; n++)
         {
             const uint32_t r = rng_in(0u, 9999u);
@@ -2324,7 +2549,8 @@ static void test_gestures_and_key_dips_do_not_take_a_run_past_120mm(void)
             if (!loaded0 && dm_loaded[0]) loaded++;
             if (dip > 0u && --dip == 0u) forced_ks = -1;
             TEST_ASSERT_TRUE(run_fwd_max <= S2_LEN_MM + v_mm_s * 0.001 + 0.01);
-            if ((key_from_tip() == KS_NONE) && !g_auto_unload[0].active) tip_mm = -10.0;
+            out_ms = ((key_from_tip() == KS_NONE) && !g_auto_unload[0].active) ? out_ms + 1u : 0u;
+            if (out_ms >= 500u) tip_mm = -10.0;
         }
         starts += au_starts;
     }
@@ -2422,9 +2648,10 @@ static void test_an_interrupted_push_goes_on_through_stage1_from_idle(void)
 
 static void test_stage1_from_idle_still_runs_once_per_insertion_without_a_run(void)
 {
-    // No run interrupted: Stage-1 from IDLE is still allowed once per insertion. The key leaves
-    // 'external only' for the other state during Stage-1's debounce, and the next 'external only'
-    // pushes nothing, for good; so does a boot with the filament at 'external only'.
+    // No run interrupted: Stage-1 from IDLE is still allowed once per insertion. Since V11 it counts
+    // as used once it pushes (dm_autoload_gate closes on S1_DEBOUNCE -> S1_PUSH): the key leaving
+    // 'external only' for the other state during the debounce, which drove nothing, leaves it
+    // allowed, and the next 'external only' debounces again and loads.
     tip_mm = -5.0;
     run_for(50u);
     TEST_ASSERT_EQUAL_UINT8(DM_AUTO_S1_DEBOUNCE, dm_auto_state[0]);
@@ -2432,10 +2659,31 @@ static void test_stage1_from_idle_still_runs_once_per_insertion_without_a_run(vo
     pass();
     forced_ks = -1;
     TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
-    run_for(20000u);
-    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_autoload_gate[0]);
     TEST_ASSERT_EQUAL_UINT32(0u, drive_ms);
+    TEST_ASSERT_TRUE(until_done(10000u) > 0);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_loaded[0]);
+    TEST_ASSERT_EQUAL_UINT8(1u, dm_autoload_gate[0]);
+    ASSERT_MM_WITHIN(0.1, S2_LEN_MM, pushed_s2_mm);
+
+    // Once it has pushed, no new Stage-1 until the filament is out: the loaded filament pulled back
+    // by hand, 1 mm a pass, to 15 mm behind the inner switch (the gear turns with it, so dm_rearm.h
+    // arms Stage-2 again) gets no Stage-1 push at 'external only', for good.
+    while (tip_mm > -15.0)
+    {
+        tip_mm -= 1.0;
+        gear_mm += 1.0;
+        pass();
+    }
+    const uint32_t d0 = drive_ms;
+    run_for(20000u);
+    TEST_ASSERT_EQUAL_UINT8(0u, dm_loaded[0]);
+    TEST_ASSERT_EQUAL_UINT8(DM_AUTO_IDLE, dm_auto_state[0]);
+    TEST_ASSERT_EQUAL_UINT32(d0, drive_ms);
     TEST_ASSERT_EQUAL_UINT8(0u, dm_fail_latch[0]);
+
+    // So does a boot with the filament at 'external only' (V11: Motion_control_init closes Stage-1,
+    // and the key never reads 'none').
 
     setUp();
     tip_mm = -5.0;
@@ -2508,8 +2756,8 @@ static void test_a_key_glitching_to_none_does_not_restart_stage1_into_a_blocked_
 {
     // Tip at the lever, gear blocked, the key at 'none' for 1 to 100 ms every 5 s (and every 6.5 s),
     // at several phases, for 2 min: one Stage-1 push, which the glitches neither end nor give more
-    // time (it fails 5 s after it began), and no run, in all. Each glitch used to start another 5 s
-    // push: about 110 s of push in the 2 min.
+    // time (it fails 5 s after it began), then V11's fail retract (at most 1.5 s, a glitch ends it),
+    // and no run, in all. Each glitch used to start another 5 s push: about 110 s of push in the 2 min.
     const uint32_t lens[] = {1u, 2u, 50u, 99u, 100u};
     const uint32_t periods[] = {5000u, 6500u};
     const uint32_t phases[] = {0u, 50u, 137u, 2500u, 4999u};
@@ -2522,7 +2770,7 @@ static void test_a_key_glitching_to_none_does_not_restart_stage1_into_a_blocked_
                 noise_t0 = now + phases[k];
                 for (int n = 0; n < 120000; n++) blocked_pass();
                 TEST_ASSERT_TRUE(push_ms <= (uint32_t)DM_AUTO_S1_TIMEOUT_MS);
-                TEST_ASSERT_EQUAL_UINT32(push_ms, drive_ms);
+                TEST_ASSERT_TRUE(drive_ms - push_ms <= (uint32_t)DM_AUTO_S1_FAIL_RETRACT_MS);
                 TEST_ASSERT_EQUAL_UINT32(0u, runs);
                 TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
                 TEST_ASSERT_EQUAL_UINT8(1u, dm_autoload_gate[0]);
@@ -2533,9 +2781,11 @@ static void test_a_key_glitching_to_none_does_not_restart_stage1_into_a_blocked_
 static void test_a_key_glitching_to_none_keeps_a_failed_run_failed(void)
 {
     // The gear turns, the path is blocked 30 mm past the inner switch: three buffer aborts fail the
-    // run (with the filament at 'both'). Glitches to 'none' every 5 s for 2 min keep it failed: red,
-    // motor off, three aborts in all. Each glitch used to clear the fail latch and end the run, and
-    // the next 'both' started a new one with three more aborts.
+    // run (with the filament at 'both'), and the filament then jams there (the gear stops), so V11's
+    // fail retract cannot take it out of the switches. Glitches to 'none' every 5 s for 2 min keep it
+    // failed: red, motor off once the fail retract is over, three aborts in all. Each glitch used to
+    // clear the fail latch and end the run, and the next 'both' started a new one with three more
+    // aborts.
     const uint32_t lens[] = {1u, 99u, 100u};
     for (unsigned i = 0; i < sizeof(lens) / sizeof(lens[0]); i++)
     {
@@ -2544,12 +2794,21 @@ static void test_a_key_glitching_to_none_keeps_a_failed_run_failed(void)
         block_mm = 30.0;
         noise(KS_NONE, 5000u, lens[i]);
         noise_t0 = now + 3000u;
-        uint32_t d = 0u;
+        uint32_t d = 0u; // drive_ms once the fail retract is over
+        bool failed = false;
         for (int n = 0; n < 120000; n++)
         {
             pass();
-            if (dm_fail_latch[0] && (d == 0u)) d = drive_ms;
-            if (d != 0u) TEST_ASSERT_EQUAL_UINT32(d, drive_ms);
+            if (dm_fail_latch[0] && !failed)
+            {
+                failed = true;
+                v_mm_s = 0.0;
+            }
+            if (failed && !in_fail_retract())
+            {
+                if (d == 0u) d = drive_ms;
+                TEST_ASSERT_EQUAL_UINT32(d, drive_ms);
+            }
         }
         TEST_ASSERT_TRUE(d != 0u);
         TEST_ASSERT_EQUAL_UINT8(1u, dm_fail_latch[0]);
@@ -2800,6 +3059,12 @@ int main(void)
     RUN_TEST(test_guard_pass_new_stage_measures_the_1mm_from_its_start);
     RUN_TEST(test_stage2_pushes_120mm_after_stage1);
     RUN_TEST(test_three_buffer_aborts_fail_as_before);
+    RUN_TEST(test_a_failed_run_retracts_the_filament_out_then_the_channel_rearms);
+    RUN_TEST(test_a_failed_run_whose_filament_stays_in_retracts_at_most_1_5s_then_stays_red);
+    RUN_TEST(test_a_failed_runs_retract_stops_after_the_120mm_of_a_run);
+    RUN_TEST(test_no_auto_unload_or_manual_pull_on_a_failed_channel);
+    RUN_TEST(test_both_during_stage1s_debounce_resumes_the_interrupted_run_at_once);
+    RUN_TEST(test_stage1_is_closed_while_the_printer_moves_the_channel);
     RUN_TEST(test_one_pass_dips_keep_the_120mm_countdown);
     RUN_TEST(test_dips_up_to_99ms_keep_the_120mm_countdown);
     RUN_TEST(test_long_excursions_keep_the_120mm_countdown);

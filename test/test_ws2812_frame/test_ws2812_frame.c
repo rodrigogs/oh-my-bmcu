@@ -2,8 +2,10 @@
 // change, so the per-pass baseline-then-state writes of Motion_control cost no redraw in a steady
 // state, while every real colour change and blink phase is still sent. The redraw throttle must
 // leave every strip's data pin low for the WS2812 reset time between frames, as updata() no longer
-// waits for it.
+// waits for it. Since V11 nothing is drawn while the bus is busy (bus_background_ready) or the flash
+// clock is slowed (time_hw_slow): such a pass keeps the change pending and does not use up the gap.
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <unity.h>
 
@@ -29,14 +31,33 @@ static uint32_t grb(uint8_t R, uint8_t G, uint8_t B)
 #define C_SEND_OUT grb(0x00, 0xD5, 0x2A)
 #define C_PULLBACK grb(0xA0, 0x2D, 0xFF)
 
+// The bus and flash-clock state RGB_update() and WS2812_class::updata() check. The tests start with
+// the bus idle and the flash clock fast (setUp); some make the bus busy or the clock slow.
+static bool host_bus_ready;
+static uint32_t time_hw_slow;
+static bool bus_background_ready(void)
+{
+    return host_bus_ready;
+}
+
+// ---- adapted from ws2812.cpp: WS2812_class::updata's gate (the bits are not modelled) ----
+// ---- anchor: updata from /ws2812_frame_dirty/ to /ws2812_frame_dirty/ ----
+// A strip is drawn only when dirty, with the flash clock fast and the bus idle; returns 1 if drawn.
+static unsigned strip_updata(ws2812_frame_t *s)
+{
+    if (!ws2812_frame_dirty(s) || time_hw_slow || !bus_background_ready()) return 0u;
+    ws2812_frame_mark_shown(s);
+    return 1u;
+}
+
 // ---- adapted from main.cpp: RGB_update without the 10 ms throttle ----
 // ---- anchor: RGB_update ----
-// RGB_update without the 10 ms throttle: send every dirty strip, count the redraws.
+// RGB_update without the 10 ms throttle, for one strip: count the redraws.
 static unsigned rgb_update(ws2812_frame_t *s)
 {
     if (!ws2812_frame_dirty(s)) return 0u;
-    ws2812_frame_mark_shown(s);
-    return 1u;
+    if (time_hw_slow || !bus_background_ready()) return 0u;
+    return strip_updata(s);
 }
 
 // ---- adapted from Motion_control.cpp: the order of the LED writes in one main-loop pass ----
@@ -57,6 +78,8 @@ static ws2812_frame_t strip;
 void setUp(void)
 {
     ws2812_frame_init(&strip, 2);
+    host_bus_ready = true;
+    time_hw_slow = 0u;
 }
 
 void tearDown(void) {}
@@ -287,21 +310,26 @@ static void sim_init(void)
     sim_passes = 0u;
 }
 
-// RGB_update() on a simulated clock: the throttle, then each dirty strip in turn, IRQs off for its
-// bits (start aligned to the next tick) and 2 us of ISRs served before the next strip. Records how
-// long each pin was low between its previous frame and this one.
+// RGB_update() on a simulated clock: the bus and flash-clock gate, the throttle, then each strip
+// updata() draws in turn, IRQs off for its bits (start aligned to the next tick) and 2 us of ISRs
+// served before the next strip. Records how long each pin was low between its previous frame and
+// this one.
 static void sim_rgb_update(ws2812_throttle_t *t, uint32_t *now)
 {
     bool dirty = false;
     for (int k = 0; k < N_STRIPS; k++)
         dirty = dirty || ws2812_frame_dirty(&sim_strip[k]);
-    if (!dirty || !ws2812_throttle_due(t, *now, MIN_GAP))
+    if (!dirty)
+        return;
+    if (time_hw_slow || !bus_background_ready())
+        return;
+    if (!ws2812_throttle_due(t, *now, MIN_GAP))
         return;
 
     sim_passes++;
     for (int k = 0; k < N_STRIPS; k++)
     {
-        if (!ws2812_frame_dirty(&sim_strip[k])) continue;
+        if (!ws2812_frame_dirty(&sim_strip[k]) || time_hw_slow || !bus_background_ready()) continue;
         *now += 1u;
         if (sim_drawn[k] && (uint32_t)(*now - sim_frame_end[k]) < sim_min_low)
             sim_min_low = (uint32_t)(*now - sim_frame_end[k]);
@@ -350,6 +378,131 @@ static void test_every_strip_gets_its_reset_time_in_a_tight_rgb_update_loop(void
     }
 }
 
+// ---- the V11 gates: bus busy, flash clock slowed ----
+
+static void test_a_pass_while_the_bus_is_busy_keeps_the_change_pending(void)
+{
+    pass_active_channel(&strip, C_WHITE, C_ON_USE, C_OFF);
+    rgb_update(&strip);
+
+    pass_active_channel(&strip, C_WHITE, C_SEND_OUT, C_OFF);
+    host_bus_ready = false; // a reply in flight, or a frame being received
+    for (int i = 0; i < 10; i++)
+        TEST_ASSERT_EQUAL_UINT(0u, rgb_update(&strip));
+    TEST_ASSERT_TRUE(ws2812_frame_dirty(&strip));
+    TEST_ASSERT_EQUAL_HEX32(C_ON_USE, strip.shown[0]);
+
+    host_bus_ready = true;
+    TEST_ASSERT_EQUAL_UINT(1u, rgb_update(&strip));
+    TEST_ASSERT_EQUAL_HEX32(C_SEND_OUT, strip.shown[0]);
+}
+
+static void test_nothing_is_drawn_while_the_flash_clock_is_slowed(void)
+{
+    // SysTick at 9 MHz would double every bit: the frame waits for the clock to come back.
+    pass_active_channel(&strip, C_WHITE, C_ON_USE, C_OFF);
+    time_hw_slow = 1u;
+    TEST_ASSERT_EQUAL_UINT(0u, rgb_update(&strip));
+    TEST_ASSERT_TRUE(ws2812_frame_dirty(&strip));
+    time_hw_slow = 0u;
+    TEST_ASSERT_EQUAL_UINT(1u, rgb_update(&strip));
+}
+
+static void test_a_pass_that_cannot_draw_does_not_use_up_the_throttle_gap(void)
+{
+    ws2812_throttle_t t = {0u, 0u};
+    uint32_t now = 1000u;
+    sim_init();
+
+    ws2812_frame_set(&sim_strip[0], 0, C_RED);
+    sim_rgb_update(&t, &now); // first frame
+    TEST_ASSERT_EQUAL_UINT(1u, sim_passes);
+    const uint32_t first = now;
+
+    // A change at the deadline, while the bus is busy and then while a flash step has the clock slowed.
+    ws2812_frame_set(&sim_strip[0], 0, C_WHITE);
+    now = first + MIN_GAP;
+    host_bus_ready = false;
+    sim_rgb_update(&t, &now);
+    host_bus_ready = true;
+    time_hw_slow = 1u;
+    sim_rgb_update(&t, &now);
+    time_hw_slow = 0u;
+    TEST_ASSERT_EQUAL_UINT(1u, sim_passes);
+    TEST_ASSERT_TRUE(ws2812_frame_dirty(&sim_strip[0]));
+
+    // The first pass that can draw sends it at once: the skipped passes did not stamp the throttle.
+    now += 50u * TICKS_PER_US;
+    sim_rgb_update(&t, &now);
+    TEST_ASSERT_EQUAL_UINT(2u, sim_passes);
+    TEST_ASSERT_FALSE(ws2812_frame_dirty(&sim_strip[0]));
+    TEST_ASSERT_EQUAL_HEX32(C_WHITE, sim_strip[0].shown[0]);
+}
+
+static void test_a_strip_skipped_when_the_bus_turns_busy_is_drawn_in_a_later_gap(void)
+{
+    // The bus can turn busy between two strips of one RGB_update(): updata() checks it per strip.
+    ws2812_throttle_t t = {0u, 0u};
+    uint32_t now = 0u;
+    sim_init();
+    for (int k = 0; k < N_STRIPS; k++)
+        ws2812_frame_set(&sim_strip[k], 0, C_RED);
+    sim_rgb_update(&t, &now);
+    for (int k = 0; k < N_STRIPS; k++)
+        TEST_ASSERT_FALSE(ws2812_frame_dirty(&sim_strip[k]));
+
+    // Next gap: modelled as the bus turning busy after the throttle passed, before any strip.
+    ws2812_frame_set(&sim_strip[2], 0, C_WHITE);
+    now += MIN_GAP;
+    TEST_ASSERT_TRUE(ws2812_throttle_due(&t, now, MIN_GAP)); // RGB_update stamped the gap ...
+    host_bus_ready = false;
+    TEST_ASSERT_EQUAL_UINT(0u, strip_updata(&sim_strip[2])); // ... and updata() skipped the strip
+    host_bus_ready = true;
+    TEST_ASSERT_TRUE(ws2812_frame_dirty(&sim_strip[2]));
+
+    // Within the gap nothing is drawn; at the next deadline the strip goes out, its pin low for a
+    // whole gap and more since its previous frame.
+    sim_rgb_update(&t, &now);
+    TEST_ASSERT_TRUE(ws2812_frame_dirty(&sim_strip[2]));
+    now += MIN_GAP;
+    sim_rgb_update(&t, &now);
+    TEST_ASSERT_FALSE(ws2812_frame_dirty(&sim_strip[2]));
+    TEST_ASSERT_TRUE(sim_min_low >= MIN_GAP);
+}
+
+// ---- adapted from Motion_control.cpp: the online LED of an inserted channel without a valid calibration ----
+// ---- anchor: motor_motion_run from /if \(filament_channel_inserted\[i\] && !MC_PULL_calibration_is_valid\(i\)\)/ to /MC_PULL_ONLINE_RGB_set\(i, r, g, b,/ ----
+// The online LED colour from the buffer position (red high, blue low, off between: simplified), then
+// V11's override: dim red on an inserted channel whose calibration is not valid.
+static uint32_t online_led(unsigned pct, bool inserted, bool cal_valid)
+{
+    uint8_t r = 0u, g = 0u, b = 0u;
+    if (pct >= 85u) r = 0x10u;
+    else if (pct <= 30u) b = 0x10u;
+    if (inserted && !cal_valid) {
+        r = 0x18u; g = b = 0u;
+    }
+    return grb(r, g, b);
+}
+
+static void test_an_uncalibrated_channels_dim_red_is_sent_once_whatever_the_buffer_reads(void)
+{
+    unsigned draws = 0u;
+    for (unsigned i = 0u; i < 1000u; i++)
+    {
+        const unsigned pct = (i * 37u) % 101u; // an uncalibrated buffer reads anything
+        pass_active_channel(&strip, C_WHITE, C_OFF, online_led(pct, true, false));
+        draws += rgb_update(&strip);
+    }
+    TEST_ASSERT_EQUAL_UINT(1u, draws);
+    TEST_ASSERT_EQUAL_HEX32(grb(0x18, 0x00, 0x00), strip.shown[1]);
+
+    // A calibrated channel shows the buffer again.
+    pass_active_channel(&strip, C_WHITE, C_OFF, online_led(10u, true, true));
+    TEST_ASSERT_EQUAL_UINT(1u, rgb_update(&strip));
+    TEST_ASSERT_EQUAL_HEX32(grb(0x00, 0x00, 0x10), strip.shown[1]);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -368,5 +521,10 @@ int main(void)
     RUN_TEST(test_throttle_redraw_at_tick_zero_still_throttles);
     RUN_TEST(test_throttle_across_the_systick_wrap);
     RUN_TEST(test_every_strip_gets_its_reset_time_in_a_tight_rgb_update_loop);
+    RUN_TEST(test_a_pass_while_the_bus_is_busy_keeps_the_change_pending);
+    RUN_TEST(test_nothing_is_drawn_while_the_flash_clock_is_slowed);
+    RUN_TEST(test_a_pass_that_cannot_draw_does_not_use_up_the_throttle_gap);
+    RUN_TEST(test_a_strip_skipped_when_the_bus_turns_busy_is_drawn_in_a_later_gap);
+    RUN_TEST(test_an_uncalibrated_channels_dim_red_is_sent_once_whatever_the_buffer_reads);
     return UNITY_END();
 }

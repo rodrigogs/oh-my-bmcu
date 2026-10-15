@@ -76,7 +76,8 @@ void blackbox_boot(uint32_t rstsckr)
 // save to the stack, and the handler never returns.
 static inline __attribute__((always_inline)) void failsafe_stop(void)
 {
-    // IRQs off (MIE/MPIE, as __disable_irq), so the USART1 ISR cannot start another TX.
+    // IRQs off (MIE/MPIE, as __disable_irq): no handler runs from here on. A reply's TX DMA may still
+    // shift out the rest of its buffer, into a transceiver that the DE write below turns to RX.
     __asm volatile("csrc 0x800, %0" ::"r"(0x88u) : "memory");
 
     // First the IWDG, which needs no clock enable: if a trap during boot came before watchdog_start
@@ -98,7 +99,7 @@ static inline __attribute__((always_inline)) void failsafe_stop(void)
     TIM3->SWEVGR = TIM_UG;
     TIM4->SWEVGR = TIM_UG;
 
-    // DE = RX, as the TC interrupt does after a reply: the transceiver stops driving the bus.
+    // DE = RX, as bus_tx_finish does after a reply: the transceiver stops driving the bus.
     GPIOA->BCR = GPIO_Pin_12;
 
     // The fault record, after the stop: mepc and mcause, their check last, so a reset between the

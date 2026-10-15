@@ -1,6 +1,6 @@
 // Host tests for src/adc_stream.h: when Motion_control_run treats the ADC readings as stale and stops
 // every channel. A live stream must never read stale, however late a main-loop pass comes (a flash
-// erase, the worst NVM job, a stall up to the watchdog's longest timeout): the poll that ends the
+// erase, an erase plus an ADC restart, a stall up to the watchdog's longest timeout): the poll that ends the
 // stall stamps the halves the DMA completed meanwhile. A stream that stopped must read stale
 // ADC_STREAM_STALE_MS after its last half, stay stale for as long as it is stopped (also past the
 // 238.6 s wrap of a 32-bit SysTick difference), and read fresh again from the pass that processes
@@ -149,9 +149,10 @@ static void test_age_is_the_tick_difference_and_0_for_a_later_stamp(void)
 
 static void test_a_live_stream_never_reads_stale_across_main_loop_stalls(void)
 {
-    // 1 ms passes, and passes that come late: a page erase (16 ms), the worst NVM job (about 36 ms),
-    // WDG_FEED_GAP_MAX_MS (100 ms), and up to the watchdog's longest timeout (1.6 s) and beyond.
-    static const uint32_t stall_ms[] = {16u, 36u, 100u, 101u, 250u, 1000u, 1600u, 5000u};
+    // 1 ms passes, and passes that come late: a page erase (16 ms, 32 ms at its timeout), a later pass
+    // (36 ms), an erase plus an ADC restart (about 56 ms, watchdog_cfg.h), WDG_FEED_GAP_MAX_MS (100 ms),
+    // and up to the watchdog's longest timeout (1.6 s) and beyond.
+    static const uint32_t stall_ms[] = {16u, 32u, 36u, 56u, 100u, 101u, 250u, 1000u, 1600u, 5000u};
     stream_boot(true);
     stream_advance(MS(2400)); // the boot: ADC_DMA_wait_full and Motion_control_init poll on their own
     uint32_t passes = 0u;
@@ -169,7 +170,7 @@ static void test_a_live_stream_never_reads_stale_across_main_loop_stalls(void)
         passes++;
         stream_advance(MS(1));
     }
-    TEST_ASSERT_EQUAL_UINT32(8008u, passes);
+    TEST_ASSERT_EQUAL_UINT32(10010u, passes);
 
     // Passes faster than the halves (0.1 ms): most find no new half, and none reads stale.
     for (uint32_t i = 0u; i < 100000u; i++)

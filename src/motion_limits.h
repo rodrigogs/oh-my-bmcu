@@ -13,13 +13,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Gear travel is measured in AS5600 counts, not with the float odometer filament[].meters. That
-// float gets one small step per AS5600 read (about 1 ms), and once it is large the steps start to
-// get lost (slow moves after about 128 m net since boot, 60 mm/s after 1-2 km), so a turning gear
-// would look stalled. The position fed to the guard is a running uint32_t sum of the same per-read
-// angle steps that meters gets (as5600_count in Motion_control.cpp). Every distance is a difference
-// to the position at the start of the state, taken modulo 2^32, so it starts at 0 for each state
-// and is exact at any odometer value. One count is pi * 7.5 mm / 4096 = 5.75 um of gear travel.
+// Gear travel is measured in AS5600 counts, not with a float odometer. A float32 sum of one small
+// step per AS5600 read (about 1 ms), as filament[].meters was before V11, loses the steps once it
+// is large (slow moves after about 128 m net since boot, 60 mm/s after 1-2 km), so a turning gear
+// would look stalled. The position fed to the guard is encoder_count (Motion_control.cpp): the low
+// 32 bits of V11's int64 odometer of the accepted per-read angle steps, as5600_odometer_count.
+// Every distance is a difference to the position at the start of the state, taken modulo 2^32, so
+// it starts at 0 for each state and is exact at any odometer value. One count is
+// pi * 7.5 mm / 4096 = 5.75 um of gear travel.
 #define ML_MM_PER_CNT (3.14159265358979323846f * 7.5f / 4096.0f)
 
 // Each time budget is the move's distance at ML_V_MIN_MM_S, plus ML_MARGIN_MS. 12 mm/s is the pull
@@ -104,7 +105,7 @@ static inline float ml_cnt_to_m(uint32_t cnt)
 
 // Gear travel |pos_cnt - start_cnt| in m. Every distance a motor state decides on (pull back
 // target, DM Stage-2 countdown) comes from here or from the guard's count (redetect and send
-// caps), never from filament[].meters.
+// caps), never from the printer's filament[].meters.
 static inline float ml_travel_m(uint32_t pos_cnt, uint32_t start_cnt)
 {
     return ml_cnt_to_m(ml_cnt_dist(pos_cnt, start_cnt));
@@ -166,7 +167,8 @@ static inline ml_result motion_guard_check(motion_guard *g, uint64_t now_ms, uin
 }
 
 // ---- Pull back (filament_pulling_back) ----
-// Budget: the target at ML_V_MIN_MM_S (95 mm SOLO: 9.9 s; a normal pull takes about 1.9 s).
+// Budget: the target at ML_V_MIN_MM_S (95 mm, env:a1_solo_autoload_rgboff: 9.9 s; a normal pull
+// takes about 1.9 s).
 static inline void ml_pull_back_start(motion_guard *g, uint64_t now_ms, uint32_t pos_cnt, float target_m)
 {
     motion_guard_start(g, now_ms, pos_cnt, ml_time_budget_ms(target_m), 0u);

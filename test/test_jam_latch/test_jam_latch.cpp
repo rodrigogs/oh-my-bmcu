@@ -62,7 +62,7 @@ static bool pushing;       // run() let the channel's control push on the last p
 static int jammed_pushes;  // passes on which it did with the jam latch set
 static auto_unload_t g_auto_unload[1]; // the channel's auto-unload (motor_motion_run)
 static int unload_passes;  // passes on which the auto-unload drove the channel
-static uint32_t gear_cnt;  // as5600_count[ch]: the gear turns (10 counts, 58 mm/s, a pass) while it retracts
+static uint32_t gear_cnt;  // encoder_count(ch): the gear turns (10 counts, 58 mm/s, a pass) while it retracts
 static bool unloaded;      // the auto-unload drove the last pass
 
 // ---- Motion_control.cpp at this commit: the auto-unload's strength, verbatim ----
@@ -144,7 +144,7 @@ static au_drive_t au_pass(bool idle_ctrl, float pct)
 {
     au_in_t au;
     au.online    = true;
-    au.inserted  = true;
+    au.inserted  = true;  // wired, calibrated (MC_PULL_calibration_is_valid), no DM fail latch
     au.idle_ctrl = idle_ctrl;
     au.pct       = pct;
     au.ks        = filament ? 1u : 0u;
@@ -554,8 +554,8 @@ static void test_buffer_at_spring_rest_does_not_release(void)
 
 static void test_a_buffer_resting_slightly_high_releases_and_the_resume_latches_again(void)
 {
-    // BAND_LO_PCT is 0.036 of the high side above the calibrated centre, +3.6 mV with the 1.75 V
-    // fallback high side: inside the 20 mV rest scatter (jam_latch.h, mc_pull_cal_range.h). A
+    // BAND_LO_PCT is 0.036 of the high side above the calibrated centre, +3.6 mV with the narrowest
+    // stored high side (100 mV): inside the 25 mV rest scatter (jam_latch.h, mc_pull_cal_range.h). A
     // buffer that comes to rest reading that while paused releases the latch 1 s later with
     // nothing moved. The tangle is still there: the resume pushes again, and the channel latches
     // again 500 ms after the buffer is below 40%.

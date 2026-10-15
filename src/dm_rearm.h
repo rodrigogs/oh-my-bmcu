@@ -41,7 +41,7 @@
 #define DM_REARM_AWAY_MS 100u
 
 // And by then the gear must have retracted the filament 10 mm since the key left 'both' (1739
-// counts of 5.75 um = 10.003 mm), the audit's suggestion. The gear position (as5600_count) rises
+// counts of 5.75 um = 10.003 mm), the audit's suggestion. The gear position (encoder_count) rises
 // while the motor retracts and falls while it pushes. A key flicker by itself moves nothing, and
 // the AS5600 jitters by +-2 counts at rest. The BMCU's own retract out of 'both', the auto-unload
 // (850 PWM), keeps pulling for 1.5 s once the key has left 'both' (AUTO_UNLOAD_EMPTY_MS) unless
@@ -110,7 +110,7 @@ typedef enum
 // its first pass and the gear position then; away_t0_ms == 0 means none, and away_cnt is only read
 // while one runs. none_t0_ms: the first pass of the key's current run of 'none' (dm_none_t0_ms; 0 =
 // none). ks: MC_ONLINE_key_stu[ch]; key_old: it is older than DM_REARM_KEY_FRESH_MS
-// (dm_rearm_key_old), which ends both runs. pos_cnt: as5600_count[ch] (wraps; only differences are
+// (dm_rearm_key_old), which ends both runs. pos_cnt: encoder_count(ch) (wraps; only differences are
 // used). DM_REARM_EMPTY comes on every pass once the key has read 'none' for DM_REARM_AWAY_MS. On any
 // event other than DM_REARM_NONE the caller restarts the autoload from IDLE.
 static inline dm_rearm_event dm_rearm_pass(uint8_t *loaded, uint64_t *away_t0_ms, uint32_t *away_cnt,

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Checks the OUT_DIR guards of build_all_firmwares.sh with a stub pio (no toolchain, a few seconds):
-# every refused OUT_DIR must fail before the first build and leave every file where it was, and the
-# accepted ones must still build. Runs a copy of the script in a temporary tree, also through a
-# symlinked path. Usage: bash scripts/test_build_all_firmwares.sh (macOS /bin/bash 3.2 works too).
+# every refused OUT_DIR (and the removed BUILD_ONLY_SOLO) must fail before the first build and leave
+# every file where it was, and the accepted ones must still build the 24 BUILD_ONLY_MIN images with
+# the right flags. Runs a copy of the script in a temporary tree, also through a symlinked path.
+# Usage: bash scripts/test_build_all_firmwares.sh (macOS /bin/bash 3.2 works too).
 set -euo pipefail
 
 repo="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd -P)"
@@ -13,15 +14,15 @@ base="$(cd "${base}" && pwd -P)"
 
 tree="${base}/repo"   # the checkout the script runs in
 link="${base}/link"   # a symlink to it, like /tmp -> /private/tmp on macOS
-mkdir -p "${tree}/firmwares/SOLO" "${base}/bin" "${base}/home/user"
+mkdir -p "${tree}/firmwares/AMS_AUTO" "${base}/bin" "${base}/home/user"
 # Decoys for an exported CDPATH: a relative cd to firmwares or repo must not end up here.
 mkdir -p "${base}/cdpath/firmwares" "${base}/cdpath/repo"
 cp "${repo}/build_all_firmwares.sh" "${repo}"/which_to_choose_*.txt "${tree}/"
 ln -s "${tree}" "${link}"
 # A small stand-in for the upstream mirror, with the header of the real one.
 head -n 1 "${repo}/firmwares/manifest.txt" > "${tree}/firmwares/manifest.txt"
-echo "mirror image" > "${tree}/firmwares/SOLO/solo_0.095f.bin"
-echo "0 0 12 SOLO/solo_0.095f.bin" >> "${tree}/firmwares/manifest.txt"
+echo "mirror image" > "${tree}/firmwares/AMS_AUTO/ams_auto_0.095f.bin"
+echo "0 0 12 AMS_AUTO/ams_auto_0.095f.bin" >> "${tree}/firmwares/manifest.txt"
 
 # The stub logs each call; with STUB_PIO_FAIL=1 the first build fails.
 cat > "${base}/bin/pio" <<'EOF'
@@ -50,7 +51,7 @@ run() {
   local dir="$1"
   shift
   : > "${STUB_PIO_LOG}"
-  (cd "${base}" && env -u OUT_DIR -u BUILD_ONLY_SOLO -u FORCE -u CDPATH "$@" bash "${dir}/build_all_firmwares.sh") \
+  (cd "${base}" && env -u OUT_DIR -u BUILD_ONLY_MIN -u BUILD_ONLY_SOLO -u FORCE -u CDPATH "$@" bash "${dir}/build_all_firmwares.sh") \
     > "${logs}/out.txt" 2>&1
 }
 
@@ -69,42 +70,60 @@ refused() {
   echo "ok    ${name}: $(grep -m 1 '^ERROR: ' "${logs}/out.txt")"
 }
 
-# built NAME OUT_DIR SCRIPT_DIR ENV... : must build the 12 SOLO images into OUT_DIR, mirror untouched.
+# built NAME OUT_DIR SCRIPT_DIR ENV... : must build the 24 MIN images into OUT_DIR, mirror untouched.
+# The stub writes "P1S SOFT_LOAD DM RGB AMS_NUM RETRACT" into each image, so the slot -> AMS_NUM
+# mapping, the retract and the mode flags can be read back.
 built() {
   local name="$1" out="$2"
   shift 2
   local mirror_before rc=0
+  local a1="${out}/standard(A1)/AUTOLOAD/FILAMENT_RGB_OFF"
   mirror_before="$(cd "${tree}/firmwares" && find . -type f -exec cksum {} + | LC_ALL=C sort)"
   run "$@" || rc=$?
   if [[ ${rc} -ne 0 ]]; then fail "${name}: exit ${rc}"; cat "${logs}/out.txt"; return; fi
-  [[ "$(wc -l < "${STUB_PIO_LOG}")" -eq 12 ]] || { fail "${name}: $(wc -l < "${STUB_PIO_LOG}") builds, not 12"; return; }
-  [[ "$(grep -c '\.bin$' "${out}/manifest.txt")" -eq 12 ]] || { fail "${name}: manifest does not list 12 images"; return; }
+  [[ "$(wc -l < "${STUB_PIO_LOG}")" -eq 24 ]] || { fail "${name}: $(wc -l < "${STUB_PIO_LOG}") builds, not 24"; return; }
+  [[ "$(grep -c '\.bin$' "${out}/manifest.txt")" -eq 24 ]] || { fail "${name}: manifest does not list 24 images"; return; }
+  [[ "$(grep -c '/AMS_AUTO/ams_auto_0\.095f\.bin$' "${out}/manifest.txt")" -eq 12 && \
+     "$(grep -c '/AMS_A/ams_a_0\.095f\.bin$' "${out}/manifest.txt")" -eq 12 ]] \
+    || { fail "${name}: not 12 AUTO + 12 A images"; return; }
+  [[ "$(cut -d' ' -f5,6 "${a1}/AMS_AUTO/ams_auto_0.095f.bin")" == "4 0.095f" ]] \
+    || { fail "${name}: AMS_AUTO not built with BAMBU_BUS_AMS_NUM=4"; return; }
+  [[ "$(cut -d' ' -f5,6 "${a1}/AMS_A/ams_a_0.095f.bin")" == "0 0.095f" ]] \
+    || { fail "${name}: AMS_A not built with BAMBU_BUS_AMS_NUM=0"; return; }
+  [[ "$(cut -d' ' -f1-4 "${out}/soft_load(A1)/NO_AUTOLOAD/FILAMENT_RGB_ON/AMS_A/ams_a_0.095f.bin")" == "0 1 0 1" && \
+     "$(cut -d' ' -f1-4 "${out}/high_force_load(P1S)/AUTOLOAD/FILAMENT_RGB_OFF/AMS_AUTO/ams_auto_0.095f.bin")" == "1 0 1 0" ]] \
+    || { fail "${name}: mode, AUTOLOAD or RGB flags do not match the folders"; return; }
   [[ -e "${out}.new" || -e "${out}.old" || -e "${out}.new.manifest.txt" ]] && { fail "${name}: staging left behind"; return; }
   [[ "$(cd "${tree}/firmwares" && find . -type f -exec cksum {} + | LC_ALL=C sort)" == "${mirror_before}" ]] \
     || { fail "${name}: firmwares/ changed"; return; }
-  echo "ok    ${name}: 12 images in ${out#${base}/}"
+  echo "ok    ${name}: 24 images in ${out#${base}/}"
 }
 
-solo="BUILD_ONLY_SOLO=1"
+min="BUILD_ONLY_MIN=1"
 
-# The upstream mirror with BUILD_ONLY_SOLO=1, however it is spelled or reached.
-refused "SOLO into firmwares" "${tree}" "${solo}" OUT_DIR=firmwares
-refused "SOLO into firmwares/" "${tree}" "${solo}" OUT_DIR=firmwares/
-refused "SOLO into ./firmwares" "${tree}" "${solo}" OUT_DIR=./firmwares
-refused "SOLO into the absolute firmwares" "${tree}" "${solo}" OUT_DIR="${tree}/firmwares"
-refused "SOLO into firmwares through a symlinked checkout" "${link}" "${solo}" OUT_DIR=firmwares
-refused "SOLO into link/firmwares" "${tree}" "${solo}" OUT_DIR="${link}/firmwares"
+# The removed BUILD_ONLY_SOLO, set to anything: refused, so a stale call cannot start 1020 builds.
+refused "the removed BUILD_ONLY_SOLO" "${tree}" BUILD_ONLY_SOLO=1
+refused "the removed BUILD_ONLY_SOLO=0" "${tree}" BUILD_ONLY_SOLO=0
+refused "the removed BUILD_ONLY_SOLO with MIN" "${tree}" BUILD_ONLY_SOLO=1 "${min}"
+
+# The upstream mirror with BUILD_ONLY_MIN=1, however it is spelled or reached.
+refused "MIN into firmwares" "${tree}" "${min}" OUT_DIR=firmwares
+refused "MIN into firmwares/" "${tree}" "${min}" OUT_DIR=firmwares/
+refused "MIN into ./firmwares" "${tree}" "${min}" OUT_DIR=./firmwares
+refused "MIN into the absolute firmwares" "${tree}" "${min}" OUT_DIR="${tree}/firmwares"
+refused "MIN into firmwares through a symlinked checkout" "${link}" "${min}" OUT_DIR=firmwares
+refused "MIN into link/firmwares" "${tree}" "${min}" OUT_DIR="${link}/firmwares"
 if [[ "${tree}/Firmwares" -ef "${tree}/firmwares" ]]; then
-  refused "SOLO into Firmwares (case-insensitive file system)" "${tree}" "${solo}" OUT_DIR=Firmwares
+  refused "MIN into Firmwares (case-insensitive file system)" "${tree}" "${min}" OUT_DIR=Firmwares
 fi
-refused "SOLO with FORCE=1 into firmwares" "${tree}" "${solo}" FORCE=1 OUT_DIR=firmwares
-refused "SOLO into firmwares with CDPATH set" "${tree}" CDPATH="${base}/cdpath" "${solo}" OUT_DIR=firmwares
+refused "MIN with FORCE=1 into firmwares" "${tree}" "${min}" FORCE=1 OUT_DIR=firmwares
+refused "MIN into firmwares with CDPATH set" "${tree}" CDPATH="${base}/cdpath" "${min}" OUT_DIR=firmwares
 
 # The checkout, the directory above it, \$HOME and the one above it, each also with FORCE=1 (the
-# checkout also with BUILD_ONLY_SOLO=1). Without FORCE the non-empty check alone would refuse a
+# checkout also with BUILD_ONLY_MIN=1). Without FORCE the non-empty check alone would refuse a
 # directory above either; with FORCE=1 only the walk up to / does.
 refused "the checkout (.)" "${tree}" OUT_DIR=.
-refused "the checkout, SOLO" "${tree}" "${solo}" OUT_DIR=.
+refused "the checkout, MIN" "${tree}" "${min}" OUT_DIR=.
 refused "the checkout by absolute path" "${tree}" OUT_DIR="${tree}"
 refused "the checkout through the symlink" "${tree}" OUT_DIR="${link}"
 refused "the checkout from the symlinked path" "${link}" OUT_DIR=.
@@ -118,37 +137,37 @@ refused "the parent of \$HOME with FORCE=1" "${tree}" FORCE=1 OUT_DIR="${base}/h
 
 # Something that is not an earlier build output, as OUT_DIR, OUT_DIR.new or OUT_DIR.old.
 mkdir -p "${base}/other" && echo keep > "${base}/other/notes.txt"
-refused "a non-empty unrelated dir" "${tree}" "${solo}" OUT_DIR="${base}/other"
+refused "a non-empty unrelated dir" "${tree}" "${min}" OUT_DIR="${base}/other"
 mkdir -p "${base}/other/sub" && echo "# format: something else" > "${base}/other/manifest.txt"
-refused "a dir whose manifest.txt is not ours" "${tree}" "${solo}" OUT_DIR="${base}/other"
+refused "a dir whose manifest.txt is not ours" "${tree}" "${min}" OUT_DIR="${base}/other"
 rm -rf "${base}/other/sub" "${base}/other/manifest.txt"
 mkdir -p "${base}/out.new" && echo keep > "${base}/out.new/notes.txt"
-refused "a non-empty unrelated OUT_DIR.new" "${tree}" "${solo}" OUT_DIR="${base}/out"
+refused "a non-empty unrelated OUT_DIR.new" "${tree}" "${min}" OUT_DIR="${base}/out"
 mv "${base}/out.new" "${base}/out.old"
-refused "a non-empty unrelated OUT_DIR.old" "${tree}" "${solo}" OUT_DIR="${base}/out"
+refused "a non-empty unrelated OUT_DIR.old" "${tree}" "${min}" OUT_DIR="${base}/out"
 rm -rf "${base}/out.old"
 echo keep > "${base}/afile"
-refused "a regular file" "${tree}" "${solo}" OUT_DIR="${base}/afile"
+refused "a regular file" "${tree}" "${min}" OUT_DIR="${base}/afile"
 rm -f "${base}/afile"
 ln -s "${base}/nonexistent" "${base}/dangling"
-refused "a dangling symlink" "${tree}" "${solo}" OUT_DIR="${base}/dangling"
+refused "a dangling symlink" "${tree}" "${min}" OUT_DIR="${base}/dangling"
 rm -f "${base}/dangling"
 
 # Accepted: the default, a rebuild over an earlier output, the symlinked path, a relative script path
 # with CDPATH set, an empty dir, FORCE=1.
-built "default build/firmwares" "${tree}/build/firmwares" "${tree}" "${solo}"
-built "rebuild over the earlier output" "${tree}/build/firmwares" "${tree}" "${solo}"
-built "default from the symlinked path" "${tree}/build/firmwares" "${link}" "${solo}"
+built "default build/firmwares" "${tree}/build/firmwares" "${tree}" "${min}"
+built "rebuild over the earlier output" "${tree}/build/firmwares" "${tree}" "${min}"
+built "default from the symlinked path" "${tree}/build/firmwares" "${link}" "${min}"
 # Run by a relative path, the script's own cd must not follow CDPATH to the decoy repo (empty, so it
 # would stop there with an ERROR).
 built "default, run as repo/build_all_firmwares.sh with CDPATH set" "${tree}/build/firmwares" repo \
-  CDPATH="${base}/cdpath" "${solo}"
+  CDPATH="${base}/cdpath" "${min}"
 mkdir -p "${base}/empty"
-built "an empty dir" "${base}/empty" "${tree}" "${solo}" OUT_DIR="${base}/empty"
-built "a non-empty unrelated dir with FORCE=1" "${base}/other" "${tree}" "${solo}" FORCE=1 OUT_DIR="${base}/other"
+built "an empty dir" "${base}/empty" "${tree}" "${min}" OUT_DIR="${base}/empty"
+built "a non-empty unrelated dir with FORCE=1" "${base}/other" "${tree}" "${min}" FORCE=1 OUT_DIR="${base}/other"
 [[ -e "${base}/other/notes.txt" ]] && fail "FORCE=1: the old contents are still there"
 
-# OUT_DIR=firmwares without BUILD_ONLY_SOLO regenerates the mirror: the guards let it through to
+# OUT_DIR=firmwares without BUILD_ONLY_MIN regenerates the mirror: the guards let it through to
 # the first build (which the stub fails here, so the mirror is kept and nothing is left behind).
 before="$(snapshot)"
 rc=0

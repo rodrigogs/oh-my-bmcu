@@ -45,13 +45,14 @@ static inline float mc_pull_v_to_pct(float vmin, float vmax, float v)
 }
 
 // ---- Recalibration gesture ----
-// With no filament at any channel's switches, one connected buffer held pulled for
-// MC_PULL_CAL_RESET_HOLD_MS makes Motion_control_run blink blue for 3 s, wipe the whole NVM and
-// reboot, so the next boot calibrates the buffers again, online or not: main.cpp passes it an
-// error of 0 (link up) or -1 (offline, such as on USB power alone), so its 'error <= 0' always
-// holds. Pulled: its MC_PULL_pct is at most MC_PULL_CAL_RESET_PCT_THRESH, or its reading is
-// MC_PULL_CAL_RESET_V_DELTA or more below the 1.65 V centre, or within MC_PULL_CAL_RESET_NEAR_MIN
-// of its calibrated low end.
+// With no filament at any channel's switches, one connected buffer with a valid calibration (a fork
+// deviation from V11: a failed one reads its raw voltage, Motion_control_run) held pulled for
+// MC_PULL_CAL_RESET_HOLD_MS makes Motion_control_run blink blue for 3 s, clear the calibration and
+// motion records (filament slots stay) and reboot, so the next boot calibrates the buffers again,
+// online or not: main.cpp passes it an error of 0 (link up) or -1 (offline, such as on USB power
+// alone), so its 'error <= 0' always holds. Pulled: its MC_PULL_pct is at most
+// MC_PULL_CAL_RESET_PCT_THRESH, or its reading is MC_PULL_CAL_RESET_V_DELTA or more below the
+// 1.65 V centre, or within MC_PULL_CAL_RESET_NEAR_MIN of its calibrated low end.
 #define MC_PULL_CAL_RESET_HOLD_MS    5000u
 #define MC_PULL_CAL_RESET_PCT_THRESH 15
 #define MC_PULL_CAL_RESET_V_DELTA    0.10f

@@ -94,6 +94,19 @@ class CheckFwEnv(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("BAMBU_BUS_AMS_NUM", err)
 
+    def test_every_ams_num_of_ams_addressing_passes(self):
+        for value in ("0", "1", "2", "3", "4"):  # 4: AMS_AUTO
+            with self.subTest(value=value):
+                code, err = run_prescript(dict(VALID_ENV, BAMBU_BUS_AMS_NUM=value))
+                self.assertIsNone(code, err)
+
+    def test_ams_num_outside_0_to_4_fails(self):
+        for value in ("5", "-1", "A", " 4", "04"):
+            with self.subTest(value=value):
+                code, err = run_prescript(dict(VALID_ENV, BAMBU_BUS_AMS_NUM=value))
+                self.assertEqual(code, 1)
+                self.assertIn("BAMBU_BUS_AMS_NUM", err)
+
     def test_retract_len_out_of_range_fails(self):
         env = dict(VALID_ENV, AMS_RETRACT_LEN="3.0")
         code, err = run_prescript(env)

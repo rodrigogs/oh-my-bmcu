@@ -26,22 +26,22 @@ class CompareManifest(unittest.TestCase):
         return path
 
     def test_identical_manifests_pass(self):
-        built = self.manifest("built.txt", [("a" * 64, "SOLO/x.bin")])
-        ref = self.manifest("ref.txt", [("a" * 64, "SOLO/x.bin")])
+        built = self.manifest("built.txt", [("a" * 64, "AMS_AUTO/x.bin")])
+        ref = self.manifest("ref.txt", [("a" * 64, "AMS_AUTO/x.bin")])
         rc, out, _err = run_script(SCRIPT, [str(built), str(ref)])
         self.assertEqual(rc, 0, out)
-        self.assertIn("OK        SOLO/x.bin", out)
+        self.assertIn("OK        AMS_AUTO/x.bin", out)
         self.assertIn("1/1 images identical", out)
 
     def test_hash_mismatch_fails(self):
-        built = self.manifest("built.txt", [("a" * 64, "SOLO/x.bin")])
-        ref = self.manifest("ref.txt", [("b" * 64, "SOLO/x.bin")])
+        built = self.manifest("built.txt", [("a" * 64, "AMS_AUTO/x.bin")])
+        ref = self.manifest("ref.txt", [("b" * 64, "AMS_AUTO/x.bin")])
         rc, out, _err = run_script(SCRIPT, [str(built), str(ref)])
         self.assertEqual(rc, 1)
-        self.assertIn("MISMATCH  SOLO/x.bin", out)
+        self.assertIn("MISMATCH  AMS_AUTO/x.bin", out)
 
     def test_missing_from_reference_fails(self):
-        built = self.manifest("built.txt", [("a" * 64, "SOLO/x.bin")])
+        built = self.manifest("built.txt", [("a" * 64, "AMS_AUTO/x.bin")])
         ref = self.manifest("ref.txt", [])
         rc, out, _err = run_script(SCRIPT, [str(built), str(ref)])
         self.assertEqual(rc, 1)
@@ -55,15 +55,15 @@ class CompareManifest(unittest.TestCase):
         self.assertIn("no .bin entries", err)
 
     def test_expect_count_mismatch_fails_even_if_hashes_match(self):
-        built = self.manifest("built.txt", [("a" * 64, "SOLO/x.bin")])
-        ref = self.manifest("ref.txt", [("a" * 64, "SOLO/x.bin")])
+        built = self.manifest("built.txt", [("a" * 64, "AMS_AUTO/x.bin")])
+        ref = self.manifest("ref.txt", [("a" * 64, "AMS_AUTO/x.bin")])
         rc, out, _err = run_script(SCRIPT, [str(built), str(ref), "--expect-count", "2"])
         self.assertEqual(rc, 1)
         self.assertIn("expected 2 built images, got 1", out)
 
     def test_expect_count_match_passes(self):
-        built = self.manifest("built.txt", [("a" * 64, "SOLO/x.bin")])
-        ref = self.manifest("ref.txt", [("a" * 64, "SOLO/x.bin")])
+        built = self.manifest("built.txt", [("a" * 64, "AMS_AUTO/x.bin")])
+        ref = self.manifest("ref.txt", [("a" * 64, "AMS_AUTO/x.bin")])
         rc, out, _err = run_script(SCRIPT, [str(built), str(ref), "--expect-count", "1"])
         self.assertEqual(rc, 0, out)
 

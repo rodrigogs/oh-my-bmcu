@@ -28,13 +28,18 @@
 #define WDG_TIMEOUT_MS 1000u
 
 // Longest time between two feeds once the watchdog runs (watchdog_start() in main, right after the
-// buffer calibration), over the longest estimate below: a main-loop pass, about 76 ms. Page/sector
-// erase 16 ms and page program 2 ms are the datasheet's typical values (table 4-17 gives no maximum).
-// - Main-loop pass (fed at its top): under 1 ms. The worst pass runs one NVM job: the loaded-channel
-//   record can take 2 page erases and 2 word programs (Flash_AMS_state_write), about 36 ms. It can
-//   also run one ADC restart (ADC_DMA_poll on a transfer error, ADC_DMA_restart_if_stale on a stale
-//   stream): adc_dma_start's two calibration waits per ADC take microseconds, up to 4 x 10 ms with a
-//   stuck calibration bit (kCalTimeoutMs). Both in one pass: about 76 ms.
+// buffer calibration), over the longest estimate below: the recalibration's first flash step, about
+// 83 ms with a failing erase. Page erase 16 ms and page program 2 ms are the datasheet's typical
+// values (table 4-17 gives no maximum); a 256-B record (Flash_saves.cpp nvm256_write) is one page
+// erase and 64 word programs, about 18 ms. A failing step stops at its timeout (32 ms erase, 4 ms per
+// half-word) and latches the flash fault, so nothing retries it.
+// - Main-loop pass (fed at its top): under 1 ms. The NVM saves only queue a job (V11 background
+//   flash, Flash_saves.h); Flash_background_run starts or finishes one 256-B fast page erase or one
+//   half-word program per pass, with interrupts masked only for the register writes. While an erase
+//   runs the CPU may wait on instruction fetches: one page erase, about 16 ms. A pass can also run one
+//   ADC restart (ADC_DMA_poll on a transfer error, ADC_DMA_restart_if_stale on a stale stream):
+//   adc_dma_start's two calibration waits per ADC take microseconds, up to 4 x 10 ms with a stuck
+//   calibration bit (kCalTimeoutMs). Both in one pass: about 56 ms.
 // - Rest of the boot: Motion_control_init to the loop. Every ADC read (ADC_DMA_get_value, and the
 //   poll in ADC_DMA_wait_full) can run one transfer-error restart, up to 40 ms as above.
 //   ADC_DMA_wait_full (up to 2 s if the ADC does not fill) feeds in its loop, and
@@ -43,13 +48,16 @@
 //   MC_PULL_ONLINE_read read and the AS5600 and PWM init to the first MOTOR_get_dir feed, or to the
 //   loop if no direction test runs: about 48 ms. Without the sample-loop feeds, a transfer error on
 //   every read with a stuck calibration bit made 16 x 42 ms, over the shortest IWDG timeout.
-//   MOTOR_get_dir (up to 201 x 10 ms at 1000 PWM) feeds once per step, and after it
-//   Motion_control_save (erase + program, about 18 ms) and the bus init run.
-// - Recalibration (the 5 s buffer hold is timed by the loop, not a wait): blink_all_blue_3s feeds
-//   every 20 ms, then Flash_NVM_full_clear (4 KB erase, 16 ms) and NVIC_SystemReset.
+//   MOTOR_get_dir (up to 200 x 10 ms at 1000 PWM) feeds once per step, and after it
+//   Motion_control_save (one 256-B record, about 18 ms) and the bus init run.
+// - Recalibration (the 5 s buffer hold is timed by the loop, not a wait): from the pass's feed,
+//   bus_shutdown (<= 11.3 ms), then MC_PULL_calibration_clear (one 256-B record) and
+//   Flash_Motion_clear (one page erase), fed after each: about 70 ms with an ADC restart earlier in
+//   the pass, 83 ms if the erase times out. Then blink_all_blue_3s feeds every 20 ms, and
+//   NVIC_SystemReset.
 // - Not covered because the watchdog is not running yet: the first-boot calibration (up to 30 s
-//   per step, interactive), its blink and averaging loops, the fallback flashes and the ADC init
-//   waits. No motor is driven and the bus is not set up until after them.
+//   per step, interactive), its blink and averaging loops, V11's baseline, step and release loops
+//   and the ADC init waits. No motor is driven and the bus is not set up until after them.
 #define WDG_FEED_GAP_MAX_MS 100u
 
 // The shortest timeout (LSI at WDG_LSI_MAX_HZ) must be at least WDG_FEED_MARGIN times

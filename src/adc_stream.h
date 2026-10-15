@@ -6,8 +6,9 @@
 // at 18 MHz) into a circular buffer of two halves of 32 scans each: a half is complete every
 // 32 x 8 x 84 = 21504 cycles, 1.19 ms. ADC_DMA_poll(), which ADC_DMA_get_value() runs on every
 // main-loop pass, processes each half whose flag is set and stamps it with time_ticks64(). The
-// ADCs and the DMA run on their own, so a pass that comes late (a flash erase, 16 ms; the worst NVM
-// job, about 36 ms; any stall up to the watchdog) finds the flags set, and the stamp is fresh again
+// ADCs and the DMA run on their own, so a pass that comes late (a page erase started by
+// Flash_background_run, about 16 ms, 32 ms at its timeout; a pass with an erase and an ADC restart,
+// about 56 ms: watchdog_cfg.h; any stall up to the watchdog) finds the flags set, and the stamp is fresh again
 // when Motion_control_run reads the age right after the poll. Only a stream that stopped (the
 // conversions, or the DMA channel after a transfer error) leaves the stamp behind, and then
 // ADC_DMA_get_value() keeps returning the last readings. ADC_DMA_poll restarts it on a transfer

@@ -12,17 +12,20 @@ enum class _bus_data_type : uint8_t
 
 void bambubus_heartbeat_seen_fast(void);
 
-// RX parser resync gap in SysTick ticks (HCLK/8 = 18 MHz). One 9E1 byte at 1.25 Mbaud is 11 bits =
-// 8.8 us = 158.4 ticks. Inside a frame the BMCU sees RX interrupts at most 2 byte times apart (a
-// longer ISR delay overruns the single-byte DATAR and is flagged by ORE). Between frames the bus
-// stays quiet much longer: a device must receive and check the whole request before replying (this
-// BMCU then waits another 50 us), and a broken request gets no reply, so the next frame waits for the
-// printer's timeout. The printer's own inter-byte timing has not been measured, so the threshold is
-// 200 us (about 23 byte times): generous for pauses on the sending side, still well below the reply
-// timeout that follows a lost frame.
+// RX resync gap in SysTick ticks (HCLK/8 = 18 MHz; time_ticks32() keeps that rate while
+// time_hw_flash_clock() slows the core). One 9E1 byte at 1.25 Mbaud is 11 bits = 8.8 us = 158.4 ticks.
+// bus_rx_poll() drops a frame (or heartbeat skip) still in progress once it has seen no new bytes for at
+// least this long, measured between its own polls (the main loop's, plus those bus_background_ready()
+// runs): the stamp is the poll that first saw the last byte, not the byte's arrival. In practice that is
+// 200 us plus up to about two main-loop passes after the last byte, so a frame that lost bytes or began on
+// a false header is dropped before it swallows the printer's next frame only if that frame starts later
+// than this; one that starts sooner can still be lost (one request, which the printer retries). The fork's
+// RX ISR timed each byte and reset at exactly 200 us. The printer's own inter-byte timing has not been
+// measured; 200 us (about 23 byte times) is the value the fork ran on the A1 (hardware test Runs 1 and 2)
+// and is still far below the printer's reply timeout.
 #define BUS_RX_RESYNC_GAP_TICKS 3600u
 
-class _bus_port_deal // 中断数据处理
+class _bus_port_deal // RX frame parser: bus_rx_poll() (main loop) feeds it byte by byte from the RX DMA ring
 {
 public:
     uint8_t send_data_buf[1280] __attribute__((aligned(4)));
@@ -32,45 +35,23 @@ private:
     // cppcheck-suppress uninitMemberVarPrivate
     uint8_t tx_dma_buf[1280] __attribute__((aligned(4)));
     // cppcheck-suppress uninitMemberVarPrivate
-    uint8_t recv_data_buf[2][1280] __attribute__((aligned(4)));
+    uint8_t recv_data_buf[3][1280] __attribute__((aligned(4)));
     uint8_t tx_build_sel = 0;
+    uint8_t rx_read = 0, rx_write = 0, rx_count = 0;
+    uint16_t rx_length[3] = {};
+    _bus_data_type rx_type[3] = {};
     int _index = 0;
     int length = 999;
     uint8_t data_length_index = 0;
     uint8_t data_CRC8_index = 0;
     _bus_data_type irq_package_type = _bus_data_type::none;
     uint8_t *bus_irq_data_ptr = recv_data_buf[0];
-    int drop_bytes = 0;
-    volatile uint32_t rx_last_tick = 0;
-    volatile uint32_t tx_end_tick = 0;
-    // cppcheck-suppress uninitMemberVarPrivate ; set by init() before any tx_start()
-    void (*port_send_datas)(uint8_t *data, uint16_t len); // starts the TX; only tx_start() calls it
-
-    // Drop the frame (or heartbeat skip) in progress. Also runs in the main loop at TX start, so the
-    // ISR-owned fields go through volatile: kept after the `idle = false` store in tx_start().
-    void rx_resync()
-    {
-        volatile int &drop = *(volatile int *)&drop_bytes;
-        // A heartbeat whose header passed CRC8 counts even if its tail was cut, as it did before.
-        if (drop > 0)
-            bambubus_heartbeat_seen_fast();
-        *(volatile int *)&_index = 0;
-        drop = 0;
-    }
-
-    // Start of our TX (main loop). The printer waits for our reply, so normally no frame is arriving
-    // and the reset does nothing. If one did start first (we answered late), our TX garbles it and RX
-    // ignores its bytes meanwhile, so its head must not combine with the bytes after our TX. The gap
-    // resync misses that when RX echoes our own bytes (they are timestamped) or the reply is shorter
-    // than BUS_RX_RESYNC_GAP_TICKS (the 8-byte set_filament ACK takes 70 us). idle goes false first:
-    // from then on the RX ISR leaves the parser alone, so the reset cannot race with it (at worst
-    // rx_overrun() reports the same cut heartbeat again, which only refreshes its stamp).
-    void tx_start(uint8_t *data, uint16_t len)
-    {
-        idle = false;
-        rx_resync();
-        port_send_datas(data, len);
-    }
+    int heartbeat_drop_bytes = 0;
+    // RX ring position (bus_rx_poll's absolute byte count) at the start of our last TX; see rx_mark_tx().
+    uint32_t rx_tx_mark = 0;
+    bool rx_tx_mark_pending = false;
+    // cppcheck-suppress uninitMemberVarPrivate ; set by init() before any send_package()
+    bool (*port_send_datas)(uint8_t *data, uint16_t len);
 
 public:
     uint8_t * volatile bus_recv_data_ptr = recv_data_buf[0];
@@ -84,7 +65,7 @@ public:
         return tx_build_sel ? tx_dma_buf : send_data_buf;
     }
 
-    void init(void (*_port_send_datas)(uint8_t *data, uint16_t len))
+    void init(bool (*_port_send_datas)(uint8_t *data, uint16_t len))
     {
         _index = 0;
         length = 999;
@@ -92,10 +73,10 @@ public:
         data_CRC8_index = 0;
         irq_package_type = _bus_data_type::none;
         bus_irq_data_ptr = recv_data_buf[0];
-        drop_bytes = 0;
-        rx_last_tick = 0;
-        tx_end_tick = 0;
-        bus_recv_data_ptr = recv_data_buf[1];
+        heartbeat_drop_bytes = 0;
+        bus_recv_data_ptr = recv_data_buf[0];
+        rx_read = rx_write = rx_count = 0;
+        rx_tx_mark_pending = false;
         idle = true;
         send_data_len = 0;
         recv_data_len = 0;
@@ -103,81 +84,70 @@ public:
         port_send_datas = _port_send_datas;
     }
 
-    // RX ISR entry, once per byte read from DATAR. now: STK_CNTL at ISR entry. overrun: ORE was set,
-    // so this byte is good but at least one byte after it was lost. PE/FE/NE are not acted on: the
-    // configured framing was never checked against the printers, and CRC16 rejects bad frames anyway.
-    void rx_byte(uint8_t data, uint32_t now, bool overrun)
+    uint32_t rx_dropped = 0;
+    volatile uint32_t tx_errors = 0;
+
+    void reset_rx()
     {
-        const uint32_t gap = now - rx_last_tick;
-        rx_last_tick = now;
-        if (!idle) return; // our own TX, never host data
-
-        // Drop the frame (or heartbeat skip) in progress once the line went quiet; otherwise a frame
-        // that lost bytes swallows the head of the next one.
-        if (gap > BUS_RX_RESYNC_GAP_TICKS)
-            rx_resync();
-
-        irq(data);
-        if (overrun)
-            rx_resync();
+        // a reset parser holds nothing our TX could have cut (also clears the mark when rx_fault restarts the ring)
+        rx_tx_mark_pending = false;
+        _index = 0;
+        heartbeat_drop_bytes = 0;
+        irq_package_type = _bus_data_type::none;
     }
 
-    // ORE without a pending byte: a byte was lost after the last one read.
-    void rx_overrun()
+    bool receiving() const { return _index != 0 || heartbeat_drop_bytes != 0; }
+
+    void release_packet()
     {
-        rx_resync();
+        if (rx_count) {
+            rx_read = (uint8_t)((rx_read + 1u) % 3u);
+            --rx_count;
+        }
+        bus_recv_data_ptr = recv_data_buf[rx_read];
+        bus_package_type = rx_count ? rx_type[rx_read] : _bus_data_type::none;
+        recv_data_len = rx_count ? rx_length[rx_read] : 0;
     }
 
-    // STK_CNTL of the last byte received, also during our own TX. A single aligned 32-bit load, so
-    // main code can read it without masking IRQs.
-    inline __attribute__((always_inline)) uint32_t last_rx_tick() const
+    // Our TX starts (bus_uart1_dma_send(); RX stays off until it ends). ring_pos: the RX ring's byte
+    // count at that moment. A frame the parser is still inside once it has consumed those bytes was cut
+    // by our TX (we answered while the printer was already sending), so its head must not combine with
+    // the bytes received after the TX (audit #24, tx-no-collision-guard). Main loop only.
+    void rx_mark_tx(uint32_t ring_pos)
     {
-        return rx_last_tick;
+        rx_tx_mark = ring_pos;
+        rx_tx_mark_pending = true;
     }
 
-    // TC ISR: the last byte of our reply has left the shifter and DE is released. now: STK_CNTL.
-    // RX bytes were not parsed during the TX; reset again so nothing from before it meets the
-    // bytes after it.
-    inline __attribute__((always_inline)) void tx_done(uint32_t now)
+    // bus_rx_poll(): the parser has consumed the RX ring up to ring_pos.
+    void rx_reached(uint32_t ring_pos)
     {
-        tx_end_tick = now;
-        rx_resync();
-        idle = true;
+        if (!rx_tx_mark_pending || (int32_t)(ring_pos - rx_tx_mark) < 0) return;
+        rx_tx_mark_pending = false;
+        if (receiving())
+        {
+            reset_rx();
+            ++rx_dropped;
+        }
     }
 
-    // STK_CNTL at the end of our last TX. Tracked apart from RX because our own bytes are not
-    // necessarily echoed to RX.
-    inline __attribute__((always_inline)) uint32_t last_tx_end_tick() const
+    // bus_rx_poll()'s heartbeat fast path: true when a pending TX mark falls strictly inside the n bytes
+    // starting at ring position `from`. Skipping them in one step would carry a heartbeat our TX cut
+    // across the mark into the printer's next frame, so the bytes go to irq() and rx_reached() drops the
+    // cut heartbeat at the mark. A mark at `from` was already handled by rx_reached(); one at from + n
+    // means the heartbeat ended before our TX.
+    bool rx_mark_inside(uint32_t from, uint32_t n) const
     {
-        return tx_end_tick;
-    }
-
-    // No reply in flight and none built but not yet started.
-    inline __attribute__((always_inline)) bool tx_idle() const
-    {
-        return idle && send_data_len == 0;
-    }
-
-    // No received frame waiting for the main loop, and the parser is not inside a frame that is
-    // still arriving. A frame cut short leaves _index/drop_bytes set until the next byte resyncs
-    // the parser; once the line has been quiet past the resync gap that frame is dead, so it
-    // counts as idle. _index and drop_bytes are ISR-owned, hence the volatile reads.
-    inline __attribute__((always_inline)) bool rx_idle(uint32_t now) const
-    {
-        if (recv_data_len != 0) return false;
-        if (*(const volatile int *)&_index == 0 && *(const volatile int *)&drop_bytes == 0)
-            return true;
-        // A byte the ISR stamped just after `now` was read is arriving right now, not 2^32 old.
-        const uint32_t last = rx_last_tick;
-        if ((uint32_t)(last - now) <= BUS_RX_RESYNC_GAP_TICKS) return false;
-        return (uint32_t)(now - last) > BUS_RX_RESYNC_GAP_TICKS;
+        const uint32_t d = rx_tx_mark - from;
+        return rx_tx_mark_pending && d != 0u && d < n;
     }
 
     void irq(uint8_t data)
     {
-        if (drop_bytes > 0)
+        // Heartbeat
+        if (__builtin_expect(heartbeat_drop_bytes > 0, 0))
         {
-            if (--drop_bytes == 0)
+            if (--heartbeat_drop_bytes == 0)
                 bambubus_heartbeat_seen_fast();
             return;
         }
@@ -235,11 +205,27 @@ public:
                 length = (((int)data) << 2) + 12;
             }
 
-            if (length <= (int)data_CRC8_index || length > BUF_SZ)
+            const int minimum = irq_package_type == _bus_data_type::ahub_bus ? 12 :
+                (data_length_index == 2 ? 7 : 15);
+            if (length < minimum || length > BUF_SZ)
             {
                 _index = 0;
                 return;
             }
+        }
+
+        if (irq_package_type == _bus_data_type::bambubus &&
+            idx == 4 && data_length_index == 2 && length >= 6 &&
+            buf[1] == 0xC5u && data == 0x20u)
+        {
+            const int remain = length - 5;
+            _index = 0;
+            irq_package_type = _bus_data_type::none;
+            if (remain > 0)
+                heartbeat_drop_bytes = remain;
+            else
+                bambubus_heartbeat_seen_fast();
+            return;
         }
 
         if (idx == data_CRC8_index)
@@ -251,41 +237,26 @@ public:
             }
         }
 
-        if (irq_package_type == _bus_data_type::bambubus &&
-            idx == 4 &&
-            data_length_index == 2 &&
-            length >= 6 &&
-            buf[1] == 0xC5 &&
-            data == 0x20)
-        {
-            const int remain = length - 5;
-            _index = 0;
-
-            if (remain > 0)
-            {
-                drop_bytes = remain;
-            }
-            else
-            {
-                bambubus_heartbeat_seen_fast();
-            }
-            return;
-        }
-
         ++idx;
 
         if (idx >= length)
         {
             _index = 0;
 
-            if (recv_data_len == 0)
+            if (rx_count < 2u)
             {
-                uint8_t *tmp = bus_recv_data_ptr;
-                bus_recv_data_ptr = bus_irq_data_ptr;
-                bus_irq_data_ptr = tmp;
-                bus_package_type = irq_package_type;
-                recv_data_len = length;
+                rx_length[rx_write] = (uint16_t)length;
+                rx_type[rx_write] = irq_package_type;
+                if (rx_count == 0u) {
+                    bus_recv_data_ptr = bus_irq_data_ptr;
+                    bus_package_type = irq_package_type;
+                    recv_data_len = length;
+                }
+                ++rx_count;
+                rx_write = (uint8_t)((rx_write + 1u) % 3u);
+                bus_irq_data_ptr = recv_data_buf[rx_write];
             }
+            else ++rx_dropped;
             return;
         }
 
@@ -300,10 +271,10 @@ public:
             if (!idle) return;
 
             uint8_t *tx = tx_build_buf();
-            tx_build_sel ^= 1;
-
-            tx_start(tx, (uint16_t)len);
-            send_data_len = 0;
+            if (port_send_datas(tx, (uint16_t)len)) {
+                tx_build_sel ^= 1;
+                send_data_len = 0;
+            }
         }
     }
 
@@ -312,12 +283,15 @@ public:
         if (len > 0 && len <= 1280)
         {
             if (!idle) return;
-            tx_start(data, len);
+            port_send_datas(data, len);
         }
     }
 } __attribute__((aligned(4)));
 
 extern _bus_port_deal bus_port_to_host;
 extern void bus_init();
+void bus_rx_poll();
+bool bus_background_ready();
+void bus_shutdown();
 
 extern uint16_t bus_host_device_type; // host_device_type_* values: host_link.h

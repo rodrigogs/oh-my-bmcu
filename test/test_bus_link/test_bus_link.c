@@ -67,7 +67,7 @@ static void test_heartbeat_just_before_tick_wrap(void)
 
 static void test_heartbeat_stamped_after_now_is_fresh(void)
 {
-    // The RX IRQ can stamp a heartbeat after bambubus_run() sampled now.
+    // bus_rx_poll() (main loop, also run inside bus_background_ready()) can stamp a heartbeat after bambubus_run() sampled now.
     bus_link_t l;
     bus_link_init(&l);
     bus_link_heartbeat(&l, 0x00000010u);
@@ -169,8 +169,9 @@ static void test_went_lost_fires_once_per_outage(void)
 // ---- adapted from bambu_bus_ams.cpp: bambubus_run()'s online-detect re-arm on bus_link_went_lost() ----
 // ---- anchor: bambubus_run from /bus_link_went_lost\(/ to /online_detect_reset\(\);/ ----
 // ---- anchor: online_detect_reset ----
-// Main-loop model of the BambuBus online-detect latch (bambu_bus_ams.cpp): registered stands for
-// have_registered and is cleared where bambubus_run() calls online_detect_reset(). Registered at
+// Main-loop model of the BambuBus online-detect latch (bambu_bus_ams.cpp) in fixed mode
+// (BAMBU_BUS_AMS_NUM 0-3; AUTO does not re-arm on a link loss): registered stands for have_registered
+// and is cleared where bambubus_run() calls online_detect_reset(). Registered at
 // boot, heartbeats every 300 ms for two minutes across a tick wrap: the latch must hold. The printer
 // goes silent: the latch is re-armed once, 1 s in. The printer re-registers during the silence (a
 // discovery before its heartbeats resume): that registration must hold through three more wraps.

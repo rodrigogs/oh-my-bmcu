@@ -1,14 +1,16 @@
 // Golden-frame tests for src/bambu_bus_ams.cpp, the BambuBus replies the printer reads. The real
 // ams.cpp and bambu_bus_ams.cpp are compiled into this file, with the real RX parser
 // (_bus_hardware.h) and CRCs (crc_bus.c): each test feeds printer frames byte by byte into
-// bus_port_to_host, runs bambubus_run() as the main loop does, and compares the bytes handed to the
-// UART with a frame recorded from this code at 4933421 (image 1c42d010..., the one tested on the
-// A1). A change to any reply byte fails here, so one that is meant has to update the frame on purpose.
+// bus_port_to_host.irq() (what bus_rx_poll() does with the bytes of the RX DMA ring), runs
+// bambubus_run() as the main loop does, and compares the bytes handed to the UART with a frame
+// recorded from this code at 4933421 (image 1c42d010..., the one tested on the A1). The one meant
+// change since is the V11 version reply (11.00.00.00, kReplyVersion). A change to any reply byte fails
+// here, so one that is meant has to update the frame on purpose.
 //
 // Host stand-ins: ch32v20x.h (next to this file) for ws2812.h; the IRQ mask, the SysTick counter and
 // the chip UID (src/hal/irq_wch.h, src/hal/time_hw.h and bambu_bus_ams.cpp, #if !defined(__riscv));
-// the loaded-channel hooks of app_api.h (main.cpp), delay_us and the bus_port_to_host instance
-// (_bus_hardware.cpp).
+// the loaded-channel and NVM hooks of app_api.h (main.cpp), Motion_control_filament_meters
+// (Motion_control.cpp), delay_us and the bus_port_to_host instance (_bus_hardware.cpp).
 
 #include <stdint.h>
 #include <string.h>
@@ -23,7 +25,24 @@
 volatile uint32_t time_hw_host_stk_cntl = 0u;
 uint32_t time_hw_tpus = 18u;     // SysTick ticks per us (144 MHz / 8)
 uint32_t time_hw_tpms = 18000u;  // per ms
+// time_ticks32()'s flash slow-clock compensation (hal/time_hw.c): never active here.
+volatile uint32_t time_hw_slow = 0u;
+volatile uint32_t time_hw_offset32 = 0u;
+volatile uint32_t time_hw_anchor32 = 0u;
 void delay_us(uint32_t us) { time_hw_host_stk_cntl += us * time_hw_tpus; }
+
+// The odometer (Motion_control.cpp): the replies carry the channel's meters, 1.0 m from ams_init().
+float Motion_control_filament_meters(uint8_t ch) { return ams[BMCU_LOCAL_AMS_INDEX].filament[ch].meters; }
+
+// The filament NVM save request (main.cpp marks the channel dirty): counted, so a test can tell
+// which set-filament requests asked for a save.
+static int g_save_calls;
+static uint8_t g_save_mask;
+void ams_datas_set_need_to_save_filament(uint8_t filament_idx)
+{
+    ++g_save_calls;
+    if (filament_idx < 4u) g_save_mask = (uint8_t)(g_save_mask | (1u << filament_idx));
+}
 
 // Any 12 bytes: the serial number and the online-detect ID are hashed from them.
 const uint8_t bambubus_host_uid[12] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x0F, 0x1E, 0x2D, 0x3C};
@@ -31,17 +50,25 @@ const uint8_t bambubus_host_uid[12] = {0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE,
 _bus_port_deal bus_port_to_host;
 
 // ---- adapted from main.cpp: the loaded-channel state, without the NVM and boot-restore parts ----
+// ---- anchor: ams_state_claim_loaded ----
 // ---- anchor: ams_state_set_loaded ----
 // ---- anchor: ams_state_set_unloaded ----
 static uint8_t g_loaded_ch = 0xFF;
 
-void ams_datas_set_need_to_save_filament(uint8_t) {}
+// Claim and set differ only in the NVM write set_loaded schedules, which is not modelled here: both
+// take a channel while none is loaded and keep the loaded one otherwise.
+void ams_state_claim_loaded(uint8_t filament_ch)
+{
+    if (filament_ch >= 4u) return;
+    if (g_loaded_ch != 0xFFu && g_loaded_ch != filament_ch) return;
+    if (g_loaded_ch == 0xFFu) g_loaded_ch = filament_ch;
+}
 
 void ams_state_set_loaded(uint8_t filament_ch)
 {
     if (filament_ch >= 4u) return;
-    if (g_loaded_ch != 0xFFu) return;
-    g_loaded_ch = filament_ch;
+    if (g_loaded_ch != 0xFFu && g_loaded_ch != filament_ch) return;
+    if (g_loaded_ch == 0xFFu) g_loaded_ch = filament_ch;
 }
 
 void ams_state_set_unloaded(uint8_t filament_ch)
@@ -160,11 +187,13 @@ static const uint8_t kOnlineDetectConfirm[] = {
 
 // Long replies: 3D 00, the request's package number, total length, CRC8, the request's source as
 // target, 0x0700 as source, the request's type, data, CRC16.
-// 0x103: version 00 00 32 0A (10.50.00.00) and "AMS08", the unit in the last byte.
+// 0x103: version 00 00 00 0B (11.00.00.00, V11; 4933421 sent 00 00 32 0A, 10.50.00.00) and "AMS08",
+// the unit in the last byte. Only the version bytes 15-16 and the CRC16 differ from the 4933421 frame
+// (CRC16 recomputed with crc_bus.c; the CRC8 covers bytes 0-5 only).
 static const uint8_t kReplyVersion[] = {
-    0x3D, 0x00, 0x2A, 0x00, 0x24, 0x00, 0xE6, 0x00, 0x06, 0x00, 0x07, 0x03, 0x01, 0x00, 0x00, 0x32,
-    0x0A, 0x41, 0x4D, 0x53, 0x30, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x86, 0xFC};
+    0x3D, 0x00, 0x2A, 0x00, 0x24, 0x00, 0xE6, 0x00, 0x06, 0x00, 0x07, 0x03, 0x01, 0x00, 0x00, 0x00,
+    0x0B, 0x41, 0x4D, 0x53, 0x30, 0x38, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x4F, 0xF0};
 // 0x21A: the unit, then five zeros.
 static const uint8_t kReplyMcOnline[] = {
     0x3D, 0x00, 0x2A, 0x00, 0x15, 0x00, 0x62, 0x00, 0x06, 0x00, 0x07, 0x1A, 0x02, 0x00, 0x00, 0x00,
@@ -200,11 +229,13 @@ static const uint32_t FRAME_GAP_TICKS = 300u * 18u; // 300 us of silence between
 static uint8_t g_tx[1280];
 static int g_tx_len;
 
-// Stand-in for bus_uart1_dma_send: keeps the bytes that would go on the wire.
-static void fake_send(uint8_t *data, uint16_t len)
+// Stand-in for bus_uart1_dma_send: keeps the bytes that would go on the wire. The TX always starts,
+// and idle stays true (the real one clears it until bus_tx_finish()).
+static bool fake_send(uint8_t *data, uint16_t len)
 {
     memcpy(g_tx, data, len);
     g_tx_len = len;
+    return true;
 }
 
 void setUp(void)
@@ -219,9 +250,11 @@ void setUp(void)
     before_on_use_sniff_7f_index = 0u;
     before_on_use_sniff_7f_channel = 0xFFu;
     g_loaded_ch = 0xFFu;
+    g_save_calls = 0;
+    g_save_mask = 0u;
 
     ams_init();
-    ams[BAMBU_BUS_AMS_NUM].online = true;
+    ams[BMCU_LOCAL_AMS_INDEX].online = true;
     time_hw_host_stk_cntl = 0x10000000u;
     bus_port_to_host.init(fake_send);
     bambubus_init();
@@ -261,7 +294,7 @@ static void rx(const uint8_t *frame, int n)
     time_hw_host_stk_cntl += FRAME_GAP_TICKS;
     for (int i = 0; i < n; i++)
     {
-        bus_port_to_host.rx_byte(frame[i], time_hw_host_stk_cntl, false);
+        bus_port_to_host.irq(frame[i]);
         time_hw_host_stk_cntl += BYTE_TICKS;
     }
 }
@@ -274,7 +307,7 @@ static int loop_pass(void)
     bambubus_run();
     bus_port_to_host.send_package();
     if (g_tx_len != 0)
-        bus_port_to_host.tx_done(time_hw_host_stk_cntl);
+        bus_port_to_host.idle = true; // bus_tx_finish(): the TX is over
     return g_tx_len;
 }
 
@@ -404,7 +437,7 @@ static void test_a_jam_on_use_reports_f06f(void)
     motion(0x00, 0x03, 0x00);
     motion(0x00, 0x09, 0xA5);
     on_use();
-    ams[BAMBU_BUS_AMS_NUM].pressure = 0xF06Fu;
+    ams[BMCU_LOCAL_AMS_INDEX].pressure = 0xF06Fu;
     TEST_ASSERT_EQUAL_INT(44, on_use());
     ASSERT_REPLY(kReplyOnUseJam);
     TEST_ASSERT_EQUAL_INT(60, printer_poll());
@@ -414,17 +447,27 @@ static void test_a_jam_on_use_reports_f06f(void)
 static void test_a_jam_in_send_out_is_not_reported(void)
 {
     motion(0x00, 0x03, 0x00);
-    ams[BAMBU_BUS_AMS_NUM].pressure = 0xF06Fu;
+    ams[BMCU_LOCAL_AMS_INDEX].pressure = 0xF06Fu;
     TEST_ASSERT_EQUAL_INT(44, motion(0x00, 0x03, 0x00));
     ASSERT_REPLY(kReplySendOutJam);
 }
 
+// V11 takes before_on_use only for a channel in send_out or already in before_on_use: from idle the
+// request changes nothing and the reply is the idle one. After the printer's send_out (set here
+// without its reply, so the package number stays 0 as in the recorded frames) the 0x7F request
+// replays the capture.
 static void test_before_on_use_7f_replays_the_capture(void)
 {
+    TEST_ASSERT_EQUAL_INT(44, motion(0x00, 0x09, 0x7F));
+    ASSERT_REPLY(kReplyIdle);
+
+    setUp();
+    ams[BMCU_LOCAL_AMS_INDEX].filament[0].motion = _filament_motion::send_out;
     TEST_ASSERT_EQUAL_INT(44, motion(0x00, 0x09, 0x7F));
     ASSERT_REPLY(kReplyReplayCh0);
 
     setUp();
+    ams[BMCU_LOCAL_AMS_INDEX].filament[1].motion = _filament_motion::send_out;
     TEST_ASSERT_EQUAL_INT(44, motion(0x01, 0x09, 0x7F));
     ASSERT_REPLY(kReplyReplayCh1);
 }
@@ -476,12 +519,13 @@ static void test_online_detect_is_answered_again_after_a_link_loss(void)
     ASSERT_REPLY(kOnlineDetectFirst);
 }
 
-// ---- Frames too short for their handler (bambubus_frame_len.h) ----
+// ---- Frames too short for their handler (V11's minima in get_packge_type()) ----
 
 // A CRC-valid 0x03 of 10 bytes, 3D C5 0A CRC8 03 00 00 FF CRC16: its motion flag would be the CRC16's
 // low byte. The channel restored at boot is loaded and idle; the frame reads as a reset (channel FF,
-// state 00) and used to clear it, with a reply. Now it is dropped as a CRC failure is: no reply,
-// nothing changed. With the motion flag inside the payload (11 bytes) the same request is handled.
+// state 00) and used to clear it, with a reply. Dropped as a CRC failure is, as is the 11-byte frame
+// that ends at the motion flag (V11 wants the whole 12-byte request): no reply, nothing changed. The
+// 12-byte request is handled.
 static void test_a_motion_frame_without_its_flag_changes_nothing(void)
 {
     g_loaded_ch = 0u;
@@ -492,13 +536,20 @@ static void test_a_motion_frame_without_its_flag_changes_nothing(void)
     TEST_ASSERT_EQUAL_UINT8(0, package_num);
 
     const uint8_t p11[] = {0x03, BAMBU_BUS_AMS_NUM, 0x00, 0xFF, 0x00};
-    TEST_ASSERT_EQUAL_INT(44, exchange(f, short_frame(f, p11, (int)sizeof(p11))));
+    TEST_ASSERT_EQUAL_INT(11, short_frame(f, p11, (int)sizeof(p11)));
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, 11));
+    TEST_ASSERT_EQUAL_HEX8(0x00, g_loaded_ch);
+    TEST_ASSERT_EQUAL_UINT8(0, package_num);
+
+    const uint8_t p12[] = {0x03, BAMBU_BUS_AMS_NUM, 0x00, 0xFF, 0x00, 0x02};
+    TEST_ASSERT_EQUAL_INT(44, exchange(f, short_frame(f, p12, (int)sizeof(p12))));
     ASSERT_REPLY(kReplyIdle);
     TEST_ASSERT_EQUAL_HEX8(0xFF, g_loaded_ch);
 }
 
 // The printer's poll cut before its channel byte (11 bytes): the reply used to report the CRC16's
-// low byte as the requested channel. Now no reply; with the channel (12 bytes) the poll is answered.
+// low byte as the requested channel. No reply, nor for the 12-byte poll that ends at the channel (V11
+// wants the whole 13-byte request); the 13-byte poll is answered.
 static void test_a_poll_without_its_channel_gets_no_reply(void)
 {
     const uint8_t p[] = {0x04, BAMBU_BUS_AMS_NUM, 0x01, 0x00, 0x03};
@@ -507,8 +558,27 @@ static void test_a_poll_without_its_channel_gets_no_reply(void)
     TEST_ASSERT_EQUAL_UINT8(0, package_num);
 
     const uint8_t p12[] = {0x04, BAMBU_BUS_AMS_NUM, 0x01, 0x00, 0x03, 0xFF};
-    TEST_ASSERT_EQUAL_INT(60, exchange(f, short_frame(f, p12, (int)sizeof(p12))));
+    TEST_ASSERT_EQUAL_INT(12, short_frame(f, p12, (int)sizeof(p12)));
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, 12));
+    TEST_ASSERT_EQUAL_UINT8(0, package_num);
+
+    const uint8_t p13[] = {0x04, BAMBU_BUS_AMS_NUM, 0x01, 0x00, 0x03, 0xFF, 0x00};
+    TEST_ASSERT_EQUAL_INT(13, short_frame(f, p13, (int)sizeof(p13)));
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(kPrinterPoll, f, 13);
+    TEST_ASSERT_EQUAL_INT(60, exchange(f, 13));
     TEST_ASSERT_EQUAL_HEX8(0xFF, g_tx[12]); // the requested channel
+}
+
+// A probe without its subtype (7 bytes: buf[5] would be the CRC16) gets no reply and leaves the
+// prefix phase alone; the 8-byte probe is answered with the first prefix.
+static void test_a_probe_without_its_subtype_gets_no_reply(void)
+{
+    const uint8_t p[] = {0x05};
+    uint8_t f[16];
+    TEST_ASSERT_EQUAL_INT(7, short_frame(f, p, (int)sizeof(p)));
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, 7));
+    TEST_ASSERT_EQUAL_INT(29, probe());
+    ASSERT_REPLY(kOnlineDetectFirst);
 }
 
 // A confirm one byte short of the ID (25 bytes) does not register, and the next probe is answered; the
@@ -519,7 +589,8 @@ static void test_a_confirm_without_the_whole_id_does_not_register(void)
     uint8_t p[20] = {0x05, 0x01, BAMBU_BUS_AMS_NUM};
     memcpy(p + 3, g_tx + 7, 17);
     uint8_t f[32];
-    TEST_ASSERT_EQUAL_INT(0, exchange(f, short_frame(f, p, 19)));
+    TEST_ASSERT_EQUAL_INT(25, short_frame(f, p, 19));
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, 25));
     TEST_ASSERT_EQUAL_INT(29, probe());
     ASSERT_REPLY(kOnlineDetectNext);
 
@@ -527,6 +598,148 @@ static void test_a_confirm_without_the_whole_id_does_not_register(void)
     TEST_ASSERT_EQUAL_INT(29, exchange(f, short_frame(f, p, 20)));
     ASSERT_REPLY(kOnlineDetectConfirm);
     TEST_ASSERT_EQUAL_INT(0, probe());
+}
+
+// ---- Set filament (0x08 short, 0x218 long) ----
+
+// The 0x08 ACK is sent as stored, CRCs included.
+static const uint8_t kSetFilamentAck[] = {0x3D, 0xC0, 0x08, 0xB2, 0x08, 0x60, 0xB4, 0x04};
+
+// A 0x08 request for channel ch: unit << 4 | ch, one byte, the 8-byte id, RGBA, min and max
+// temperature (little endian), the 20-byte name, CRC16; frame_len 45 holds all of it. Returns the
+// frame length (frame_len, from 7).
+static int set_filament_frame(uint8_t *f, uint8_t ch, int frame_len)
+{
+    uint8_t p[39] = {0x08, (uint8_t)((BAMBU_BUS_AMS_NUM << 4) | ch), 0x00,
+                     'G', 'F', 'L', '9', '9', 0x00, 0x00, 0x00,
+                     0x11, 0x22, 0x33, 0x44,
+                     0xBE, 0x00, 0xD2, 0x00,
+                     'T', 'E', 'S', 'T'};
+    return short_frame(f, p, frame_len - 6);
+}
+
+static void assert_channel_has_the_set_filament(uint8_t ch)
+{
+    const _filament *fil = &ams[BMCU_LOCAL_AMS_INDEX].filament[ch];
+    TEST_ASSERT_EQUAL_STRING("GFL99", fil->bambubus_filament_id);
+    TEST_ASSERT_EQUAL_HEX8(0x11, fil->color_R);
+    TEST_ASSERT_EQUAL_HEX8(0x22, fil->color_G);
+    TEST_ASSERT_EQUAL_HEX8(0x33, fil->color_B);
+    TEST_ASSERT_EQUAL_HEX8(0x44, fil->color_A);
+    TEST_ASSERT_EQUAL_INT16(190, fil->temperature_min);
+    TEST_ASSERT_EQUAL_INT16(210, fil->temperature_max);
+    TEST_ASSERT_EQUAL_STRING("TEST", fil->name);
+}
+
+static void assert_channel_has_the_defaults(uint8_t ch)
+{
+    const _filament *fil = &ams[BMCU_LOCAL_AMS_INDEX].filament[ch];
+    TEST_ASSERT_EQUAL_STRING("GFG00", fil->bambubus_filament_id);
+    TEST_ASSERT_EQUAL_STRING("PETG", fil->name);
+    TEST_ASSERT_EQUAL_HEX8(0xFF, fil->color_R);
+}
+
+// V11 wants the whole 45-byte request (the name ends at byte 42): 44 bytes are dropped (no reply, no
+// change, no save); 45 bytes are applied, ACKed and saved, once, for that channel.
+static void test_set_filament_needs_the_whole_request_and_saves_it(void)
+{
+    uint8_t f[64];
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, set_filament_frame(f, 2u, 44)));
+    assert_channel_has_the_defaults(2u);
+    TEST_ASSERT_EQUAL_INT(0, g_save_calls);
+
+    TEST_ASSERT_EQUAL_INT(8, exchange(f, set_filament_frame(f, 2u, 45)));
+    ASSERT_REPLY(kSetFilamentAck);
+    assert_channel_has_the_set_filament(2u);
+    TEST_ASSERT_EQUAL_INT(1, g_save_calls);
+    TEST_ASSERT_EQUAL_HEX8(1u << 2, g_save_mask);
+}
+
+// The 0x218 data: unit, channel, the 8-byte id, RGBA, min and max temperature, the 16-byte name;
+// data_len 34 holds all of it.
+static int set_filament_type2(uint8_t ch, int data_len)
+{
+    uint8_t d[34] = {BAMBU_BUS_AMS_NUM, ch,
+                     'G', 'F', 'L', '9', '9', 0x00, 0x00, 0x00,
+                     0x11, 0x22, 0x33, 0x44,
+                     0xBE, 0x00, 0xD2, 0x00,
+                     'T', 'E', 'S', 'T'};
+    return request(0x218, d, data_len);
+}
+
+// V11 wants all 34 data bytes: 33 are dropped (no reply, no change, no save); 34 are applied, answered
+// (unit, channel, 00) and saved, once, for that channel.
+static void test_set_filament_type2_needs_the_whole_data_and_saves_it(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, set_filament_type2(3u, 33));
+    assert_channel_has_the_defaults(3u);
+    TEST_ASSERT_EQUAL_INT(0, g_save_calls);
+
+    TEST_ASSERT_EQUAL_INT(18, set_filament_type2(3u, 34));
+    const uint8_t data[] = {BAMBU_BUS_AMS_NUM, 0x03, 0x00};
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(data, g_tx + 13, 3);
+    TEST_ASSERT_TRUE(package_check_crc16(g_tx, 18));
+    assert_channel_has_the_set_filament(3u);
+    TEST_ASSERT_EQUAL_INT(1, g_save_calls);
+    TEST_ASSERT_EQUAL_HEX8(1u << 3, g_save_mask);
+}
+
+// Our unit offline (Motion_control_init() found no channel): both requests are neither applied nor
+// saved, and get no reply (V11's bambubus_run() requested the save anyway; the handlers do it now,
+// only for data they applied, audit #25).
+static void test_set_filament_while_offline_is_neither_applied_nor_saved(void)
+{
+    ams[BMCU_LOCAL_AMS_INDEX].online = false;
+    uint8_t f[64];
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, set_filament_frame(f, 1u, 45)));
+    TEST_ASSERT_EQUAL_INT(0, set_filament_type2(1u, 34));
+    assert_channel_has_the_defaults(1u);
+    TEST_ASSERT_EQUAL_INT(0, g_save_calls);
+}
+
+// A request for another unit or channel 4+ is not ours: not applied, not saved, no reply.
+static void test_set_filament_for_another_unit_is_ignored(void)
+{
+    uint8_t f[64];
+    set_filament_frame(f, 0u, 45);
+    f[5] = (uint8_t)(((BAMBU_BUS_AMS_NUM + 1) << 4) | 0u);
+    package_add_crc(f, 45);
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, 45));
+    set_filament_frame(f, 4u, 45);
+    TEST_ASSERT_EQUAL_INT(0, exchange(f, 45));
+    assert_channel_has_the_defaults(0u);
+    TEST_ASSERT_EQUAL_INT(0, g_save_calls);
+}
+
+// ---- The receive queue (V11) ----
+
+// A frame that arrives while our reply to the previous one is still waiting for the TX stays queued:
+// bambubus_run() leaves it alone (and reports its type) until the reply has gone, then answers it on
+// the next pass.
+static void test_a_frame_received_while_a_reply_is_pending_is_answered_next_pass(void)
+{
+    heartbeat();
+    rx(kPrinterOnUse, (int)sizeof(kPrinterOnUse));
+    g_tx_len = 0;
+    bambubus_run(); // builds the 0x03 reply, the main loop has not sent it yet
+    TEST_ASSERT_EQUAL_INT(44, bus_port_to_host.send_data_len);
+    TEST_ASSERT_EQUAL_INT(0, bus_port_to_host.recv_data_len);
+
+    const uint8_t unit[] = {BAMBU_BUS_AMS_NUM};
+    uint8_t f[64];
+    const int n = long_frame(f, 0x103, unit, 1);
+    rx(f, n);
+    TEST_ASSERT_EQUAL_INT(n, bus_port_to_host.recv_data_len);
+
+    TEST_ASSERT_EQUAL_INT((int)bambubus_package_type::version, (int)bambubus_run());
+    TEST_ASSERT_EQUAL_INT(n, bus_port_to_host.recv_data_len); // still queued
+    bus_port_to_host.send_package();
+    bus_port_to_host.idle = true;
+    TEST_ASSERT_EQUAL_INT(44, g_tx_len);
+
+    TEST_ASSERT_EQUAL_INT(36, loop_pass());
+    ASSERT_REPLY(kReplyVersion);
+    TEST_ASSERT_EQUAL_INT(0, bus_port_to_host.recv_data_len);
 }
 
 // ---- Long replies ----
@@ -537,11 +750,11 @@ static void test_version_reply(void)
     TEST_ASSERT_EQUAL_INT(36, request(0x103, unit, 1));
     ASSERT_REPLY(kReplyVersion);
 
-    // What the A1 reported for this image over its LAN MQTT on 2026-09-25 (hardware-test-log.md,
-    // run 1, section 1): module ams/0, version 10.50.00.00, AMS08. The version is the first data word, read
-    // high byte first.
-    TEST_ASSERT_EQUAL_UINT8(10, g_tx[13 + 3]);
-    TEST_ASSERT_EQUAL_UINT8(50, g_tx[13 + 2]);
+    // The A1 reported the fork's 4933421 image over its LAN MQTT on 2026-09-25 (hardware-test-log.md,
+    // run 1, section 1) as module ams/0, version 10.50.00.00, AMS08, from 00 00 32 0A. The version is
+    // the first data word, read high byte first, so V11's 00 00 00 0B should show as 11.00.00.00.
+    TEST_ASSERT_EQUAL_UINT8(11, g_tx[13 + 3]);
+    TEST_ASSERT_EQUAL_UINT8(0, g_tx[13 + 2]);
     TEST_ASSERT_EQUAL_UINT8(0, g_tx[13 + 1]);
     TEST_ASSERT_EQUAL_UINT8(0, g_tx[13 + 0]);
     TEST_ASSERT_EQUAL_MEMORY("AMS08", g_tx + 13 + 4, 6);
@@ -584,7 +797,13 @@ int main(int, char **)
     RUN_TEST(test_online_detect_is_answered_again_after_a_link_loss);
     RUN_TEST(test_a_motion_frame_without_its_flag_changes_nothing);
     RUN_TEST(test_a_poll_without_its_channel_gets_no_reply);
+    RUN_TEST(test_a_probe_without_its_subtype_gets_no_reply);
     RUN_TEST(test_a_confirm_without_the_whole_id_does_not_register);
+    RUN_TEST(test_set_filament_needs_the_whole_request_and_saves_it);
+    RUN_TEST(test_set_filament_type2_needs_the_whole_data_and_saves_it);
+    RUN_TEST(test_set_filament_while_offline_is_neither_applied_nor_saved);
+    RUN_TEST(test_set_filament_for_another_unit_is_ignored);
+    RUN_TEST(test_a_frame_received_while_a_reply_is_pending_is_answered_next_pass);
     RUN_TEST(test_version_reply);
     RUN_TEST(test_mc_online_reply);
     RUN_TEST(test_serial_number_reply);

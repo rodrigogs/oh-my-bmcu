@@ -21,9 +21,10 @@ for name in ("BMCU_DM_TWO_MICROSWITCH", "BMCU_ONLINE_LED_FILAMENT_RGB", "DBMCU_P
     if value not in ("0", "1"):
         errors.append("%s must be 0 or 1 (got %r)" % (name, value))
 
+# ams_addressing.h: 0..3 fixed AMS A-D, 4 AMS_AUTO (enumerated by the printer).
 ams_num = os.environ.get("BAMBU_BUS_AMS_NUM")
-if ams_num not in ("0", "1", "2", "3"):
-    errors.append("BAMBU_BUS_AMS_NUM must be 0..3 (got %r)" % ams_num)
+if ams_num not in ("0", "1", "2", "3", "4"):
+    errors.append("BAMBU_BUS_AMS_NUM must be 0..3 (AMS A-D) or 4 (AMS_AUTO) (got %r)" % ams_num)
 
 retract = os.environ.get("AMS_RETRACT_LEN")
 match = re.fullmatch(r"(\d+(?:\.\d+)?)f?", retract or "")

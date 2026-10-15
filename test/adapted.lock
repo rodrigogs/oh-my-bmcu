@@ -6,15 +6,21 @@
 41e98652c95bc9eb309e38d319dbacc3c09a6814eca760673737eb8f885a0a94 src/ADC_DMA.cpp ADC_DMA_poll
 b161a4e1883bbc4dd2bc3fb2b3f0a74633c453545229871f3b46ed20e541b125 src/ADC_DMA.cpp ADC_DMA_restart_if_stale
 fec426705bf4978e7a713627d4270df1ba7822f03734b11105d4a4f85bbe4202 src/ADC_DMA.cpp adc_dma_restart
-f453b56d2e5bea60232354119faeb9fbee948e277c14cbec5b6ea6e452ce9602 src/ADC_DMA.cpp kScale128
 ef6e1f934723b5ded050586a1eeba3a6cac4c5fe9c2f22a10eb7aec9267639b0 src/ADC_DMA.cpp process_half_update_filter from /g_half_ticks = time_ticks64\(\);/ to /g_half_ticks = time_ticks64\(\);/
-1a679898380e239be1b3fbeba48f2aa3b8efa3b6c6abd153c17e3b59c5ef2f17 src/Flash_saves.cpp Flash_AMS_filament_write
-03406764146bc123616c48aeae2b0f922efd9240c747001f562e259fa9695d7a src/Flash_saves.cpp Flash_AMS_state_write
-c18cafaa471b82ad96d1797727094ea66ffbb478cd122ca785155679f874f93a src/Flash_saves.cpp Flash_saves_init
+8257660ec806db931e72e7cc2d5aa310ab83437876d324ff2c64a21b3c9a8278 src/Flash_saves.cpp Flash_AMS_filament_write
+59d835f1f26db0e76498b5949f2b0cbc4ecd5a3570abcee53c7d43affa82fb6d src/Flash_saves.cpp Flash_AMS_state_read
+2130de706ebcc3b1fa6736691d195e8a7f434b0a489e3033d64af12ecd179785 src/Flash_saves.cpp Flash_AMS_state_write
+07e732b868cfd1551d1de0be04ef3dc9e0d0a6394de0acaaf56f30a5de6ed683 src/Flash_saves.cpp Flash_background_run
+f66036e0d57204776a0d8a8831dcbdd4ead9583889cb8d4b51ae0c548eeec037 src/Flash_saves.cpp Flash_saves_init
+878bf6c120004fb713627ed7875119f46289ea8720142e69fb2ffc01db33866c src/Flash_saves.cpp cal_latest
 0252fd8398e2bbb7728e58f2bc84033cd0ccbbff53a98a48ffa448e65a7f7b99 src/Flash_saves.cpp crc32_hw_words
-78e9da94aa8a323ff2c3c9ed7f54553f7e72fa31ec65072ca263d6ebc38433f1 src/MC_PULL_calibration.cpp MC_PULL_calibration_boot from /float sum_raw\[4\]/ to /sum_key\[ch\] \+=/
-75571bea7921ff5af8a1819e72793f27e278e5e62538949872f270b72a09d1d2 src/Motion_control.cpp AS5600_distance_updata
-aaabcf27431ad85fc460260ff996df990233cef03ce884a27ff1af4b1938bcbd src/Motion_control.cpp AS5600_distance_updata from /case AS5600_TRACK_MOVE:/ to /as5600_count\[i\] \+=/
+5c8bbc9860f036ec1846548a3292dd9530f5a2f15ebbcf338f45effd2e19053e src/Flash_saves.cpp fil_scratch_recover
+85ed59f47c1692b78474d6ed0ff33c03ed6b41b8eacc161c799694d823bb127f src/Flash_saves.cpp flash_job_halfword
+cfe0975a6e82451ef5f53ef9cc4c1b85f68b4a8c9b8d686098a8dddbf3a6f139 src/Flash_saves.cpp sta_find_slot
+c4006f7f5f137fe174124b97bc3928c883d2571d2dabdd52d67c10cb14be2636 src/MC_PULL_calibration.cpp MC_PULL_calibration_boot from /if \(stored\)/ to /valid &= /
+9060fd05db7ac0f6a44a4d71f8a61ebcf5843cd25574fb64ec959aa9ef67eb6a src/MC_PULL_calibration.cpp capture_minmax_one_ch_event
+cc23e91303e8b2f56a33526262879bee8ef1523a715523b0f7d36be0d054097e src/Motion_control.cpp AS5600_distance_updata
+1973ef790ac81fe32498f96fc5e89a2396a6746910b49903332826a9fb05aca5 src/Motion_control.cpp AS5600_distance_updata from /case AS5600_TRACK_MOVE:/ to /as5600_odometer_count\[i\] \+=/
 307ac73d263d12adf3d372bb086bfe7e34484ea7389f7c16d3512975787330e5 src/Motion_control.cpp AUTO_UNLOAD_PWM_PULL
 234164ccaad0ec2704cc1166ab8c8e1d332481bbee8e6ef3129e61d41be02f63 src/Motion_control.cpp DM_AUTO_S2_TARGET_M
 9a788e404df31848b14417b3b9984a2fb055ed1db074b209c6cbb931e63c42e4 src/Motion_control.cpp MANUAL_EMPTY_PULL_PWM
@@ -25,63 +31,77 @@ b5baee4963d0229e0127233cfec8831e8be159dd618ba279b26c3d51e22183ca src/Motion_cont
 9fa1ae8c31bc19995b0faff6837b2393e178c1e2fc382ab259dd160b71e8891e src/Motion_control.cpp MC_PULL_ONLINE_read from /int pct = \(int\)\(pct_f \+ 0\.5f\);/ to /MC_PULL_pct\[i\] = \(uint8_t\)pct;/
 d0dc7ff77df4aa55e44aa099d4935be5c1576d2dfce8ee13af511a6bc34dd0c8 src/Motion_control.cpp MC_PULL_PIDP_PCT
 d78bd736a34c7ed71ef55d089518bfba8af3f75aaac630475bd6c3df590875a6 src/Motion_control.cpp MOTOR_PID
-31e825d74747eec4a3f0419ff42000d3b9aa838fc218a4b5273a5d0db17ed36b src/Motion_control.cpp Motion_control_run
+2a6ef1cd0f9dd1522340d86703d11a3ee5ea87618d07749426e0ff6349be4d4d src/Motion_control.cpp Motion_control_filament_meters
+a8129267363a01857ff5b09e2904073eb475f3e6b4350f9a3cc8438d87a10b57 src/Motion_control.cpp Motion_control_run
 d1a84bb843516f9826f4a9e53478b925603a0c8ca532e3e3c26dc40f7840105a src/Motion_control.cpp Motion_control_run from /\.online = true;/ to /\.online = false;/
 8a31e4fb8539f61fad3876e8d3eae731a608166881e5ae174f8f29d3983eef8e src/Motion_control.cpp Motion_control_run from /g_adc_stale = adc_stream_stale/ to /ADC_DMA_restart_if_stale\(\);/
 6fc78ec7a94c0ca4b5f8dee1030f3166dd095b97e88e47a22d42821c50f502aa src/Motion_control.cpp Motion_control_run from /g_adc_stale = adc_stream_stale/ to /g_dm_key_old = dm_rearm_key_old/
+bef859b15970c6bed24a83794516bbf54c4bea310d0687009596ad6b4559df40 src/Motion_control.cpp Motion_control_run from /int pressed = -1;/ to /if \(hard_blue\) \{ pressed/
 b7c6bed67ec10062ee4993e54c9b6cd0c7c84a81651922ef668af1101edb9f46 src/Motion_control.cpp PULL_RAMP_M
 46e07b21720f51de67a3c3d407856e12462f0f26e926cd9fbc69fd3f1aba2b7a src/Motion_control.cpp PULL_V_END
 10e054bda6a2228fb0aa62850919ec4b6067c0bbe77a6de96afb229881c0fccd src/Motion_control.cpp PULL_V_FAST
 b65e4431665c037750a4b8af0268d0e7aebd1b440b79f8ed6ba25b03484bd69d src/Motion_control.cpp _MOTOR_CONTROL from /MOTOR_PID PID_speed/ to /MOTOR_PID PID_speed/
 a773281bb67ed95ce978e7253884b909f49bb48e8dcfe4604f8ee07d4a4d8fcd src/Motion_control.cpp _MOTOR_CONTROL from /if \(motion == _motion\) return;/ to /g_on_use_hi_pwm_us\[CHx\] = 0u;/
 98824caf8d335c2c38648968f24a2915aad75dbebdb5e0e08839a4a554054ad8 src/Motion_control.cpp _MOTOR_CONTROL from /if \(motion == _motion\) return;/ to /if \(motion == _motion\) return;/
-b28513c3a04c1be3f4672bd726c266f975aed2811b4ba37497221f8d7db34315 src/Motion_control.cpp _MOTOR_CONTROL from /if \(motion == _motion\) return;/ to /pull_start_ms = 0;/
+14172f4b390f668777249dafe06b3d31848ec8703ed1b47d5c6342f802d7456c src/Motion_control.cpp _MOTOR_CONTROL from /if \(motion == _motion\) return;/ to /pull_start_ms = 0;/
 ea31a5d8d7d66115dd0083912b16edb78ad9992ee68cca628edf7893943da8d8 src/Motion_control.cpp dm_key_to_state
+595d87d3af43794110f6cfea732c466426859b84f370fed1e25f11e345dc200b src/Motion_control.cpp encoder_count
+f9c9dea0b852a381d2ede8dae366873e1646c85d82d9b6e6c3b64584b0579142 src/Motion_control.cpp kKeyEmptyPublications
 70c4b5934928c7b09f5e25069585344a6489fe6f2355b98709c0c04e4b848225 src/Motion_control.cpp motor_brake_hold
-445caeaa321a62ba6d35dcb692b29a0eda1eb44b300432dc198ed1c9597ef538 src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /const ml_result pb_end =/ to /MC_ONLINE_key_stu\[i\]\);/
+af4eb5d0c18d1e4d609cdac7528621fae31036af26b9c9a06947ad9d5ded2c70 src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /const ml_result pb_end =/ to /pb_key\);/
+63c9192f364a86136a64ce325053962e55447b3a5613de1d6f0ac395528e4ba6 src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /const uint8_t pb_key =/ to /const uint8_t pb_key =/
 ea19e35e38dc8b9f841c036448e3dbed2eedc0edbc9803087fe348ca5a96c6a7 src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /g_pull_speed_set\[i\] = -v;/ to /filament_motion_pull, 100/
-06f04f9ca623b5f56f0df55a141efd53d5f7610fe2f0668bedf06d3f5c44a2d3 src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /if \(ml_redetect_check\(/ to /== ML_OK\)/
-f506ee40c3b46e50af13b0af23935a17a75dd4252622318883d932745999bb7d src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /ml_redetect_start\(/ to /ml_redetect_start\(/
+df5e10cfdbfa17792a9f3dc5eebdd3a39d20639c4e7f948a95802ade06061996 src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /if \(ml_redetect_check\(/ to /== ML_OK\)/
+2aec29f1e9b2135875d1c6b6c5de87d90186ea75458948f3bef66496fd106b82 src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /ml_redetect_start\(/ to /ml_redetect_start\(/
 64352cbff9ef6928765fc8b27d9a5a135fa5f52ae3f4c18c9e0abc143c07fcfe src/Motion_control.cpp motor_motion_filamnet_pull_back_to_online_key from /remain = target - d/ to /= -v;/
 c87c1d4eaea60b9f6263ee2c3b995ce5d083f1f782eb10e0139d71fe40a9917e src/Motion_control.cpp motor_motion_run from /MC_PULL_ONLINE_RGB_set\(i, r, g, b,/ to /MC_PULL_ONLINE_RGB_set\(i, r, g, b,/
-43e170b59fe173e0f57550d72c9b95ba9073378bee5ac52bb7e8b5009b104177 src/Motion_control.cpp motor_motion_run from /au_in_t au;/ to /MOTOR_CONTROL\[i\]\.run\(/
-749132a2916fbb69bef1f4c9b29450922c5777ecf983620fdcdf00dacb14e2b6 src/Motion_control.cpp motor_motion_run from /filament_now_position_enum pos =/ to /as5600_count\[ch\]\);/
+687ab6718fb174b509395d572bfdc783a500fbbd001e139b3b4711c91adc4cfe src/Motion_control.cpp motor_motion_run from /au\.inserted  = / to /^\s+;$/
+a72dadcb9c9aa6c3ea08841bf473ada9eb24361e9579e163ba26202a4339c7ce src/Motion_control.cpp motor_motion_run from /au_in_t au;/ to /MOTOR_CONTROL\[i\]\.run\(/
+f7f5fcb82a96b887d337381862b2dd83a66c4488aaec176d93fa465dcd32ad8f src/Motion_control.cpp motor_motion_run from /const dm_host_t host =/ to /encoder_count\(ch\)\);/
+76daf613b9beb0a7a0974dc1548105a883676334fd9344f3d297cf5f8190f988 src/Motion_control.cpp motor_motion_run from /for \(uint8_t ch = 0; ch < kChCount; ch\+\+\)/ to /\+\+g_key_empty\[ch\];/
+56d54c3ab8f2be733838573172f821d6f27e4a3983202f5d13f760620cf43a54 src/Motion_control.cpp motor_motion_run from /if \(!motor_motion_filamnet_pull_back_to_online_key/ to /motor_motion_switch\(time_now\);/
+d917f04c013cc70554820ae23d30655dfc0dd418fbb4ec8a98b82ee4b3bfbed4 src/Motion_control.cpp motor_motion_run from /if \(filament_channel_inserted\[i\] && !MC_PULL_calibration_is_valid\(i\)\)/ to /MC_PULL_ONLINE_RGB_set\(i, r, g, b,/
 2a49bca26a352e9d0f30f9a76639509f5887a70b185ee28d4eaab9dd219b80ac src/Motion_control.cpp motor_motion_run from /if \(g_adc_stale\)/ to /return;/
-cab4bc8959a7f1d8822cbcd2b4c717ff8442dd54ff23273a3ea5e733473df736 src/Motion_control.cpp motor_motion_run from /stu_apply_baseline\(/ to /motor_motion_switch\(/
-58205d02b842135c584f182ff02ca6f0ae6b5331731cd38203992776ac5f7b87 src/Motion_control.cpp motor_motion_switch
+254ef4fa845672cf8f3f75d01e49a760636a6dc5be54b0e13667aa0684669d9a src/Motion_control.cpp motor_motion_run from /stu_apply_baseline\(/ to /motor_motion_switch\(/
+23f42a44cf0d9d026400d59c8ff44ad2674281e253aa8f36cc59e1c14285d13d src/Motion_control.cpp motor_motion_switch
+21168e955944dc70e504ad26c16e1e7c31287fa7755e98a3585c5552a032d94b src/Motion_control.cpp motor_motion_switch from /case _filament_motion::pull_back:/ to /filament_now_position\[num\] = filament_pulling_back;/
 1b19e7e2bbcd1dad6960508df2b8545d83e378464661049cf1d015a5939548c5 src/Motion_control.cpp run from /case DM_AUTO_S2_PUSH:/ to /dm_auto_remain_m\[CHx\] = r;/
 30e52c0b34e3d24a0dc1fcc588464183c5cb8b5813d29da6f1b82685d76d491f src/Motion_control.cpp run from /const bool pull_mode =/ to /if \(x < \(float\)-PWM_lim\)/
 62fd2c09fd0da7a239b2981172aade87b1cd8e688467bd3decac10ab84cbd46c src/Motion_control.cpp run from /const bool use_ramping =/ to /if \(x > hi\) x = hi;/
 7c05a466f52cd38d318ef9677376c9aacffb5542103c7599f7ecd2b27e13ca0f src/Motion_control.cpp run from /const jam_ctrl_t jam_ctrl =/ to /return;/
-c92152c36435e0d89bfb54d5268d3e367ab2f6f0083c573348aadd5fb9f85748 src/Motion_control.cpp run from /const ml_idle_push_act idle_act =/ to /return;/
+34885843e7b45f5e74b1619c330e76d4d0f8198b52a42f9aed598bdd2e858173 src/Motion_control.cpp run from /const ml_idle_push_act idle_act =/ to /return;/
 c728d3660164c5b20d452ac77286decf2b0d7c00fbe7539a1300d5eb373e079a src/Motion_control.cpp run from /constexpr uint64_t SEND_SOFTSTART_MS/ to /PID_speed\.caculate\(/
-e325eca62ebe16fb5ae25915192b574ffc5463e595fe0431b8d313cf35b2fb20 src/Motion_control.cpp run from /if \(!send_len_abort &&/ to /return;/
-3a34cc0d9d80af4417bcd0de7de38ec949b9ed1f580791000e39f9c9dea4d6d3 src/Motion_control.cpp run from /if \(motion == \S+pressure_ctrl_idle\)/ to /dm_s2_enter_state\(/
+e6ee943ee2e7423db9da0288ff1292ef140759b22cb28b3ac276acb4fc98d3b0 src/Motion_control.cpp run from /if \(!send_len_abort &&/ to /return;/
+eade84c0274bb2c6062c86ef95ecadf636ee3001ca38cd1931f9cb0eb323441f src/Motion_control.cpp run from /if \(motion == \S+pressure_ctrl_idle\)/ to /dm_s2_enter_state\(/
 d53d37f6934a9df00b83de75ea161bb6f2ae0386c6baaad4fe4a57f90db5ee57 src/Motion_control.cpp run from /jam_push_limit_pass\(/ to /g_on_use_jam_latch\[CHx\] = 0u;/
 2b404685b411b5fdfaf566df6440036595d45f5f0ac824faaef1be03e0b3cb0a src/Motion_control.cpp run from /normalny idle z filamentem/ to /PID_pressure\.clear\(\);/
 c765c3849d6d840d65526491cfbe75eff65292363ac82203ce367f84822b2876 src/Motion_control.cpp run from /speed_set = g_pull_speed_set\[CHx\]/ to /PID_speed\.caculate\(/
 28e8c865fabbcd6b143f2d7541810fff75ea469a6c8923ec330e11a92b238a0f src/Motion_control.cpp stu_apply_baseline
-7220a574cf0c9261a67bbd5e66b64656f37147d74ec19ccbdd77abde52d18919 src/ahub_bus.cpp ahubus_run
-4014ed15f532c919331505844a3015a77d1fe19a77036346d6849dd0c52fbfba src/ahub_bus.cpp ahubus_slave_get_package_set from /data_ptr = buf \+ 4/ to /default:/
-ab8b38c475258024c25aeccf2d1eb15bc54990c658536e97b0342822b4496c0a src/bambu_bus_ams.cpp bambubus_run from /bool hb_new = false;/ to /return stu;/
+c58fd5620d8db7763dd88b09f0de1099b65b4eaf55bec48261dded2d5b0db360 src/_bus_hardware.cpp bus_rx_poll from /if \(produced != rx_consumed\)/ to /\+\+bus_port_to_host.rx_dropped;/
+87277c7910752a270fb68731f81b36c863be74ca1304eb9b13c40167f2c0e9d4 src/_bus_hardware.cpp bus_uart1_dma_send from /USART_Mode_Rx/ to /rx_mark_tx/
+b28f500f4f8587b6ab3ecc9562023b5722f03aa11df22b49b4c1fc1b4830c048 src/ahub_bus.cpp ahubus_run
+47be067bfee381c4581a1fff8ec47b3a17a79adde37885dd93a5b1e31db0e713 src/ahub_bus.cpp ahubus_slave_get_package_set from /data_ptr = buf \+ 4/ to /default:/
+0570da6c67679f8fc29d0f0ea33a0dd4a8d3ac06032d631fca4b359b7e32c186 src/bambu_bus_ams.cpp bambubus_run from /bool hb_new = false;/ to /return stu;/
 397b807ffeb6828ed884fae949d6fa9f05ab94f95e89f6abe375a676a9243ef7 src/bambu_bus_ams.cpp bambubus_run from /bus_link_poll\(/ to /bus_link_poll\(/
-08484fd704e1546b2bfc71b8936d550f170e1ea22d847190bb984b6ef32698d9 src/bambu_bus_ams.cpp bambubus_run from /bus_link_went_lost\(/ to /online_detect_reset\(\);/
-45f071e99233ed2464663cd63e4fe6ccdd87949ecb8117ca1f0232f1f62fb1dc src/bambu_bus_ams.cpp get_package_motion from /uint8_t ch = ams_ptr->now_filament_num/ to /get_filament_left_char/
-cf24a97062586b754fdeb38bbeae834289a4b4900f838712093b3698093551f8 src/bambu_bus_ams.cpp get_package_stu_motion from /uint8_t ch = ams_ptr->now_filament_num/ to /get_filament_left_char/
-c7ebe42543aab6c1d5460e5a5149b2fee0375e10731009cac7d0149f3ca5c77e src/bambu_bus_ams.cpp online_detect_reset
+3ae2a64017e58f531c0dac7a412fc4e4dabd50bbf3367facd697ab42a384f4ab src/bambu_bus_ams.cpp bambubus_run from /bus_link_went_lost\(/ to /online_detect_reset\(\);/
+f03ab743f03cb88626ca5c2788c46d5a794a29c56b26b0c77fd8c9d5060c70c9 src/bambu_bus_ams.cpp get_package_motion from /uint8_t ch = ams_ptr->now_filament_num/ to /get_filament_left_char/
+56dc627e8c59a7603fea3fbc53ae36c38dad2aec608aa495179c418eca0d0796 src/bambu_bus_ams.cpp get_package_stu_motion from /uint8_t ch = ams_ptr->now_filament_num/ to /get_filament_left_char/
+fa876cf9d89c12038be21f28b150717a19f8ae26a6d8f3b3f9f94a390f300c20 src/bambu_bus_ams.cpp online_detect_reset
 0d3f9a91b8a8e56bb41df51942bdc7a09bcdf3dfa99d594497925a6430ab3810 src/main.cpp RGB_init
-235bdcb8dfd739a7a540641559e629ee8f1eadfb23a9cc2c074dea661958a20a src/main.cpp RGB_update
-7671cb8227762db3930c0a5aa5b9343f2f0ed801a76fb2360fcb067003aa4530 src/main.cpp ams_nvm_save_run
+7f579b0709b94b09e41dedff7c06c3cd0c4281c7030e206f118ff5df1b9fdaac src/main.cpp RGB_update
 4185da39b2e86c2f7e1b4523879043c58466dbf56beaa71dbaec678096291351 src/main.cpp ams_state_boot_restore_deferred
+673fcd37d0e3b491cf1ba27937d9574d19e9ec0e606a25201b97be1cbba8b29e src/main.cpp ams_state_claim_loaded
 9a6f3c06b8a9e87edb72cd53b5688406a6e6355782bfea2dde9974f7c607fbc4 src/main.cpp ams_state_get_loaded
-6eb1907f227c082133a47ea0260925dcf23bd7ccb79e25f8d0b2b0dc29a84af6 src/main.cpp ams_state_printer_command
-8994244f89bf0bc13cf925b88138f9fd0db4259501ce6da1e7342ae4f143db32 src/main.cpp ams_state_set_loaded
-38523f8052566741a115f4529ccf535e1e7b74f91b51f7fc15eb29fccc1d4688 src/main.cpp ams_state_set_unloaded
+0015d5b43a1b887e8f3cfaacee205ed0cbd5a5d80d5fdcae1cc07fc5ebd009b4 src/main.cpp ams_state_printer_command
+2694683730109a3a000d7238c15d7451d4464c16d80110cf87a0e4103a8525b5 src/main.cpp ams_state_set_loaded
+7163d8eb3d573e58a2d7e8e3caf1de7c08ac2ce0ae40846aa9329e05bdaae58e src/main.cpp ams_state_set_unloaded
 0b28c989ccfd35661111a778431b46898bb2aa3ea00c367a4ca393e65feb600b src/main.cpp g_boot_restore
-d74982661f60ba7541a60d97f79efddb699ae26be9b37f6eb297a533c5230852 src/main.cpp main from /ams_init\(\);/ to /Motion_control_init\(\);/
-9011bf6780a8cebf272b837105ec0f1e7964bff9c0d07090ab8484c2dfd3aaff src/main.cpp main from /host_link_offline\(/ to /Motion_control_run\(/
-0e28e1e06670588e32ae3b711f0aaaaeb8fd1a00836de31b125d206041555361 src/main.cpp main from /while \(1\)/ to /ams_nvm_save_run\(\);/
+ad6aae72b1ebf6a818357fcf077b2512d4f35f736d61300f4e3573acb3d983a8 src/main.cpp main from /Motion_control_init\(\);/ to /ams_state_set_unloaded\(g_loaded_ch\);/
+05cd826ca8b1ed190d138d038fedae6826641bc0e542dcf45756627dc4a7e6ae src/main.cpp main from /ams_init\(\);/ to /Motion_control_init\(\);/
+5f492eebfa5a766423493c0747d494bc2cffc4d4bce907a462f03ce327fcc76c src/main.cpp main from /bus_host_device_type = host_device_type_ams/ to /SYS_RGB.set_RGB\(0x38/
+4808ed2561e52a735b1b431f6e9242bef63e0774ad43222efc34872b27c51181 src/many_soft_AS5600.cpp updata_angle
 975e00374a02548bea109bcd2a6cbbfe39bf3e52b959b14eb97f4de49c7adf0c src/watchdog.cpp blackbox_boot
 8d401cb1d93e1cba3008b07d2773f047779c76cf241195be898e6390e510f078 src/watchdog.cpp failsafe_stop from /uint32_t mepc, mcause;/ to /BLACKBOX_W_TRAP_CHECK/
 ca9a182fc659d47ef2521fde7ee22d9f981cffe3abefca534e90f9109e4f5082 src/watchdog.h blackbox_pass_mark
 918d4779eea6e72d186479bffacf4ca81595f16ba1ac6ca68e904e83c2a6903d src/watchdog.h blackbox_phase_set
+571796f02a5ed09a68369cf9649c3a8994eefd7cbfe341e808c570638bb2fb52 src/ws2812.cpp updata from /ws2812_frame_dirty/ to /ws2812_frame_dirty/

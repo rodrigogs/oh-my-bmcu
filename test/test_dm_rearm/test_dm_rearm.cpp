@@ -41,7 +41,7 @@ static bool key_old;          // g_dm_key_old: the key reading is older than DM_
 static _filament_motion printer; // A.filament[ch].motion
 static bool active;           // A.now_filament_num == ch
 static bool unloading;        // filament_pulling_back / filament_redetect
-static uint32_t cnt;          // as5600_count[ch]
+static uint32_t cnt;          // encoder_count(ch)
 static double retract_mm;     // gear travel since gear_reset(), + = retract
 static uint32_t cnt0;
 static int events[4];         // count of each dm_rearm_event
@@ -51,7 +51,8 @@ static uint64_t mark;
 // ---- adapted from Motion_control.cpp: when run()'s DM block starts Stage-2 from IDLE ----
 // ---- anchor: run from /if \(motion == \S+pressure_ctrl_idle\)/ to /dm_s2_enter_state\(/ ----
 // Stage-2 would start on this pass: the DM block in run() only runs for a channel in idle that is
-// not loaded, and from IDLE it goes to S2_PUSH when the key reads 'both'.
+// not loaded, and from IDLE it goes to S2_PUSH when the key reads 'both'. Unlike V11's, that
+// entry is not gated by dm_autoload_gate (it only closes Stage-1; test_dm_stage2 models it).
 static bool stage2_armed(void) { return (loaded == 0u) && (ks == KS_BOTH); }
 
 static void gear_reset(uint32_t c0)
@@ -61,7 +62,7 @@ static void gear_reset(uint32_t c0)
     retract_mm = 0.0;
 }
 
-// The gear moves v_mm_s (> 0 retracts: as5600_count rises) for 1 ms, read once.
+// The gear moves v_mm_s (> 0 retracts: encoder_count rises) for 1 ms, read once.
 static void gear_step(double v_mm_s)
 {
     retract_mm += v_mm_s * 0.001;
@@ -91,7 +92,7 @@ void setUp(void)
 void tearDown(void) {}
 
 // ---- adapted from Motion_control.cpp: motor_motion_run's dm_rearm_pass() call for one channel ----
-// ---- anchor: motor_motion_run from /filament_now_position_enum pos =/ to /as5600_count\[ch\]\);/ ----
+// ---- anchor: motor_motion_run from /const dm_host_t host =/ to /encoder_count\(ch\)\);/ ----
 // One main-loop pass: the AS5600 read (gear_step) comes first in Motion_control_run.
 static dm_rearm_event pass(uint8_t key, double v_mm_s)
 {

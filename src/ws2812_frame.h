@@ -62,7 +62,9 @@ static inline void ws2812_frame_mark_shown(ws2812_frame_t *f)
 // gives the strips their reset (latch) time: every strip has its own data pin, which stays low after
 // a frame's last bit, and no redraw starts until min_gap after the previous one started. Redrawing
 // all five strips takes about 0.26 ms of bit time (29 us for SYS_RGB, 59 us per 2-LED channel strip)
-// plus the short USART ISRs served between strips, so with the 10 ms throttle each pin is low for
+// plus the short bus ISRs and the bus_rx_poll() that updata() runs (through bus_background_ready())
+// before each strip; a strip is put off to a later pass while the bus is busy, which only lengthens
+// its low time. So with the 10 ms throttle each pin is low for
 // more than 9.5 ms between two frames (and for the 10 ms delay after init() before the first one).
 // The datasheets ask for more than 50 us (WS2812B) or 280 us (WS2812B-2020 V1.3). "Never drawn" is
 // its own flag: with last == 0 as the marker, a redraw that started at tick 0 disabled the throttle

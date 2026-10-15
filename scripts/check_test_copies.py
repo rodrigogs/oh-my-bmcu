@@ -12,7 +12,7 @@ must still appear, unchanged, contiguous and as whole lines, in src/<file> (line
 ignored), and
 
     // ---- adapted from main.cpp: <what> ----
-    // ---- anchor: main from /while \(1\)/ to /ams_nvm_save_run\(\);/ ----
+    // ---- anchor: main from /while \(1\)/ to /Flash_background_run\(\);/ ----
 
 marks a copy that was changed for the host, so it cannot be compared (the file it names must exist,
 in src/ or from the repository root). The anchor lines right under it, if any, name the regions of
