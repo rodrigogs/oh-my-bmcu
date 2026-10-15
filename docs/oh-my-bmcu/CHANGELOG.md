@@ -1,7 +1,8 @@
 # oh-my-bmcu changelog
 
-Changes of this fork on top of upstream [V10.5](https://github.com/jarczakpawel/BMCU-C-PJARCZAK)
-(`fbff4e3`, docs up to `9573821`). The printer-facing version bytes are still upstream's 10.50.
+Changes of this fork on top of upstream [V11](https://github.com/jarczakpawel/BMCU-C-PJARCZAK)
+(`5b8e235`, merged on 2026-10-14); the entries below the merge were made on top of V10.5 (`fbff4e3`,
+docs up to `9573821`). The printer-facing version bytes are V11's 11.00 since the merge.
 Details, reasoning and review notes are in each commit message and in the
 [audit backlog](audit-2026-09.md).
 
@@ -21,6 +22,198 @@ limits, DM autoload corner cases), the direction check, the journal page erase a
 Everything under [Since Run 1](#since-run-1-untested-on-hardware) is untested on hardware, and no
 image with any of it (from `08975e1` on) is byte-identical to the tested one: follow the [hardware
 test plan](hardware-test-plan.md) before relying on an image.
+
+Hardware test Run 2 ([log](hardware-test-log.md), 2026-09-28) smoke-tested the image of `68c77c6`
+(sha256 `642dfb208ab8c7b7b2e5486d5a54353e74a617c0963fd90a5cd1967b7dea2857`, the same as
+`cb1d94d`'s), which holds every change under Since Run 1: calibration, a load, a print, its unload
+and a printer power cycle passed; the fault cases are still pending. The [V11
+merge](#merge-upstream-v11-5b8e235-untested-on-hardware) came after it: no merged image has run on
+the A1, and the `cb1d94d` image is the rollback.
+
+### Merge upstream V11 (`5b8e235`) (untested on hardware)
+
+Upstream V11 (released 2026-10-04; `5b8e235` rebuilt its `firmwares/` on top of the `v11` tag
+`7cba9a7`, same `src/`) merged into the fork at `cb1d94d` (merge base `9573821`) on 2026-10-14.
+Where V11's rework covers a fork fix, the merge takes V11's code; the fork fixes V11 lacks are
+re-applied on top of it, each deviation from V11 with code evidence. The merged tree then had a
+seven-lens review (lost fixes, motion safety, bus protocol, NVM, V11 parity, auto-merge hazards,
+build and tests), whose 17 confirmed findings were applied before the merge was committed. Local
+gate, and CI at the merge commit `2e53ecb` (run 38677577919, all four jobs green): 21 host suites
+with 467 cases pass under `env:native` and `env:native_asan`, `pio check` reports no high or medium
+finding, and `check_test_copies.py` reports 0 errors (33 verbatim copies, 72 adapted, 67 of them
+locked to 103 `src/` regions).
+
+#### Visible behaviour changes
+
+- The printer shows the AMS version 11.00.00.00 (V11's `{0x00,0x00,0x00,0x0B}` + "AMS08") instead
+  of 10.50.00.00; the serial and discovery bytes are unchanged with AMS_A.
+- The first-boot calibration is V11's and fail-closed: a step that times out or ends less than
+  190 mV below rest, a range under V11's minimum, or a buffer that does not settle at the end aborts
+  the run with two dim red blinks on every buffer LED, saves nothing and leaves every buffer without
+  drive until a calibration succeeds (power-cycle to calibrate again). It needs every switch empty
+  (its closing release phase; its idle baseline also refuses a switch at 1.40 V or more). The
+  fork's fallback range and its fast red flash at boot are gone: Run 1's first calibration, which
+  hit the fallback, would abort on V11.
+- The 5 s recalibration hold clears only the calibration and motion records: filament slots and
+  the loaded channel stay. It ignores a buffer without a valid calibration.
+- A connected buffer without a valid calibration shows a steady dim red buffer LED; the mid-buffer
+  orange shows only when every channel is empty; the SYS LED is white on every online pass.
+- The direction test (V11's) skips a channel with filament at its switches, which then keeps no
+  direction and does not drive until a boot with its switches empty.
+- A failed DM autoload retracts first (up to 1.5 s, or 1.5 s plus 1.5 s after the third buffer
+  abort, at most 120 mm), then stays red with the motor off; the pull back ends on empty switches
+  after 5 fresh ADC publications, not one reading.
+- A printer pull back on a channel without a valid calibration ends at once with the unload-fault
+  blink, instead of after its 9.9 s budget.
+- At boot a restored loaded channel with empty switches or no valid calibration is unloaded (V11),
+  in both A1 images.
+- Flash writes start without the 500 ms debounce or a quiet-gap wait, also while the printer link
+  is down; a failed step stops every NVM write until the next boot, with no retry.
+- LED strips are not drawn while the bus is busy or the flash clock is slowed.
+- The A1 image grows from 52,716 to 59,156 bytes (the #148 A/B image to 59,176 bytes).
+
+#### Bus with the printer
+
+- From V11: USART1 RX through a 2 KB DMA ring that `bus_rx_poll()` parses in the main loop (no
+  per-byte RX interrupt), a 3-buffer receive queue (two completed frames wait while a reply is
+  pending and are answered on later passes), TX by DMA with the receiver off and a 100 ms abort,
+  the heartbeat fast path, the frame minima (0x03 12, 0x04 13, 0x05 8 or 26, 0x08 45 bytes, 0x218
+  34 data bytes), set_motion's before_on_use rule and `ams_state_claim_loaded`, the motion
+  replies' meters from the odometer, the version bytes, and the AMS_AUTO addressing
+  (`ams_addressing.h`, not used by the A1 env).
+- Re-applied on V11: the 200 us stall threshold (`BUS_RX_RESYNC_GAP_TICKS`) in `bus_rx_poll()`
+  instead of V11's 11.3 ms, measured between polls; the parser reset at the TX boundary as a ring
+  mark (`rx_mark_tx`, `rx_reached`), also on the heartbeat fast path (`rx_mark_inside`, a review
+  finding: the fast path skipped past the mark and ate the head of the printer's next frame); the
+  latched link state (`bus_link.h`) in `bambubus_run` and `ahubus_run`, where V11 still had the 119 s
+  flip; the online-detect re-arm after a link loss, in fixed addressing only; the set-filament save
+  moved into the two handlers, so only data applied to this unit is saved; the AHUB short-header
+  check; the reply-layout static_asserts; the host hook for the UID base; `= {}` initialisers for
+  `-Werror`.
+- Dropped: the interrupt-driven RX parser with its gap and overrun resync (DMA RX removes the
+  cause); `src/bambubus_frame_len.h` and `src/bambubus_set_filament.h` (V11's minima, the stricter
+  45 / 34 for set-filament, since they never read outside the frame and the A1 frame was never
+  captured); the AHUB `ahub_set_data_fits` / `ahub_now_filament_num` helpers (V11's literals give the
+  same bounds, and V11 drops a request with a bad channel); `host_link_offline()` (`src/host_link.h`
+  keeps only the host-type defines; V11's inline decision gives the same result on the A1); a
+  heartbeat cut by our TX no longer counts as seen.
+
+#### Flash
+
+- From V11: writes as background jobs that `Flash_background_run()` carries out one page erase or
+  one half-word program per main-loop pass, started only while `bus_background_ready()`, with a
+  sticky `g_flash_fault` and no retry; the flash clock halved around every flash operation; the
+  header magic programmed last; filament page rollover through a scratch page (page 14) that the boot
+  replays; the loaded-channel log on pages 6-13 with tag `0xA6`, a channel filter, and a slot search
+  that never erases the page holding the newest record; the CAL v2 record (64-byte payload with the
+  DM key thresholds, valid mask in bits 8-11, sequence in bits 16-31) on page 0 and page 15, and a
+  calibration clear that writes an empty record. `Flash_NVM_full_clear()` has no caller left.
+- Re-applied on V11: the strict free-slot test (`0xE339E339` only) at the two places that pick a
+  slot, since V11's lenient one would program over a `0xFFFFFFFF` word and set the sticky fault;
+  `src/nvm_records.h` and `src/nvm_journal.h` adapted to V11's rules (`nvm_sta_find_slot`, the cursor
+  after the last used slot, the CAL rsv helpers); the page-layout static_asserts.
+- Dropped: the quiet-window scheduling with its 500 ms debounce, retry back-off and give-up counters
+  (`src/nvm_save_sched.h`, `g_state_job`, `g_fil_job`); the erase in the write path; the torn
+  loaded-channel slot skip and the failed-retry fix, which V11's slot search and job model supersede;
+  the strict erase verification (V11's lenient one only accepts more).
+- Layout: a CAL v1 record or a tag `0xA5` loaded-channel record of a pre-merge image is ignored, so a
+  non-erasing programmer leads to a calibration and no restored channel (BMCU-Flasher erases the NVM
+  anyway).
+
+#### Calibration
+
+- From V11: the fail-closed run with a per-channel valid mask, readings outside 0.05-3.25 V refused,
+  an idle baseline of 60 samples (40 mV spread at most, every switch below 1.40 V), a release phase
+  (every buffer within 80 mV of rest and every switch empty for 1.2 s), the 25 mV rest window and
+  700 ms settle, the DM key thresholds in the record, no NVM wipe and no diagnostic colour steps,
+  float averaging.
+- Re-applied on V11: the 190 mV first-step floor, at capture and when a stored record is loaded
+  (`src/mc_pull_cal_range.h`, trimmed to it).
+- Dropped: the fallback range and its boot flash (`2ba70e9`), `src/mc_pull_cal_mean.h` (V11 averages
+  in float), the fork's NVM wipe at calibration.
+
+#### Motor and sensors
+
+- From V11: the int64 AS5600 odometer (`encoder_count()` is its low 32 bits) and
+  `Motion_control_filament_meters()`; the AS5600 valid mask; `MOTOR_get_dir`, with a watchdog feed
+  per 10 ms step added; the autoload fail retracts; the Stage-1 gate (closed while the printer or an
+  auto-unload moves the channel); the pull back's 5-publication key debounce; the calibration-valid
+  gates (PWM 0, the dim red LED, the direction test); the all-empty condition of the mid-buffer
+  orange; `TIM_Prescaler = 0` for V11's slower APB1 (the PWM stays 72 kHz).
+- Re-applied on V11: the fork's metre API over V11's counts; every motion limit, the jam latch, the
+  auto-unload guards (now also off on a channel without a valid calibration or with the DM fail
+  latch), the idle push limit, the stale-ADC stop, the DM re-arm and Stage-2 carry-over, the
+  link-down rule and the watchdog feeds; the fixed pull back length (V11 still had the
+  before_pull_back accumulator); a finished printer load clears the DM fail latch (V11 never does).
+- New fork deviations from the review: the recalibration hold skips a buffer without a valid
+  calibration (its raw voltage fired the hold after every boot, a clear-and-reboot loop); a printer
+  pull back on such a channel ends at once.
+- Dropped: the fork's direction probe (`as5600_dir_probe_*`), and V11's `dm_idle_empty`, its 100 ms
+  key drop and its printer-load block (the fork's DM re-arm covers them).
+
+#### ADC
+
+- From V11: `ADC_DMA_generation()` and the ADC divider /4 on V11's 72 MHz APB2, the same 18 MHz ADC
+  clock as before (audit #29 unchanged).
+- Kept: the restart after a DMA transfer error and every 500 ms while stale, the 10 ms calibration
+  waits and the watchdog feeds.
+
+#### Main loop, watchdog and faults
+
+- The main loop is V11's (`bus_rx_poll`, the two protocols, `send_package`, the host decision and
+  SYS LED, the saves on dirty flags while the bus is idle, motion, `Flash_background_run`, LEDs) with
+  the fork's watchdog feed and fault-record phases; a new phase `BLACKBOX_PHASE_FLASH` (12) covers
+  the flash step, and the RX parser also runs inside the NVM, FLASH and RGB phases.
+- The boot keeps the fork's restore of the loaded channel and its A/B image, plus V11's check after
+  `Motion_control_init`.
+- `watchdog_cfg.h` re-checks the 100 ms feed gap against V11's flash paths; two feeds were added to
+  the recalibration and one per step to `MOTOR_get_dir`.
+- `RGB_update` and `WS2812_class::updata` skip while the bus is busy or the flash clock is slowed,
+  before the 10 ms throttle, so a pass that cannot draw does not use up the gap.
+
+#### Tooling and CI
+
+- CI's `reproduce-upstream` rebuilds 24 V11 images from `5b8e235` (`BUILD_ONLY_MIN=1`) and compares
+  them with its `firmwares/manifest.txt` (`--expect-count 24`); the `firmwares/` mirror is now V11's
+  (1,020 images).
+- `build_all_firmwares.sh` follows V11's matrix: `BUILD_ONLY_MIN=1` (24 images: AMS_AUTO and AMS_A at
+  0.095 m) replaces `BUILD_ONLY_SOLO=1`, which now stops with an error.
+- `check_fw_env.py` accepts `BAMBU_BUS_AMS_NUM` 0-4.
+- CI gates: `IMAGE_BUDGET_BYTES` 57,344 to 59,392 B and `RAM_HEADROOM_FLOOR_BYTES` 4,096 to 2,048 B
+  (measured 2,524 B: V11's 2 KB RX DMA ring); the ELF check also requires `DMA1_Channel4_IRQHandler`
+  and `DMA1_Channel5_IRQHandler`; the RGB compile-smoke line builds AMS_AUTO with DM=1, the largest
+  published image (60,752 B, under the 61,440 B cap).
+- `env:native` builds with `-ffp-contract=off`, so the Mac computes what the x86_64 runner does (a
+  review finding: a new calibration test passed only with fused multiply-add).
+- `.gitignore` adds V11's `.idea/`.
+
+#### Host tests
+
+- Deleted: `test_bambubus_frame_len` and `test_bambubus_set_filament` (their cases moved into
+  `test_bambubus_frames`), `test_mc_pull_cal_mean`, `test_nvm_save_sched`.
+- Rewritten: `test_bus_rx_parser` and `test_bus_rx_fuzz` (V11's parser, the ring model, the TX mark,
+  the stall reset), `test_host_link` (V11's inline decision), `test_mc_pull_cal_range` (the floor,
+  the record check, the recalibration skip), `test_nvm_journal` and `test_nvm_records` (V11's jobs
+  with a power cut at every step, the strict slot test, the CAL v2 codec), `test_boot_restore` (V11's
+  state API and boot check).
+- Extended: `test_bambubus_frames` (version 11.00, V11's minima, the queued packet),
+  `test_ahub_frame` (V11's literals), `test_dm_stage2` (fail retracts, the Stage-1 gate),
+  `test_motion_limits` (the odometer, the 5-publication pull back end, the uncalibrated pull back),
+  `test_auto_unload` (the V11 gates), `test_as5600_sample` (V11's driver; the probe cases deleted),
+  `test_ws2812_frame` (the bus and flash-clock gate, the dim red), `test_blackbox` (phase 12).
+- 21 suites (25 before), 467 cases.
+
+#### Images
+
+- `a1_solo_autoload_rgboff` 59,156 bytes, sha256
+  `d76731bd8fcebbe7756a9c1c66ee539e7ae29bfd955d0a3b035ca835a3a8d61f`;
+  `a1_solo_autoload_rgboff_no_boot_restore` 59,176 bytes, sha256
+  `b571f812fb0c545b88f2e34de4607e832c9fb11909352b5b67a54199c5502a40`. Built locally on macOS
+  (`toolchain-riscv-mac` `e6360e0f`); CI's Linux build of `2e53ecb` (run 38677577919) gave the same
+  hashes.
+- Not in the merge (follow-ups): V11's heartbeat fast path can still fire inside a frame's payload
+  and lose more than one frame (a fix with a host test and an upstream issue); a `Flash_fault()`
+  accessor for the sticky flash fault; audit #29.
 
 ### Since Run 1 (untested on hardware)
 

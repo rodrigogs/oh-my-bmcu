@@ -101,3 +101,33 @@ User report (2026-09-28): "deu tudo certo" (everything went fine) for the print,
 power cycle. The smoke test passed, so this image can replace the Run 1 image in normal use. The
 fault cases of sections 4, 5, 7, 9 and 10, which need the spool or the filament held on purpose,
 are still pending.
+
+## Run 3: 2026-10-15, image `2e53ecb` (the upstream V11 merge)
+
+The first image after the merge of upstream V11 (`5b8e235`): V11's DMA bus parser and packet queue,
+background flash journal, fail-closed calibration and direction test, with the fork's limits and
+guards re-applied on top (see the [changelog](CHANGELOG.md)). Nothing of it has run on the printer
+yet: the smoke test of the [plan](hardware-test-plan.md) decides whether it replaces the Run 2
+image in normal use.
+
+- Image: `env:a1_solo_autoload_rgboff` built locally at `2e53ecb`, sha256
+  `d76731bd8fcebbe7756a9c1c66ee539e7ae29bfd955d0a3b035ca835a3a8d61f` (59,156 bytes), the same as
+  CI artifact `oh-my-bmcu-a1-2e53ecb…-push` (run 38677577919, all four jobs green, 24 upstream V11
+  images reproduced).
+- Rollback: the Run 2 image, sha256 `642dfb20…` (52,716 bytes), a build of `68c77c6` or `cb1d94d`.
+- Flash: BMCU-Flasher v1.3 CLI (its own virtualenv, pyserial 3.5), `--mode usb --verify-last`,
+  BMCU on USB-C (CH340 `1a86:7523`, chip 0x31/0x19, UID `cd-ab-5c-90-74-be-9d-fa`), 2026-10-15
+  00:46 UTC-3: full 64 KB erase, 1057/1057 blocks programmed and read back, 13.6 s, then the
+  flasher's reset. The flashing session did not check that the printer was unplugged and the
+  channels empty (the user prepared the unit); section 0 of the plan asks for both, and V11's
+  first calibration needs every channel empty.
+
+| Section | Step | Result |
+|---|---|---|
+| 0 | sha256 noted (local build = CI artifact); BMCU on USB-C; 1057/1057 blocks verified | pass |
+| 0 | Filament out; printer unplugged | not checked by the flashing session |
+| 1 | First boot: V11 calibration with every channel empty, no magenta or blue flash, green end (a red abort means power-cycle and recalibrate) | pending |
+| 1 | Reconnected with the printer unplugged, then powered on: the printer shows AMS A, `ams/0` 11.00.00.00 `AMS08`, no HMS beyond the known 0500-0400-0001-0044 | pending |
+| 2 | Slot 1 set from OrcaStudio, kept across a printer power cycle | pending |
+| 3 | Load of slot 1, a test print, the unload at its end | pending |
+| 2, 4 to 10 | Seven slot edits then a power cycle, recalibration keeps the slots, tangle, unload limits, #148 A/B, DM autoload, load and idle push limits, ADC readings, whole print with no reset | pending |

@@ -1,7 +1,7 @@
 > [!NOTE]
 > **oh-my-bmcu**: a fork of [jarczakpawel/BMCU-C-PJARCZAK](https://github.com/jarczakpawel/BMCU-C-PJARCZAK) for a single BMCU on a Bambu Lab A1.
 > What is different, how to build and flash, and the audit backlog are in [docs/oh-my-bmcu](docs/oh-my-bmcu/README.md).
-> Everything below is the upstream README.
+> Everything below is the upstream README, as of upstream V11 (`5b8e235`). Its advice is upstream's: for example it recommends AMS_AUTO for new installs, while this fork's A1 image keeps AMS A.
 
 # BMCU Firmware – Calibration and Compatibility Notes
 
