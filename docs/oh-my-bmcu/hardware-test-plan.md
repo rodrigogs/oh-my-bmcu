@@ -437,6 +437,32 @@ load the slot again before the power cycles.
       first-boot calibration and after the 5 s recalibration hold. That blink means the readings
       went stale for more than 100 ms and every motor is braked.
 
+## Optional: bench test over USB-C
+
+The CH340 behind the USB-C port is wired to USART1 (PA9/PA10), the same UART the bus uses through
+the RS485 transceiver, so a computer can play the printer on the bench: no 24 V, so no motor moves,
+but the bus parser, the replies, the online-detect handshake, the filament records and the NVM can
+be exercised and read back. Frames follow `src/bambu_bus_ams.cpp` and `src/crc_bus.c` (CRC8 init
+0x66, CRC16 init 0x913D; short frames `3D C5 len crc8 cmd … crc16`, long frames
+`3D 05 number(2) length(2) crc8 target 0x0700 source 0x0600 type(2) data crc16`; 8 data bits, even
+parity, 1 stop bit). A heartbeat (`3D C5 07 crc8 20 crc16`) every 200 ms keeps the link; the SYS
+LED turns white with the link and red about 1 s after the heartbeats stop.
+
+- Opening the serial port pulses the reset line (RTS, as the flasher's auto-detect found), so the
+  BMCU reboots at every open: without a saved calibration the bus answers only after about 32 s,
+  with one after about 12 s.
+- macOS's built-in CH340 driver turns every rate between 1.2 and 1.475 Mbps into 1.2 Mbps. The BMCU
+  decodes those frames, but the computer cannot read the 1.25 Mbps replies. For a bench session,
+  build the image once with `BUS_BAUD` set to 1,200,000 in `src/_bus_hardware.cpp` (do not commit
+  it), flash it, run the session at 1,200,000, then flash the release image again and recalibrate.
+  A serial adapter that does 1.25 Mbps (FT232H, CP2102N) on the bus's A/B lines would avoid the
+  bench build.
+- What the 2026-10-15 session checked, in order: version 0x103, serial 0x402, MC online 0x21A, read
+  filament 0x211 for the four slots, motion poll 0x04, online-detect probe (prefix 0x0C) and confirm
+  (0x0A), set filament 0x218 and 0x08 with read-back, requests glued to a heartbeat, a 3 s heartbeat
+  pause followed by a new probe (0x0C again), and an RTS reset followed by the read-back of both
+  slots.
+
 ## Optional: WCH-Link
 
 On the CH32V203's SWD pins (PA13 = SWDIO, PA14 = SWCLK), with WCH's OpenOCD and the BMCU on USB-C.

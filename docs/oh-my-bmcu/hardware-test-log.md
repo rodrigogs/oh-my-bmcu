@@ -126,8 +126,32 @@ image in normal use.
 |---|---|---|
 | 0 | sha256 noted (local build = CI artifact); BMCU on USB-C; 1057/1057 blocks verified | pass |
 | 0 | Filament out; printer unplugged | not checked by the flashing session |
-| 1 | First boot: V11 calibration with every channel empty, no magenta or blue flash, green end (a red abort means power-cycle and recalibrate) | pending |
-| 1 | Reconnected with the printer unplugged, then powered on: the printer shows AMS A, `ams/0` 11.00.00.00 `AMS08`, no HMS beyond the known 0500-0400-0001-0044 | pending |
+| 1 | First boot: V11 calibration with every channel empty, green end | pass on the bench (02:00, after an RTS reset): yellow baseline, the four blue and red steps confirmed, two green blinks, then every buffer LED steady amber (calibrated centre, channel empty); the first boot after each flash timed out instead (nobody moved the buffers) and the unit came up without drive, as the fail-closed rule says |
+| 1 | SYS LED red until the first heartbeat, then white; red again when the heartbeats stop | pass on the bench with the Mac as the host: white about 12 s after a reset (boot plus the direction test without 24 V), red about 1 s after the heartbeats stopped |
+| 1 | No magenta or blue flash at boot | not watched |
+| 1 | Reconnected with the printer unplugged and no filament at any switch, then powered on: the printer shows AMS A, `ams/0` 11.00.00.00 `AMS08`, no HMS beyond the known 0500-0400-0001-0044 | pending |
 | 2 | Slot 1 set from OrcaStudio, kept across a printer power cycle | pending |
 | 3 | Load of slot 1, a test print, the unload at its end | pending |
 | 2, 4 to 10 | Seven slot edits then a power cycle, recalibration keeps the slots, tangle, unload limits, #148 A/B, DM autoload, load and idle push limits, ADC readings, whole print with no reset | pending |
+
+Bench session over USB-C (2026-10-15, 01:40 to 02:00), with the Mac as the printer (see the plan's
+[bench test](hardware-test-plan.md#optional-bench-test-over-usb-c)):
+
+- The CH340 on the USB-C port shares USART1 with the bus, so the Mac can send BambuBus frames. The
+  Mac's CH340 driver only produces 1.2 Mbps near the bus rate: the BMCU decoded the Mac's frames,
+  but the Mac could not read the BMCU's 1.25 Mbps replies. So the bus suite ran on a bench-only
+  build of `2e53ecb` with `BUS_BAUD` 1,200,000 (sha256 `e3fbcd5b…`, one constant changed, never
+  committed), flashed at 01:43 and replaced by the release image `d76731bd…` at 01:45 (1057/1057
+  blocks verified again).
+- Bus suite at 1.2 Mbps, 25/25 steps, replies about 4 ms after each request (USB latency): version
+  `00 00 00 0B` + `AMS08` (11.00.00.00), serial `0EA0…` with the 16 ID bytes, MC online, the four
+  slots at the PETG defaults, two motion polls (22.0 C, 20 %, no channel present), the online-detect
+  handshake (probe answered with prefix 0x0C, confirm with 0x0A, a further probe ignored), set
+  filament by the long 0x218 frame (slot 1: GFL99 PLA white 190-230 C) and by the short 0x08 frame
+  (slot 2: GFB00 ABS green 240-260 C), both read back exactly, 20 of 20 requests glued to a
+  heartbeat answered, a 3 s heartbeat pause re-armed the online detect (prefix 0x0C again), and
+  after an RTS reset both slots read back unchanged (the background flash write) and the handshake
+  ran again.
+- Boot timing: with no saved calibration the first reply came 32 s after a reset (the 30 s
+  calibration timeout plus the direction test); with the calibration saved, about 12 s.
+- Not covered on the bench: motors (no 24 V on USB), the printer's own frame lengths, the HMS.
